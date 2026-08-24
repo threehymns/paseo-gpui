@@ -1,12 +1,13 @@
 /**
- * A Waku-style desktop app, rendered natively on the GPU.
+ * A Paseo client, rendered natively on the GPU.
  *
  * Layout, palette, and chrome follow https://github.com/egoist/waku:
  * transparent titlebar, traffic lights in the sidebar, graphite surfaces,
- * composer chips, and the workspace footer. Data is hardcoded.
+ * composer chips, and the workspace footer. All data is live from a Paseo
+ * daemon (https://github.com/getpaseo/paseo) over WebSocket.
  *
- * Run with:  cd examples && bun --hot chat.tsx
- * Slow CPU:  THROTTLE=utility bun --hot chat.tsx
+ * Run with:        bun --hot chat.tsx
+ * Remote daemon:   PASEO_URL=wss://host/ws PASEO_PASSWORD=... bun --hot chat.tsx
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -27,6 +28,7 @@ import {
 import { SafeMdxRenderer } from 'safe-mdx'
 import { mdxParse } from 'safe-mdx/parse'
 import type { Root } from 'mdast'
+import type { PaseoAgentConfig, PaseoClient } from '@getpaseo/client'
 import iconCompose from './assets/icons/compose.svg' with { type: 'file' }
 import iconSearch from './assets/icons/search.svg' with { type: 'file' }
 import iconSidebar from './assets/icons/panel-left.svg' with { type: 'file' }
@@ -37,24 +39,38 @@ import iconFolder from './assets/icons/folder.svg' with { type: 'file' }
 import iconSettings from './assets/icons/settings.svg' with { type: 'file' }
 import iconGitBranch from './assets/icons/git-branch.svg' with { type: 'file' }
 import iconLaptop from './assets/icons/laptop.svg' with { type: 'file' }
-import iconLockOpen from './assets/icons/lock-open.svg' with { type: 'file' }
 import iconLock from './assets/icons/lock.svg' with { type: 'file' }
 import iconList from './assets/icons/list.svg' with { type: 'file' }
 import iconZap from './assets/icons/zap.svg' with { type: 'file' }
 import iconPencil from './assets/icons/pencil.svg' with { type: 'file' }
 import iconChevronDown from './assets/icons/chevron-down.svg' with { type: 'file' }
-import iconChevronRight from './assets/icons/chevron-right.svg' with { type: 'file' }
 import iconListFilter from './assets/icons/list-filter.svg' with { type: 'file' }
 import iconSparkle from './assets/icons/sparkle.svg' with { type: 'file' }
 import iconWrench from './assets/icons/wrench.svg' with { type: 'file' }
 import iconSend from './assets/icons/arrow-up.svg' with { type: 'file' }
-import iconCopy from './assets/icons/copy.svg' with { type: 'file' }
 import iconCheck from './assets/icons/check.svg' with { type: 'file' }
-import iconRetry from './assets/icons/rotate-ccw.svg' with { type: 'file' }
-import iconThumbsUp from './assets/icons/thumbs-up.svg' with { type: 'file' }
-import iconThumbsDown from './assets/icons/thumbs-down.svg' with { type: 'file' }
-import iconShare from './assets/icons/share.svg' with { type: 'file' }
-import iconMore from './assets/icons/ellipsis.svg' with { type: 'file' }
+import {
+  DAEMON_URL,
+  applyAgentUpdate,
+  applyTimelineItem,
+  basename,
+  buildTurns,
+  createDaemonClient,
+  defaultModelValue,
+  displayName,
+  errorMessage,
+  findModel,
+  groupLabel,
+  modelChoices,
+  relativeTime,
+  sortAgents,
+  type AgentEntry,
+  type ProviderEntry,
+  type ProviderMode,
+  type ProviderModel,
+  type ToolName,
+  type Turn,
+} from './paseo'
 
 const C = {
   canvas: '#1A1A1A',
@@ -75,6 +91,10 @@ const C = {
   inverse: '#E7E9EC',
   onInverse: '#17181C',
   codeText: '#E0A882',
+  ok: '#58B368',
+  running: '#4C8DF6',
+  warn: '#D9A050',
+  danger: '#E5484D',
 }
 
 const SIDEBAR_WIDTH = 252
@@ -102,30 +122,35 @@ const ICONS = {
   settings: realAssetPath(iconSettings),
   gitBranch: realAssetPath(iconGitBranch),
   laptop: realAssetPath(iconLaptop),
-  lockOpen: realAssetPath(iconLockOpen),
   lock: realAssetPath(iconLock),
   list: realAssetPath(iconList),
   zap: realAssetPath(iconZap),
   pencil: realAssetPath(iconPencil),
   chevronDown: realAssetPath(iconChevronDown),
-  chevronRight: realAssetPath(iconChevronRight),
   listFilter: realAssetPath(iconListFilter),
   sparkle: realAssetPath(iconSparkle),
   wrench: realAssetPath(iconWrench),
   send: realAssetPath(iconSend),
-  copy: realAssetPath(iconCopy),
   check: realAssetPath(iconCheck),
-  retry: realAssetPath(iconRetry),
-  thumbsUp: realAssetPath(iconThumbsUp),
-  thumbsDown: realAssetPath(iconThumbsDown),
-  share: realAssetPath(iconShare),
-  more: realAssetPath(iconMore),
 } as const
 
 type IconName = keyof typeof ICONS
 
 function Icon({ name, size = 14, color }: { name: IconName; size?: number; color: string }) {
   return <svg src={ICONS[name]} style={{ width: size, height: size, flexShrink: 0, color }} />
+}
+
+const TOOL_ICONS: Record<ToolName, IconName> = {
+  bash: 'wrench',
+  read: 'search',
+  edit: 'pencil',
+  write: 'pencil',
+  search: 'search',
+  fetch: 'zap',
+  worktree: 'gitBranch',
+  subagent: 'sparkle',
+  plan: 'list',
+  generic: 'wrench',
 }
 
 const CHAT_THEME = {
@@ -155,204 +180,129 @@ const CHAT_THEME = {
   },
 }
 
-interface Conversation {
-  id: string
-  title: string
-  group: string
-  project: string
-  time: string
+function oneLine(text: string | undefined, limit = 140): string | undefined {
+  if (!text) return undefined
+  const flat = text.replace(/\s+/g, ' ').trim()
+  return flat.length > limit ? `${flat.slice(0, limit - 1)}…` : flat || undefined
 }
 
-const MODELS = [
-  { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', group: 'DeepSeek', icon: 'sparkle' as const },
-  { id: 'deepseek-v4', label: 'DeepSeek V4', group: 'DeepSeek', icon: 'sparkle' as const },
-  { id: 'opus-4.6', label: 'Claude Opus 4.6', group: 'Claude', icon: 'sparkle' as const },
-  { id: 'sonnet-4.6', label: 'Claude Sonnet 4.6', group: 'Claude', icon: 'sparkle' as const },
-  { id: 'gpt-5.4', label: 'GPT-5.4', group: 'OpenAI', icon: 'sparkle' as const },
-  { id: 'grok-4', label: 'Grok 4', group: 'xAI', icon: 'sparkle' as const },
-]
+// ---- daemon hooks ----------------------------------------------------------
 
-const REASONING = [
-  { id: 'high', label: 'High', hint: 'Default' },
-  { id: 'medium', label: 'Medium', hint: undefined },
-  { id: 'low', label: 'Low', hint: undefined },
-]
+type ConnStatus = 'connecting' | 'connected' | 'error'
 
-const ACCESS = [
-  {
-    id: 'ask',
-    label: 'Supervised',
-    description: 'Ask before every tool call',
-    icon: 'lock' as const,
-  },
-  {
-    id: 'edits',
-    label: 'Auto-accept edits',
-    description: 'Edit files without asking',
-    icon: 'pencil' as const,
-  },
-  {
-    id: 'auto',
-    label: 'Auto',
-    description: 'Run most tools without asking',
-    icon: 'sparkle' as const,
-  },
-  {
-    id: 'full',
-    label: 'Full access',
-    description: 'No permission prompts',
-    icon: 'lockOpen' as const,
-  },
-]
+interface DaemonView {
+  client: PaseoClient
+  status: ConnStatus
+  error: string | null
+  agents: AgentEntry[]
+  providers: ProviderEntry[]
+}
 
-const PROJECTS = [
-  { id: 'waku', label: 'waku' },
-  { id: 'gpuix', label: 'gpuix' },
-  { id: 'none', label: 'No project' },
-]
+function useDaemon(): DaemonView {
+  const [client] = useState(createDaemonClient)
+  const [status, setStatus] = useState<ConnStatus>('connecting')
+  const [error, setError] = useState<string | null>(null)
+  const [agents, setAgents] = useState<AgentEntry[]>([])
+  const [providers, setProviders] = useState<ProviderEntry[]>([])
 
-const WORKSPACES = [
-  { id: 'local', label: 'Local', icon: 'laptop' as const },
-  { id: 'worktree', label: 'New worktree', icon: 'gitBranch' as const },
-]
+  useEffect(() => {
+    let disposed = false
+    let setupDone = false
+    const unsubs: (() => void)[] = []
 
-const BRANCHES = [
-  { id: 'main', label: 'main' },
-  { id: 'feat-selectors', label: 'feat/selectors' },
-  { id: 'waku-clone', label: 'waku-clone' },
-]
+    const runSetup = async () => {
+      if (setupDone || disposed) return
+      setupDone = true
+      setStatus('connected')
+      setError(null)
 
-const CONVERSATIONS: Conversation[] = [
-  { id: 'c1', title: 'give me a quick overview', group: 'Yesterday', project: 'waku', time: '16m' },
-  {
-    id: 'c2',
-    title: 'Native SDK vs GPUI comparison',
-    group: 'Yesterday',
-    project: 'No project',
-    time: '14h',
-  },
-  {
-    id: 'c3',
-    title: 'Vercel Labs scriptc implementat...',
-    group: 'Yesterday',
-    project: 'No project',
-    time: '15h',
-  },
-  {
-    id: 'c4',
-    title: 'check if any memory optimizatio...',
-    group: 'This Month',
-    project: 'waku',
-    time: '2d',
-  },
-]
+      unsubs.push(
+        client.agents.subscribe((update) => setAgents((prev) => applyAgentUpdate(prev, update))),
+      )
+      const sort = [{ key: 'updated_at' as const, direction: 'desc' as const }]
+      const filter = { includeArchived: false }
+      await client.agents.list({ scope: 'active', filter, sort, subscribe: {} })
+      const page = await client.agents.list({ scope: 'active', filter, sort })
+      if (!disposed) setAgents(sortAgents(page.entries.map((entry) => entry.agent)))
 
-const OVERVIEW = `**Waku** is a native control plane for local coding agents. Rust plus GPUI. One window, no Electron.`
-
-const ARCHITECTURE = `The desktop is an RPC client. The daemon owns provider sessions over a WebSocket.`
-
-const SELECTION = `Selection is rebuilt from the paint pass. Each string registers in document order, so a drag can cross elements.`
-
-const SELECTION_CODE = `pub fn resolve_spans(
-    elements: &[(&str, &str)],
-    a: (usize, usize),
-    b: (usize, usize),
-) -> Vec<Span> {
-    let (start, end) = if a <= b { (a, b) } else { (b, a) };
-    let mut spans = Vec::new();
-    for (ei, (key, text)) in elements.iter().enumerate().take(end.0 + 1).skip(start.0) {
-        let from = if ei == start.0 { start.1 } else { 0 };
-        let to = if ei == end.0 { end.1 } else { text.len() };
-        if from < to {
-            spans.push(Span { key: key.to_string(), range: from..to });
-        }
+      const snapshot =
+        (await client.providers.waitForReady({ timeoutMs: 30_000 }).catch(() => null)) ??
+        (await client.providers.snapshot())
+      if (!disposed) setProviders(snapshot.entries)
+      unsubs.push(client.providers.subscribe((update) => setProviders(update.entries)))
     }
-    spans
-}`
 
-const GUTTER = `The gutter width now follows the largest line number, so a five-digit line no longer hits the accent bar.`
+    void (async () => {
+      try {
+        await Promise.race([
+          client.connect(),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error(`Timed out connecting to ${DAEMON_URL}`)), 8_000),
+          ),
+        ])
+        await runSetup()
+      } catch (err) {
+        if (!disposed && !setupDone) {
+          setError(errorMessage(err))
+          setStatus('error')
+        }
+        // The SDK keeps reconnecting in the background; the poller below adopts
+        // the session if the daemon comes back.
+      }
+    })()
 
-const GUTTER_DIFF = [
-  'diff --git a/packages/native/src/diff/mod.rs b/packages/native/src/diff/mod.rs',
-  'index 8f2a1c4..d91b7e0 100644',
-  '--- a/packages/native/src/diff/mod.rs',
-  '+++ b/packages/native/src/diff/mod.rs',
-  '@@ -78,12 +78,15 @@ impl FileDiff {',
-  ' /// Width of one line-number gutter, fitted to the largest line number.',
-  '-pub fn gutter_width(file: &FileDiff) -> f32 {',
-  '-    GUTTER_WIDTH',
-  '+pub fn gutter_width(file: &FileDiff, metrics: &Metrics) -> f32 {',
-  '+    let digits = file.max_line.max(1).ilog10() + 1;',
-  '+    (digits as f32 * 6.6 + 8.0 + 6.0).max(metrics.diff_gutter_width)',
-  ' }',
-].join('\n')
+    const poller = setInterval(() => {
+      if (client.getConnectionState().status === 'connected') void runSetup()
+    }, 1_500)
 
-const HOT_RELOAD = `**No.** A \`.node\` cannot unload. The loop rebuilds and restarts.`
+    return () => {
+      disposed = true
+      clearInterval(poller)
+      for (const unsub of unsubs) unsub()
+      client.close().catch(() => {})
+    }
+  }, [])
 
-const SKILLS = `Skills are \`SKILL.md\` files. A mail-style list on the left, the body on the right.`
+  return { client, status, error, agents, providers }
+}
 
-const WIRE_MODELS = `Default is DeepSeek V4 Flash. Keep Opus for long diffs. Hide GPT-5.4 behind the picker.`
+function useAgentTurns(client: PaseoClient, agentId: string | null): Turn[] {
+  const [turns, setTurns] = useState<Turn[]>([])
 
-type Turn =
-  | { kind: 'user'; text: string }
-  | { kind: 'fold'; duration: string }
-  | { kind: 'markdown'; source: string }
-  | { kind: 'code'; language: string; source: string }
-  | { kind: 'diff'; patch: string }
+  useEffect(() => {
+    setTurns([])
+    if (!agentId) return
+    let disposed = false
+    let unsub: (() => void) | undefined
+    ;(async () => {
+      try {
+        const handle = client.agents.ref(agentId)
+        const page = await handle.timeline.refetch({ direction: 'tail', limit: 300 })
+        if (disposed) return
+        setTurns(buildTurns(page.entries.map((entry) => entry.item)))
+        unsub = handle.timeline.subscribe(({ event }) => {
+          if (event.type === 'timeline') {
+            setTurns((prev) => applyTimelineItem(prev, event.item))
+          } else if (event.type === 'turn_failed') {
+            setTurns((prev) =>
+              applyTimelineItem(prev, { type: 'error', message: event.error }),
+            )
+          }
+        })
+      } catch {
+        /* the agent may have been archived while we were opening it */
+      }
+    })()
+    return () => {
+      disposed = true
+      unsub?.()
+    }
+  }, [client, agentId])
 
-const TURNS: Turn[] = [
-  { kind: 'user', text: 'give me a quick overview' },
-  { kind: 'fold', duration: 'Worked for 10 seconds' },
-  { kind: 'markdown', source: OVERVIEW },
-  { kind: 'user', text: 'How does the daemon split from the desktop?' },
-  { kind: 'fold', duration: 'Worked for 6 seconds' },
-  { kind: 'markdown', source: ARCHITECTURE },
-  { kind: 'user', text: 'How does cross-element text selection work?' },
-  { kind: 'fold', duration: 'Worked for 14 seconds' },
-  { kind: 'markdown', source: SELECTION },
-  { kind: 'code', language: 'rust', source: SELECTION_CODE },
-  { kind: 'user', text: 'Make the diff gutter width adapt to the largest line number.' },
-  { kind: 'fold', duration: 'Worked for 8 seconds' },
-  { kind: 'markdown', source: GUTTER },
-  { kind: 'diff', patch: GUTTER_DIFF },
-  { kind: 'user', text: 'Do I get hot reload when I edit the Rust side?' },
-  { kind: 'fold', duration: 'Worked for 4 seconds' },
-  { kind: 'markdown', source: HOT_RELOAD },
-  { kind: 'user', text: 'How do skills show up in the app?' },
-  { kind: 'fold', duration: 'Worked for 7 seconds' },
-  { kind: 'markdown', source: SKILLS },
-  { kind: 'user', text: 'Which models should I wire up?' },
-  { kind: 'fold', duration: 'Worked for 5 seconds' },
-  { kind: 'markdown', source: WIRE_MODELS },
-]
+  return turns
+}
 
-const SAFE_MDX_STRESS = `# React-composed Markdown
-
-This message uses **safe-mdx**, *styled spans*, ~~deleted text~~, an
-\`inline code value\`, and [a link](https://github.com/holocron-hq/safe-mdx).
-
-> The parser runs in TypeScript. Every Markdown node becomes a normal React component.
->
-> GPUIX renders the resulting \`div\`, \`text\`, and \`code\` tree.
-
-- nested **inline formatting** inside a list
-- a second item with a long sentence that must wrap without leaving the transcript column
-- [x] a GFM task item
-
-| Path | Renderer | Native Markdown element | Host nodes | Scroll | When to use |
-|:-----|:---------|:------------------------|-----------:|:-------|:------------|
-| safe-mdx | React tree of div and text | no | many | overflow-x on this grid | Custom MDX components and React state inside a message |
-| pulldown-cmark | one native markdown node | yes | one | overflow-x inside Rust | Default chat transcript. Cheapest paint. |
-| grid table | one CSS grid of cells | no | one per cell | overflow-x on the flex parent | Wide comparison tables that must stay readable |
-
-\`\`\`typescript
-const tree = mdxParse(source)
-return <SafeMdxRenderer markdown={source} mdast={tree} />
-\`\`\`
-
-<Callout title="Custom MDX component">
-  MDX components also map to ordinary GPUIX React components.
-</Callout>`
+// ---- chrome ----------------------------------------------------------------
 
 function IconButton({
   icon,
@@ -390,7 +340,45 @@ function IconButton({
   )
 }
 
-function SidebarAction({ icon, label }: { icon: IconName; label: string }) {
+function StatusDot({ color, size = 7 }: { color: string; size?: number }) {
+  return (
+    <div
+      style={{
+        width: size,
+        height: size,
+        borderRadius: size / 2,
+        backgroundColor: color,
+        flexShrink: 0,
+      }}
+    />
+  )
+}
+
+function agentStatusColor(entry: AgentEntry): string {
+  if (entry.requiresAttention) return C.accent
+  switch (entry.status) {
+    case 'running':
+      return C.running
+    case 'initializing':
+      return C.warn
+    case 'error':
+      return C.danger
+    case 'closed':
+      return C.ghost
+    default:
+      return C.ok
+  }
+}
+
+function SidebarAction({
+  icon,
+  label,
+  onClick,
+}: {
+  icon: IconName
+  label: string
+  onClick?: () => void
+}) {
   return (
     <div
       style={{
@@ -406,6 +394,7 @@ function SidebarAction({ icon, label }: { icon: IconName; label: string }) {
         hover: { backgroundColor: C.item },
         active: { backgroundColor: C.overlayStrong },
       }}
+      onClick={onClick}
     >
       <div
         style={{
@@ -424,12 +413,12 @@ function SidebarAction({ icon, label }: { icon: IconName; label: string }) {
   )
 }
 
-function ConversationRow({
-  conversation,
+function AgentRow({
+  entry,
   active,
   onSelect,
 }: {
-  conversation: Conversation
+  entry: AgentEntry
   active: boolean
   onSelect: (id: string) => void
 }) {
@@ -448,19 +437,27 @@ function ConversationRow({
         backgroundColor: active ? C.item : '#00000000',
         hover: { backgroundColor: C.item },
       }}
-      onClick={() => onSelect(conversation.id)}
+      onClick={() => onSelect(entry.id)}
     >
-      <text
-        style={{
-          fontSize: 13.5,
-          lineHeight: 18,
-          color: C.text,
-          whiteSpace: 'nowrap',
-          textOverflow: 'ellipsis',
-        }}
-      >
-        {conversation.title}
-      </text>
+      <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+        <text
+          style={{
+            fontSize: 13.5,
+            lineHeight: 18,
+            color: C.text,
+            whiteSpace: 'nowrap',
+            textOverflow: 'ellipsis',
+            minWidth: 0,
+            flexGrow: 1,
+          }}
+        >
+          {displayName(entry)}
+        </text>
+        {(entry.status === 'running' || entry.requiresAttention || entry.status === 'error') && (
+          <StatusDot color={agentStatusColor(entry)} />
+        )}
+        <text style={{ fontSize: 12.5, color: C.ghost, flexShrink: 0 }}>{relativeTime(entry)}</text>
+      </div>
       <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 5 }}>
         <Icon name="folder" size={12.5} color={C.tertiary} />
         <text
@@ -474,32 +471,41 @@ function ConversationRow({
             textOverflow: 'ellipsis',
           }}
         >
-          {conversation.project}
+          {basename(entry.cwd)}
         </text>
-        <text style={{ fontSize: 12.5, color: C.ghost, flexShrink: 0 }}>{conversation.time}</text>
+        <text style={{ fontSize: 11.5, color: C.ghost, flexShrink: 0 }}>
+          {entry.model ?? entry.provider}
+        </text>
       </div>
     </div>
   )
 }
 
 function Sidebar({
+  agents,
   activeId,
   onSelect,
+  onNewTask,
   onCollapse,
+  status,
 }: {
-  activeId: string
+  agents: AgentEntry[]
+  activeId: string | null
   onSelect: (id: string) => void
+  onNewTask: () => void
   onCollapse: () => void
+  status: ConnStatus
 }) {
   const groups = useMemo(() => {
-    const out: { name: string; items: Conversation[] }[] = []
-    for (const conversation of CONVERSATIONS) {
+    const out: { name: string; items: AgentEntry[] }[] = []
+    for (const entry of sortAgents(agents)) {
+      const name = groupLabel(entry)
       const last = out[out.length - 1]
-      if (last && last.name === conversation.group) last.items.push(conversation)
-      else out.push({ name: conversation.group, items: [conversation] })
+      if (last && last.name === name) last.items.push(entry)
+      else out.push({ name, items: [entry] })
     }
     return out
-  }, [])
+  }, [agents])
 
   return (
     <div
@@ -523,12 +529,7 @@ function Sidebar({
         }}
       >
         <div style={{ width: TRAFFIC_LIGHT_CLEARANCE, height: '100%', flexShrink: 0 }} />
-        <IconButton
-          icon="sidebar"
-          size={16}
-          testId="sidebar-collapse"
-          onClick={onCollapse}
-        />
+        <IconButton icon="sidebar" size={16} testId="sidebar-collapse" onClick={onCollapse} />
         <div
           style={{
             display: 'flex',
@@ -544,7 +545,7 @@ function Sidebar({
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', paddingLeft: 10, paddingRight: 10 }}>
-        <SidebarAction icon="compose" label="New Task" />
+        <SidebarAction icon="compose" label="New Task" onClick={onNewTask} />
       </div>
 
       <div
@@ -558,9 +559,6 @@ function Sidebar({
           paddingRight: 10,
         }}
       >
-        <div style={{ paddingBottom: 6 }}>
-          <SidebarAction icon="search" label="Search" />
-        </div>
         {groups.map((group, groupIndex) => (
           <div
             key={group.name}
@@ -589,16 +587,23 @@ function Sidebar({
               </text>
               {groupIndex === 0 && <Icon name="listFilter" size={14} color={C.secondary} />}
             </div>
-            {group.items.map((conversation) => (
-              <ConversationRow
-                key={conversation.id}
-                conversation={conversation}
-                active={conversation.id === activeId}
+            {group.items.map((entry) => (
+              <AgentRow
+                key={entry.id}
+                entry={entry}
+                active={entry.id === activeId}
                 onSelect={onSelect}
               />
             ))}
           </div>
         ))}
+        {groups.length === 0 && (
+          <div style={{ padding: 14 }}>
+            <text style={{ fontSize: 12.5, lineHeight: 17, color: C.tertiary }}>
+              No agents yet. Start one from the composer.
+            </text>
+          </div>
+        )}
       </div>
 
       <div
@@ -606,17 +611,35 @@ function Sidebar({
           display: 'flex',
           flexDirection: 'row',
           alignItems: 'center',
+          gap: 8,
           height: 40,
           flexShrink: 0,
-          paddingLeft: 10,
+          paddingLeft: 14,
           paddingRight: 10,
         }}
       >
+        <StatusDot
+          color={status === 'connected' ? C.ok : status === 'connecting' ? C.warn : C.danger}
+          size={8}
+        />
+        <text style={{ fontSize: 12, color: C.tertiary, flexGrow: 1, minWidth: 0 }}>
+          {daemonHost()}
+        </text>
         <IconButton icon="settings" />
       </div>
     </div>
   )
 }
+
+function daemonHost(): string {
+  try {
+    return new URL(DAEMON_URL).host
+  } catch {
+    return DAEMON_URL
+  }
+}
+
+// ---- transcript ------------------------------------------------------------
 
 function UserTurn({ text }: { text: string }) {
   return (
@@ -640,40 +663,10 @@ function UserTurn({ text }: { text: string }) {
           paddingRight: 12,
         }}
       >
-        <text style={{ fontSize: 14, lineHeight: 20, color: C.text, minWidth: 0, maxWidth: '100%' }}>{text}</text>
-      </div>
-    </div>
-  )
-}
-
-function WorkedFor({ duration }: { duration: string }) {
-  return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 10,
-        height: 24,
-        width: '100%',
-      }}
-    >
-      <div style={{ height: 1, flexGrow: 1, backgroundColor: C.border }} />
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'row',
-          alignItems: 'center',
-          gap: 5,
-          flexShrink: 0,
-        }}
-      >
-        <text style={{ fontSize: 13.5, lineHeight: 18, fontWeight: 500, color: C.tertiary }}>
-          {duration}
+        <text style={{ fontSize: 14, lineHeight: 20, color: C.text, minWidth: 0, maxWidth: '100%' }}>
+          {text}
         </text>
-        <Icon name="chevronRight" size={11.5} color={C.tertiary} />
       </div>
-      <div style={{ height: 1, flexGrow: 1, backgroundColor: C.border }} />
     </div>
   )
 }
@@ -710,22 +703,151 @@ function TranscriptRow({
   )
 }
 
-function expandTurns(count: number): Turn[] {
-  if (count <= TURNS.length) return TURNS
-  const out = new Array<Turn>(count)
-  for (let i = 0; i < count; i++) {
-    out[i] = TURNS[i % TURNS.length]!
-  }
-  return out
+function ToolRow({ turn }: { turn: Extract<Turn, { kind: 'tool' }> }) {
+  const icon = TOOL_ICONS[turn.tool]
+  const detail = oneLine(turn.detail)
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+        width: '100%',
+        minWidth: 0,
+      }}
+    >
+      <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8, minWidth: 0 }}>
+        <div style={{ width: 16, height: 16, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          {turn.status === 'running' ? (
+            <StatusDot color={C.running} size={7} />
+          ) : turn.status === 'failed' ? (
+            <StatusDot color={C.danger} size={7} />
+          ) : (
+            <Icon name="check" size={11} color={C.ghost} />
+          )}
+        </div>
+        <Icon name={icon} size={12.5} color={C.tertiary} />
+        <text style={{ fontSize: 13, fontWeight: 500, color: C.secondary, flexShrink: 0 }}>
+          {turn.title}
+        </text>
+        {detail && (
+          <text
+            style={{
+              fontSize: 13,
+              color: C.tertiary,
+              whiteSpace: 'nowrap',
+              textOverflow: 'ellipsis',
+              minWidth: 0,
+              flexGrow: 1,
+            }}
+          >
+            {detail}
+          </text>
+        )}
+        {turn.status === 'failed' && (
+          <text style={{ fontSize: 12, color: C.danger, flexShrink: 0 }}>failed</text>
+        )}
+      </div>
+      {turn.patch && <diff patch={turn.patch} wordDiff theme={CHAT_THEME} />}
+    </div>
+  )
+}
+
+function ReasoningBlock({ text }: { text: string }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        gap: 8,
+        width: '100%',
+        minWidth: 0,
+        borderLeftWidth: 2,
+        borderLeftColor: C.borderStrong,
+        paddingLeft: 10,
+      }}
+    >
+      <text style={{ fontSize: 13, lineHeight: 19, color: C.tertiary, minWidth: 0, maxWidth: '100%' }}>
+        {text.trim()}
+      </text>
+    </div>
+  )
+}
+
+function TodoBlock({ items }: { items: { text: string; completed: boolean; active: boolean }[] }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 7,
+        width: '100%',
+        minWidth: 0,
+        backgroundColor: C.raised,
+        borderRadius: 10,
+        borderWidth: 1,
+        borderColor: C.border,
+        padding: 12,
+      }}
+    >
+      {items.map((item, index) => (
+        <div key={index} style={{ display: 'flex', flexDirection: 'row', gap: 9, minWidth: 0 }}>
+          <text
+            style={{
+              fontSize: 13,
+              lineHeight: 19,
+              color: item.completed ? C.ok : item.active ? C.accent : C.ghost,
+              flexShrink: 0,
+            }}
+          >
+            {item.completed ? '✓' : item.active ? '●' : '○'}
+          </text>
+          <text
+            style={{
+              fontSize: 13.5,
+              lineHeight: 19,
+              color: item.completed ? C.tertiary : item.active ? C.text : C.secondary,
+              minWidth: 0,
+              maxWidth: '100%',
+            }}
+          >
+            {item.text}
+          </text>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function ErrorBlock({ text }: { text: string }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        gap: 9,
+        width: '100%',
+        minWidth: 0,
+        backgroundColor: '#E5484D14',
+        borderRadius: 10,
+        borderWidth: 1,
+        borderColor: '#E5484D30',
+        padding: 12,
+      }}
+    >
+      <Icon name="zap" size={13} color={C.danger} />
+      <text style={{ fontSize: 13.5, lineHeight: 19, color: C.text, minWidth: 0, maxWidth: '100%' }}>
+        {text}
+      </text>
+    </div>
+  )
 }
 
 const Transcript = memo(function Transcript({
   turns,
-  includeSafeMdx = false,
   listRef,
 }: {
   turns: Turn[]
-  includeSafeMdx?: boolean
   listRef?: React.Ref<{ id: number }>
 }) {
   return (
@@ -735,41 +857,54 @@ const Transcript = memo(function Transcript({
       estimatedItemHeight={220}
       style={{ flexGrow: 1, minHeight: 0, width: '100%' }}
     >
-      {includeSafeMdx && (
-        <TranscriptRow key="safemdx" first>
-          <UserTurn text="Can Markdown be composed as normal React elements instead?" />
-          <SafeMdxContent source={SAFE_MDX_STRESS} />
-        </TranscriptRow>
-      )}
       {turns.map((turn, index) => (
-        <TranscriptRow
-          key={index}
-          first={!includeSafeMdx && index === 0}
-          last={index === turns.length - 1}
-        >
+        <TranscriptRow key={index} first={index === 0} last={index === turns.length - 1}>
           {turn.kind === 'user' && <UserTurn text={turn.text} />}
-          {turn.kind === 'fold' && <WorkedFor duration={turn.duration} />}
-          {turn.kind === 'markdown' && <SafeMdxContent source={turn.source} />}
-          {turn.kind === 'code' && (
-            <code code={turn.source} language={turn.language} showLineNumbers theme={CHAT_THEME} />
-          )}
-          {turn.kind === 'diff' && <diff patch={turn.patch} wordDiff theme={CHAT_THEME} />}
+          {turn.kind === 'assistant' && <SafeMdxContent source={turn.source} />}
+          {turn.kind === 'reasoning' && <ReasoningBlock text={turn.text} />}
+          {turn.kind === 'tool' && <ToolRow turn={turn} />}
+          {turn.kind === 'todo' && <TodoBlock items={turn.items} />}
+          {turn.kind === 'error' && <ErrorBlock text={turn.text} />}
         </TranscriptRow>
       ))}
     </virtual-list>
   )
 })
 
+function CenterMessage({ title, detail }: { title: string; detail?: string }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 10,
+        flexGrow: 1,
+        minHeight: 0,
+      }}
+    >
+      <Icon name="sparkle" size={22} color={C.ghost} />
+      <text style={{ fontSize: 15, fontWeight: 600, color: C.secondary }}>{title}</text>
+      {detail && (
+        <text style={{ fontSize: 13, lineHeight: 18, color: C.tertiary, textAlign: 'center' }}>
+          {detail}
+        </text>
+      )}
+    </div>
+  )
+}
+
 function Header({
   collapsed,
   onExpand,
   title,
-  turnCount,
+  entry,
 }: {
   collapsed: boolean
   onExpand: () => void
   title: string
-  turnCount: number
+  entry: AgentEntry | null
 }) {
   return (
     <div
@@ -810,9 +945,28 @@ function Header({
       >
         {title}
       </text>
-      {turnCount > TURNS.length && (
-        <text style={{ fontSize: 12, fontWeight: 500, color: C.tertiary, flexShrink: 0 }}>
-          {turnCount.toLocaleString('en-US')} messages
+      {entry?.requiresAttention && entry.attentionReason === 'permission' && (
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 5,
+            flexShrink: 0,
+            height: 20,
+            paddingLeft: 8,
+            paddingRight: 8,
+            borderRadius: 10,
+            backgroundColor: '#E2795B1A',
+          }}
+        >
+          <StatusDot color={C.accent} size={6} />
+          <text style={{ fontSize: 11.5, fontWeight: 500, color: C.accent }}>Needs approval</text>
+        </div>
+      )}
+      {entry?.status === 'running' && !entry.requiresAttention && (
+        <text style={{ fontSize: 12, fontWeight: 500, color: C.running, flexShrink: 0 }}>
+          Working…
         </text>
       )}
       <div style={{ flexGrow: 1 }} />
@@ -820,6 +974,8 @@ function Header({
     </div>
   )
 }
+
+// ---- pickers ---------------------------------------------------------------
 
 const MENU = {
   minWidth: 220,
@@ -833,17 +989,21 @@ const MENU = {
   borderRadius: 12,
 } satisfies StyleDesc
 
+interface MenuOption {
+  id: string
+  label: string
+  description?: string
+}
+
 function MenuRow({
   label,
   description,
-  icon,
   selected,
   highlighted,
   hint,
 }: {
   label: string
   description?: string
-  icon?: IconName
   selected: boolean
   highlighted: boolean
   hint?: string
@@ -865,7 +1025,6 @@ function MenuRow({
         hover: { backgroundColor: '#404040' },
       }}
     >
-      {icon && <Icon name={icon} size={14} color={C.tertiary} />}
       <div style={{ display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0 }}>
         <text
           style={{
@@ -949,20 +1108,36 @@ function ChipSelect({
   )
 }
 
-function ModelPicker({ value, onChange }: { value: string; onChange: (next: string) => void }) {
-  const selected = MODELS.find((model) => model.id === value) ?? MODELS[0]
+function ModelPicker({
+  providers,
+  value,
+  onChange,
+}: {
+  providers: ProviderEntry[]
+  value: string
+  onChange: (next: string) => void
+}) {
+  const choices = useMemo(() => modelChoices(providers), [providers])
+  const selected = choices.find((choice) => choice.value === value)
+
   const groups = useMemo(() => {
-    const out: { name: string; items: typeof MODELS }[] = []
-    for (const model of MODELS) {
+    const out: { name: string; items: typeof choices }[] = []
+    for (const choice of choices) {
       const last = out[out.length - 1]
-      if (last && last.name === model.group) last.items.push(model)
-      else out.push({ name: model.group, items: [model] })
+      if (last && last.name === choice.providerLabel) last.items.push(choice)
+      else out.push({ name: choice.providerLabel, items: [choice] })
     }
     return out
-  }, [])
+  }, [choices])
 
   return (
-    <ChipSelect value={value} onChange={onChange} icon={selected.icon} label={selected.label}>
+    <ChipSelect
+      value={value}
+      onChange={onChange}
+      icon="sparkle"
+      label={selected?.label ?? (choices.length > 0 ? 'Pick a model' : 'No models')}
+      menuWidth={252}
+    >
       {groups.map((group, index) => (
         <div key={group.name} style={{ display: 'flex', flexDirection: 'column' }}>
           {index > 0 && (
@@ -979,12 +1154,12 @@ function ModelPicker({ value, onChange }: { value: string; onChange: (next: stri
           >
             <text style={{ fontSize: 11.5, fontWeight: 500, color: C.ghost }}>{group.name}</text>
           </SelectLabel>
-          {group.items.map((model) => (
-            <SelectItem key={model.id} value={model.id} textValue={model.label}>
+          {group.items.map((choice) => (
+            <SelectItem key={choice.value} value={choice.value} textValue={choice.label}>
               {(state) => (
                 <MenuRow
-                  label={model.label}
-                  icon={model.icon}
+                  label={choice.label}
+                  hint={choice.modelId}
                   selected={state.selected}
                   highlighted={state.highlighted}
                 />
@@ -997,60 +1172,52 @@ function ModelPicker({ value, onChange }: { value: string; onChange: (next: stri
   )
 }
 
-function ReasoningPicker({ value, onChange }: { value: string; onChange: (next: string) => void }) {
-  const selected = REASONING.find((option) => option.id === value) ?? REASONING[0]
+function OptionPicker({
+  value,
+  onChange,
+  options,
+  icon,
+  sectionLabel,
+  fallbackLabel,
+  menuWidth,
+}: {
+  value: string | null
+  onChange: (next: string) => void
+  options: MenuOption[]
+  icon: IconName
+  sectionLabel?: string
+  fallbackLabel: string
+  menuWidth?: number
+}) {
+  const selected = options.find((option) => option.id === value)
+  if (options.length === 0) return null
   return (
     <ChipSelect
-      value={value}
+      value={value ?? ''}
       onChange={onChange}
-      icon={value === 'low' ? 'zap' : 'sparkle'}
-      label={selected.label}
+      icon={icon}
+      label={selected?.label ?? fallbackLabel}
       caret={false}
+      menuWidth={menuWidth}
     >
-      <SelectLabel
-        style={{
-          height: 22,
-          paddingLeft: 8,
-          display: 'flex',
-          alignItems: 'center',
-        }}
-      >
-        <text style={{ fontSize: 11.5, fontWeight: 500, color: C.ghost }}>Reasoning</text>
-      </SelectLabel>
-      {REASONING.map((option) => (
-        <SelectItem key={option.id} value={option.id} textValue={option.label}>
-          {(state) => (
-            <MenuRow
-              label={option.label}
-              hint={option.hint}
-              selected={state.selected}
-              highlighted={state.highlighted}
-            />
-          )}
-        </SelectItem>
-      ))}
-    </ChipSelect>
-  )
-}
-
-function AccessPicker({ value, onChange }: { value: string; onChange: (next: string) => void }) {
-  const selected = ACCESS.find((option) => option.id === value) ?? ACCESS[3]
-  return (
-    <ChipSelect
-      value={value}
-      onChange={onChange}
-      icon={selected.icon}
-      label={selected.label}
-      caret={false}
-      menuWidth={288}
-    >
-      {ACCESS.map((option) => (
+      {sectionLabel && (
+        <SelectLabel
+          style={{
+            height: 22,
+            paddingLeft: 8,
+            display: 'flex',
+            alignItems: 'center',
+          }}
+        >
+          <text style={{ fontSize: 11.5, fontWeight: 500, color: C.ghost }}>{sectionLabel}</text>
+        </SelectLabel>
+      )}
+      {options.map((option) => (
         <SelectItem key={option.id} value={option.id} textValue={option.label}>
           {(state) => (
             <MenuRow
               label={option.label}
               description={option.description}
-              icon={option.icon}
               selected={state.selected}
               highlighted={state.highlighted}
             />
@@ -1061,149 +1228,37 @@ function AccessPicker({ value, onChange }: { value: string; onChange: (next: str
   )
 }
 
-function ProjectPicker({ value, onChange }: { value: string; onChange: (next: string) => void }) {
-  const selected = PROJECTS.find((option) => option.id === value) ?? PROJECTS[0]
-  return (
-    <ChipSelect
-      value={value}
-      onChange={onChange}
-      icon="folder"
-      label={selected.label}
-      caret={false}
-    >
-      {PROJECTS.map((option) => (
-        <SelectItem key={option.id} value={option.id} textValue={option.label}>
-          {(state) => (
-            <MenuRow
-              label={option.label}
-              icon="folder"
-              selected={state.selected}
-              highlighted={state.highlighted}
-            />
-          )}
-        </SelectItem>
-      ))}
-    </ChipSelect>
-  )
+function modeOptions(modes: ProviderMode[] | undefined): MenuOption[] {
+  return (modes ?? []).map((mode) => ({ id: mode.id, label: mode.label, description: mode.description }))
 }
 
-function WorkspacePicker({ value, onChange }: { value: string; onChange: (next: string) => void }) {
-  const selected = WORKSPACES.find((option) => option.id === value) ?? WORKSPACES[0]
-  return (
-    <ChipSelect
-      value={value}
-      onChange={onChange}
-      icon={selected.icon}
-      label={selected.label}
-      caret={false}
-    >
-      <SelectLabel
-        style={{
-          height: 22,
-          paddingLeft: 8,
-          display: 'flex',
-          alignItems: 'center',
-        }}
-      >
-        <text style={{ fontSize: 11.5, fontWeight: 500, color: C.ghost }}>Work in</text>
-      </SelectLabel>
-      {WORKSPACES.map((option) => (
-        <SelectItem key={option.id} value={option.id} textValue={option.label}>
-          {(state) => (
-            <MenuRow
-              label={option.label}
-              icon={option.icon}
-              selected={state.selected}
-              highlighted={state.highlighted}
-            />
-          )}
-        </SelectItem>
-      ))}
-    </ChipSelect>
-  )
+function thinkingOptions(model: ProviderModel | undefined): MenuOption[] {
+  return (model?.thinkingOptions ?? []).map((option) => ({
+    id: option.id,
+    label: option.label,
+    description: option.description,
+  }))
 }
 
-function BranchPicker({ value, onChange }: { value: string; onChange: (next: string) => void }) {
-  const selected = BRANCHES.find((option) => option.id === value) ?? BRANCHES[0]
-  return (
-    <ChipSelect value={value} onChange={onChange} icon="gitBranch" label={selected.label}>
-      {BRANCHES.map((option) => (
-        <SelectItem key={option.id} value={option.id} textValue={option.label}>
-          {(state) => (
-            <MenuRow
-              label={option.label}
-              icon="gitBranch"
-              selected={state.selected}
-              highlighted={state.highlighted}
-            />
-          )}
-        </SelectItem>
-      ))}
-    </ChipSelect>
-  )
-}
-
-function ModeToggle({
-  value,
-  onChange,
-}: {
-  value: 'build' | 'plan'
-  onChange: (next: 'build' | 'plan') => void
-}) {
-  const plan = value === 'plan'
-  return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 6,
-        height: 26,
-        paddingLeft: 7,
-        paddingRight: 7,
-        borderRadius: 6,
-        cursor: 'pointer',
-        hover: { backgroundColor: C.overlay },
-      }}
-      onClick={() => onChange(plan ? 'build' : 'plan')}
-    >
-      <Icon name={plan ? 'list' : 'wrench'} size={12} color={plan ? C.accent : C.tertiary} />
-      <text style={{ fontSize: 13, lineHeight: 16, color: plan ? C.accent : C.secondary }}>
-        {plan ? 'Plan' : 'Build'}
-      </text>
-    </div>
-  )
-}
+// ---- composer --------------------------------------------------------------
 
 function Composer({
   value,
   onChange,
   onSend,
-  model,
-  onModelChange,
-  reasoning,
-  onReasoningChange,
-  access,
-  onAccessChange,
-  mode,
-  onModeChange,
+  disabledReason,
+  chips,
 }: {
   value: string
   onChange: (next: string) => void
   onSend: (text: string) => void
-  model: string
-  onModelChange: (next: string) => void
-  reasoning: string
-  onReasoningChange: (next: string) => void
-  access: string
-  onAccessChange: (next: string) => void
-  mode: 'build' | 'plan'
-  onModeChange: (next: 'build' | 'plan') => void
+  disabledReason: string | null
+  chips: React.ReactNode
 }) {
-  const ready = value.trim().length > 0
+  const ready = value.trim().length > 0 && !disabledReason
   const send = (text: string) => {
     const next = text.trim()
-    if (!next) return
+    if (!next || disabledReason) return
     onSend(next)
   }
   return (
@@ -1237,7 +1292,7 @@ function Composer({
         <textarea
           testId="composer"
           value={value}
-          placeholder="Do anything..."
+          placeholder="Describe a task for your agent..."
           minRows={1}
           maxRows={3}
           autoFocus
@@ -1256,6 +1311,19 @@ function Composer({
           onChange={(event) => onChange(event.value ?? '')}
           onSubmit={(event) => send(event.value ?? value)}
         />
+        {disabledReason && (
+          <text
+            style={{
+              fontSize: 12,
+              color: C.warn,
+              paddingLeft: 10,
+              paddingRight: 10,
+              paddingTop: 6,
+            }}
+          >
+            {disabledReason}
+          </text>
+        )}
         <div
           style={{
             display: 'flex',
@@ -1267,10 +1335,7 @@ function Composer({
             paddingRight: 10,
           }}
         >
-          <ModelPicker value={model} onChange={onModelChange} />
-          <ReasoningPicker value={reasoning} onChange={onReasoningChange} />
-          <AccessPicker value={access} onChange={onAccessChange} />
-          <ModeToggle value={mode} onChange={onModeChange} />
+          {chips}
           <div style={{ flexGrow: 1 }} />
           <div
             testId="send"
@@ -1295,21 +1360,27 @@ function Composer({
   )
 }
 
-function WorkspaceFooter({
-  project,
-  onProjectChange,
-  workspace,
-  onWorkspaceChange,
-  branch,
-  onBranchChange,
+function FooterBar({
+  cwd,
+  cwdLocked,
+  cwdOptions,
+  onCwdChange,
+  worktree,
+  onWorktreeChange,
+  statusColor,
 }: {
-  project: string
-  onProjectChange: (next: string) => void
-  workspace: string
-  onWorkspaceChange: (next: string) => void
-  branch: string
-  onBranchChange: (next: string) => void
+  cwd: string
+  cwdLocked: boolean
+  cwdOptions: string[]
+  onCwdChange: (next: string) => void
+  worktree: string
+  onWorktreeChange: (next: string) => void
+  statusColor: string
 }) {
+  const cwdChoices = useMemo(
+    () => [...new Set([cwd, ...cwdOptions])].filter(Boolean),
+    [cwd, cwdOptions],
+  )
   return (
     <div
       style={{
@@ -1337,98 +1408,52 @@ function WorkspaceFooter({
           paddingRight: 10,
         }}
       >
-        <ProjectPicker value={project} onChange={onProjectChange} />
-        <WorkspacePicker value={workspace} onChange={onWorkspaceChange} />
-        {project !== 'none' && <BranchPicker value={branch} onChange={onBranchChange} />}
+        {cwdLocked ? (
+          <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6, minWidth: 0 }}>
+            <Icon name="folder" size={12} color={C.tertiary} />
+            <text
+              style={{
+                fontSize: 12.5,
+                color: C.tertiary,
+                whiteSpace: 'nowrap',
+                textOverflow: 'ellipsis',
+                minWidth: 0,
+              }}
+            >
+              {cwd}
+            </text>
+          </div>
+        ) : (
+          <>
+            <OptionPicker
+              value={cwd}
+              onChange={onCwdChange}
+              options={cwdChoices.map((dir) => ({ id: dir, label: basename(dir), description: dir }))}
+              icon="folder"
+              fallbackLabel="Choose folder"
+              menuWidth={320}
+            />
+            <OptionPicker
+              value={worktree}
+              onChange={onWorktreeChange}
+              options={[
+                { id: 'local', label: 'Local' },
+                { id: 'worktree', label: 'New worktree' },
+              ]}
+              icon={worktree === 'worktree' ? 'gitBranch' : 'laptop'}
+              sectionLabel="Work in"
+              fallbackLabel="Local"
+            />
+          </>
+        )}
         <div style={{ flexGrow: 1 }} />
-        <div
-          style={{
-            width: 8,
-            height: 8,
-            borderRadius: 4,
-            backgroundColor: '#3B82F6',
-            flexShrink: 0,
-          }}
-        />
+        <StatusDot color={statusColor} size={8} />
       </div>
     </div>
   )
 }
 
-function GhostButton({
-  icon,
-  label,
-  active,
-  onClick,
-}: {
-  icon: IconName
-  label?: string
-  active?: boolean
-  onClick?: () => void
-}) {
-  const color = active ? C.text : C.ghost
-  return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 6,
-        height: 30,
-        paddingLeft: label ? 9 : 0,
-        paddingRight: label ? 11 : 0,
-        width: label ? undefined : 30,
-        justifyContent: 'center',
-        borderRadius: 10,
-        cursor: 'pointer',
-        backgroundColor: active ? C.overlayStrong : '#00000000',
-        hover: { backgroundColor: C.overlay },
-      }}
-      onClick={onClick}
-    >
-      <Icon name={icon} size={16} color={color} />
-      {label && <text style={{ fontSize: 12.5, color }}>{label}</text>}
-    </div>
-  )
-}
-
-function ActionBar() {
-  const [copied, setCopied] = useState(false)
-  const [feedback, setFeedback] = useState<'up' | 'down' | null>(null)
-
-  return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 4,
-        paddingTop: 6,
-        marginLeft: -7,
-        userSelect: 'none',
-      }}
-    >
-      <GhostButton
-        icon={copied ? 'check' : 'copy'}
-        active={copied}
-        onClick={() => setCopied((was) => !was)}
-      />
-      <GhostButton
-        icon="thumbsUp"
-        active={feedback === 'up'}
-        onClick={() => setFeedback((value) => (value === 'up' ? null : 'up'))}
-      />
-      <GhostButton
-        icon="thumbsDown"
-        active={feedback === 'down'}
-        onClick={() => setFeedback((value) => (value === 'down' ? null : 'down'))}
-      />
-      <GhostButton icon="retry" />
-      <GhostButton icon="share" />
-      <GhostButton icon="more" />
-    </div>
-  )
-}
+// ---- markdown --------------------------------------------------------------
 
 type MdxChildren = { children?: React.ReactNode }
 
@@ -1456,7 +1481,7 @@ function flattenMdxTable(children: React.ReactNode): {
       cells.push(
         cell
           ? React.cloneElement(cell, { key: `${rowIndex}-${col}` })
-          : <div key={`pad-${rowIndex}-${col}`} />
+          : <div key={`pad-${rowIndex}-${col}`} />,
       )
     }
   }
@@ -1637,24 +1662,6 @@ const SAFE_MDX_COMPONENTS = {
   tr: ({ children }: MdxChildren) => <>{children}</>,
   th: ({ children }: MdxChildren) => <MdxCell header>{children}</MdxCell>,
   td: ({ children }: MdxChildren) => <MdxCell>{children}</MdxCell>,
-  Callout: ({ children, title }: MdxChildren & { title?: string }) => (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 6,
-        width: '100%',
-        padding: 12,
-        backgroundColor: C.raised,
-        borderRadius: 10,
-        borderWidth: 1,
-        borderColor: C.border,
-      }}
-    >
-      <text style={{ fontSize: 13, fontWeight: 700, color: C.accent }}>{title}</text>
-      {children}
-    </div>
-  ),
 }
 
 const mdxCache = new Map<string, Root>()
@@ -1691,42 +1698,81 @@ export function SafeMdxContent({ source }: { source: string }) {
   )
 }
 
-export function SafeMdxTranscript() {
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 30, width: 748 }}>
-      <UserTurn text="Can Markdown be composed as normal React elements instead?" />
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <SafeMdxContent source={SAFE_MDX_STRESS} />
-        <ActionBar />
-      </div>
-    </div>
-  )
-}
+// ---- app -------------------------------------------------------------------
 
-export function ChatApp({
-  turnCount = TURNS.length,
-  includeSafeMdx = false,
-}: {
-  turnCount?: number
-  includeSafeMdx?: boolean
-} = {}) {
-  const [activeId, setActiveId] = useState('c1')
+export function ChatApp() {
+  const daemon = useDaemon()
+  const { client, status, error, agents, providers } = daemon
+
+  const [activeId, setActiveId] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState(false)
   const [draft, setDraft] = useState('')
-  const [model, setModel] = useState('deepseek-v4-flash')
-  const [reasoning, setReasoning] = useState('high')
-  const [access, setAccess] = useState('full')
-  const [mode, setMode] = useState<'build' | 'plan'>('build')
-  const [project, setProject] = useState('waku')
-  const [workspace, setWorkspace] = useState('local')
-  const [branch, setBranch] = useState('main')
+  const [sendError, setSendError] = useState<string | null>(null)
+  const [seeds, setSeeds] = useState<{ agentId: string | null; text: string }[]>([])
 
-  const [turns, setTurns] = useState(() => expandTurns(turnCount))
+  const [modelValue, setModelValue] = useState('')
+  const [thinkingId, setThinkingId] = useState<string | null>(null)
+  const [modeId, setModeId] = useState<string | null>(null)
+  const [cwd, setCwd] = useState(process.cwd())
+  const [cwdOptions, setCwdOptions] = useState<string[]>([])
+  const [worktree, setWorktree] = useState('local')
+
+  const turns = useAgentTurns(client, activeId)
+  const activeEntry = agents.find((entry) => entry.id === activeId) ?? null
+
+  useEffect(() => {
+    if (modelValue && findModel(providers, modelValue).choice) return
+    setModelValue(defaultModelValue(providers) ?? '')
+  }, [providers, modelValue])
+
+  const { entry: providerOfModel, model: modelDef } = useMemo(
+    () => findModel(providers, modelValue),
+    [providers, modelValue],
+  )
+
+  useEffect(() => {
+    const think = thinkingOptions(modelDef)
+    setThinkingId(modelDef?.defaultThinkingOptionId ?? think.find((o) => o.isDefault)?.id ?? think[0]?.id ?? null)
+    setModeId(providerOfModel?.defaultModeId ?? providerOfModel?.modes?.[0]?.id ?? null)
+  }, [providerOfModel?.provider, modelDef?.id])
+
+  useEffect(() => {
+    if (status !== 'connected') return
+    let disposed = false
+    ;(async () => {
+      try {
+        const page = await client.workspaces.list()
+        if (disposed) return
+        const dirs = [
+          ...new Set(
+            page.entries
+              .map((workspace) => workspace.workspaceDirectory ?? workspace.projectRootPath)
+              .filter((dir): dir is string => Boolean(dir)),
+          ),
+        ]
+        if (dirs.length > 0) setCwdOptions(dirs)
+      } catch {
+        /* workspace listing is best-effort */
+      }
+    })()
+    return () => {
+      disposed = true
+    }
+  }, [client, status])
+
+  const visibleTurns = useMemo(() => {
+    const out = [...turns]
+    for (const seed of seeds) {
+      if (seed.agentId !== activeId) continue
+      if (turns.some((turn) => turn.kind === 'user' && turn.text === seed.text)) continue
+      out.push({ kind: 'user', text: seed.text })
+    }
+    return out
+  }, [turns, seeds, activeId])
+
   const listRef = useRef<{ id: number } | null>(null)
   const skipScroll = useRef(true)
   const { renderer } = useGpuix()
-  const title = CONVERSATIONS.find((conversation) => conversation.id === activeId)?.title ?? ''
-  const rowCount = turns.length + (includeSafeMdx ? 1 : 0)
 
   useEffect(() => {
     if (skipScroll.current) {
@@ -1735,8 +1781,73 @@ export function ChatApp({
     }
     const id = listRef.current?.id
     if (id == null || !renderer?.scrollToItem) return
-    renderer.scrollToItem(id, rowCount - 1)
-  }, [renderer, rowCount])
+    renderer.scrollToItem(id, visibleTurns.length - 1)
+  }, [renderer, visibleTurns.length])
+
+  const send = async (raw: string) => {
+    const text = raw.trim()
+    if (!text || status !== 'connected') return
+    setDraft('')
+    setSendError(null)
+    try {
+      if (activeId) {
+        setSeeds((prev) => [...prev, { agentId: activeId, text }])
+        await client.agents.ref(activeId).send(text)
+        return
+      }
+      if (!modelValue) {
+        setSendError('No provider model is ready yet.')
+        return
+      }
+      const config: PaseoAgentConfig = { provider: modelValue }
+      if (modeId) config.modeId = modeId
+      if (thinkingId) config.thinkingOptionId = thinkingId
+      const handle = await client.agents.create({
+        config,
+        cwd,
+        prompt: text,
+        ...(worktree === 'worktree' ? { git: { createWorktree: true } } : {}),
+      })
+      setSeeds((prev) => [...prev, { agentId: handle.id, text }])
+      setActiveId(handle.id)
+    } catch (err) {
+      setSendError(errorMessage(err))
+    }
+  }
+
+  const title = activeId ? (activeEntry ? displayName(activeEntry) : 'Agent') : 'New Task'
+  const needsModel = !activeId && !modelValue
+  const disabledReason =
+    status !== 'connected'
+      ? status === 'connecting'
+        ? 'Connecting to the daemon…'
+        : 'Daemon unavailable'
+      : needsModel
+        ? 'Waiting for an available provider model…'
+        : null
+
+  const draftChips = (
+    <>
+      <ModelPicker providers={providers} value={modelValue} onChange={setModelValue} />
+      <OptionPicker
+        value={thinkingId}
+        onChange={setThinkingId}
+        options={thinkingOptions(modelDef)}
+        icon="zap"
+        sectionLabel="Reasoning"
+        fallbackLabel="Reasoning"
+      />
+      <OptionPicker
+        value={modeId}
+        onChange={setModeId}
+        options={modeOptions(providerOfModel?.modes)}
+        icon="lock"
+        sectionLabel="Access"
+        fallbackLabel="Access"
+        menuWidth={288}
+      />
+    </>
+  )
 
   return (
     <div
@@ -1762,9 +1873,15 @@ export function ChatApp({
         }}
       >
         <Sidebar
+          agents={agents}
           activeId={activeId}
-          onSelect={setActiveId}
+          onSelect={(id) => {
+            setActiveId(id)
+            setSendError(null)
+          }}
+          onNewTask={() => setActiveId(null)}
           onCollapse={() => setCollapsed(true)}
+          status={status}
         />
         <div style={{ width: 1, height: '100%', flexShrink: 0, backgroundColor: C.sidebarBorder }} />
       </motion.div>
@@ -1782,32 +1899,60 @@ export function ChatApp({
           collapsed={collapsed}
           onExpand={() => setCollapsed(false)}
           title={title}
-          turnCount={turns.length}
+          entry={activeEntry}
         />
-        <Transcript turns={turns} includeSafeMdx={includeSafeMdx} listRef={listRef} />
+        {status === 'error' ? (
+          <CenterMessage
+            title={`Cannot reach ${daemonHost()}`}
+            detail={`${error}\n\nStart a daemon with: npm install -g @getpaseo/cli && paseo`}
+          />
+        ) : status === 'connecting' ? (
+          <CenterMessage title={`Connecting to ${daemonHost()}…`} />
+        ) : visibleTurns.length === 0 ? (
+          <CenterMessage
+            title={activeId ? 'Starting agent…' : 'New task'}
+            detail={
+              activeId
+                ? undefined
+                : `Pick a model, then describe what to build in ${basename(cwd)}.`
+            }
+          />
+        ) : (
+          <Transcript turns={visibleTurns} listRef={listRef} />
+        )}
+        {sendError && (
+          <div style={{ display: 'flex', flexDirection: 'row', justifyContent: 'center', paddingBottom: 4 }}>
+            <text style={{ fontSize: 12, color: C.danger, width: CONTENT_MAX_WIDTH }}>
+              {sendError}
+            </text>
+          </div>
+        )}
         <Composer
           value={draft}
-          onChange={setDraft}
-          onSend={(text) => {
-            setTurns((current) => [...current, { kind: 'user', text }])
-            setDraft('')
+          onChange={(next) => {
+            setDraft(next)
+            if (sendError) setSendError(null)
           }}
-          model={model}
-          onModelChange={setModel}
-          reasoning={reasoning}
-          onReasoningChange={setReasoning}
-          access={access}
-          onAccessChange={setAccess}
-          mode={mode}
-          onModeChange={setMode}
+          onSend={send}
+          disabledReason={disabledReason}
+          chips={draftChips}
         />
-        <WorkspaceFooter
-          project={project}
-          onProjectChange={setProject}
-          workspace={workspace}
-          onWorkspaceChange={setWorkspace}
-          branch={branch}
-          onBranchChange={setBranch}
+        <FooterBar
+          cwd={activeEntry?.cwd ?? cwd}
+          cwdLocked={Boolean(activeEntry)}
+          cwdOptions={[process.cwd(), ...cwdOptions]}
+          onCwdChange={setCwd}
+          worktree={worktree}
+          onWorktreeChange={setWorktree}
+          statusColor={
+            activeEntry
+              ? agentStatusColor(activeEntry)
+              : status === 'connected'
+                ? C.running
+                : status === 'connecting'
+                  ? C.warn
+                  : C.danger
+          }
         />
       </div>
     </div>
@@ -1820,14 +1965,13 @@ const isEntryPoint =
     : process.argv[1]?.endsWith('chat.tsx')
 
 if (isEntryPoint) {
-  render(<ChatApp turnCount={1_000} includeSafeMdx />, {
-    title: 'Waku · 1,000 messages',
+  render(<ChatApp />, {
+    title: 'Paseo',
     width: 1180,
     height: 820,
     titlebarTransparent: true,
     windowBackground: 'blurred',
     trafficLightX: 16,
     trafficLightY: 17,
-    debugFrameOverlay: 'full',
   })
 }
