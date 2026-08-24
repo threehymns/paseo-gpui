@@ -35,6 +35,8 @@ export function errorMessage(err: unknown): string {
   return typeof err === 'string' ? err : JSON.stringify(err)
 }
 
+export type ConnStatus = 'connecting' | 'connected' | 'error'
+
 // ---- shared SDK views ------------------------------------------------------
 
 export type AgentDirectoryEntry = PaseoAgentListResult['entries'][number]

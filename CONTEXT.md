@@ -1,0 +1,60 @@
+# gpuix-chat
+
+A desktop chat client rendered on the GPU (`@gpuix/react`), viewed over a live
+Paseo daemon. The vocabulary follows Paseo's own terms.
+
+## Language
+
+**Daemon**:
+The Paseo process the app connects to over WebSocket; the sole source of truth.
+_Avoid_: server, backend, API
+
+**Agent**:
+A running (or finished) Paseo agent working in a workspace directory. One agent
+owns one conversation timeline.
+
+**Agent directory**:
+The list of known agents, kept fresh by subscription updates, grouped by
+recency in the sidebar.
+_Avoid_: session list, conversation list
+
+**Timeline item**:
+One event on an agent's timeline as the daemon emits it (user message,
+assistant delta, reasoning delta, tool call, todo snapshot, error).
+
+**Turn**:
+A transcript row produced by folding timeline items: user, assistant,
+reasoning, tool, todo, or error. Streaming deltas merge into the previous turn
+of their kind; tool calls replace by call id.
+_Avoid_: message, item
+
+**Transcript**:
+The ordered turns shown for one agent, including optimistic sends not yet
+echoed by the daemon.
+
+**Pending send**:
+A user text queued optimistically before the daemon echoes it back. Echoes
+settle the queue head that matches, first-in-first-out.
+_Avoid_: seed, echo buffer
+
+**Conversation**:
+Everything seen for one selected agent: its transcript plus connection state
+(loading, ready, error). Attaching to a freshly created agent seeds the first
+pending send from the prompt.
+
+**Provider catalog**:
+The daemon's providers and their models, modes, and thinking options;
+only ready providers are selectable.
+
+**Draft config**:
+The model/thinking/mode triple a new agent will start with. It tracks catalog
+defaults until the user overrides it; picking a model resets thinking and mode.
+_Avoid_: settings, preferences
+
+**Composer**:
+The draft input area with its config chips, used both to create an agent and
+to send follow-up prompts to the active one.
+
+**Workspace**:
+A directory an agent can run in, listed by the daemon. A **worktree** is a git
+worktree variant of one.

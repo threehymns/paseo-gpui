@@ -2,7 +2,8 @@
   "name": "gpuix-chat",
   "private": true,
   "scripts": {
-    "start": "bun --hot chat.tsx"
+    "start": "bun --hot chat.tsx",
+    "test": "bun test"
   },
   "dependencies": {
     "@getpaseo/client": "^0.5.2",

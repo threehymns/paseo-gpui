@@ -1,0 +1,118 @@
+import { describe, expect, test } from 'bun:test'
+import {
+  initialConversation,
+  reduceConversation,
+  visibleTurns,
+  type ConversationEvent,
+  type ConversationState,
+} from './conversation'
+import type { TimelineItem } from './paseo'
+
+const user = (text: string): TimelineItem => ({ type: 'user_message', text })
+const assistant = (text: string): TimelineItem => ({ type: 'assistant_message', text })
+
+function run(events: ConversationEvent[]): ConversationState {
+  return events.reduce(reduceConversation, initialConversation)
+}
+
+describe('agent conversation', () => {
+  test('reset seeds the pending queue for a freshly created agent', () => {
+    const state = run([{ type: 'reset', seedText: 'fix the bug' }])
+    expect(state.pending).toEqual(['fix the bug'])
+    expect(visibleTurns(state)).toEqual([{ kind: 'user', text: 'fix the bug' }])
+  })
+
+  test('loaded replaces turns and marks ready', () => {
+    const state = run([
+      { type: 'reset', seedText: 'fix the bug' },
+      { type: 'loaded', items: [user('fix the bug'), assistant('On it.')] },
+    ])
+    expect(state.status).toBe('ready')
+    expect(state.error).toBeNull()
+    expect(state.turns).toHaveLength(2)
+  })
+
+  test('a matching server echo settles the pending head — FIFO, one per echo', () => {
+    const state = run([
+      { type: 'sendQueued', text: 'do it' },
+      { type: 'sendQueued', text: 'do it' },
+      { type: 'timeline', item: user('do it') },
+      { type: 'timeline', item: user('do it') },
+    ])
+    expect(state.pending).toEqual([])
+    // Both echoes landed as server truth.
+    expect(state.turns.filter((turn) => turn.kind === 'user')).toHaveLength(2)
+  })
+
+  test('an unmatched echo leaves pending alone (no text-matching false positives)', () => {
+    const state = run([
+      { type: 'sendQueued', text: 'do it' },
+      { type: 'timeline', item: user('something else entirely') },
+    ])
+    expect(state.pending).toEqual(['do it'])
+  })
+
+  test('the optimistic turn disappears once settled, not before', () => {
+    const mid = run([
+      { type: 'loaded', items: [assistant('hi')] },
+      { type: 'sendQueued', text: 'hello' },
+    ])
+    expect(visibleTurns(mid).at(-1)).toEqual({ kind: 'user', text: 'hello' })
+    const settled = reduceConversation(mid, { type: 'timeline', item: user('hello') })
+    expect(visibleTurns(settled).filter((turn) => turn.kind === 'user')).toHaveLength(1)
+    expect(settled.pending).toEqual([])
+  })
+
+  test('sendFailed drops the queued send and surfaces an error turn', () => {
+    const state = run([
+      { type: 'loaded', items: [] },
+      { type: 'sendQueued', text: 'hello' },
+      { type: 'sendFailed', error: new Error('daemon went away') },
+    ])
+    expect(state.pending).toEqual([])
+    expect(state.turns.at(-1)!.kind).toBe('error')
+    expect((state.turns.at(-1) as { text: string }).text).toContain('daemon went away')
+  })
+
+  test('turnFailed becomes an error turn in the transcript', () => {
+    const state = run([{ type: 'turnFailed', message: 'model overloaded' }])
+    expect((state.turns[0] as { text?: string }).text).toBe('model overloaded')
+  })
+
+  test('loadFailed marks the conversation errored instead of hanging on loading', () => {
+    const state = run([{ type: 'loadFailed', error: new Error('archived') }])
+    expect(state.status).toBe('error')
+    expect(state.error).toBe('archived')
+    // A later successful load recovers it.
+    const recovered = reduceConversation(state, { type: 'loaded', items: [assistant('back')] })
+    expect(recovered.status).toBe('ready')
+    expect(recovered.error).toBeNull()
+  })
+
+  test('timeline items fold through unchanged semantics (tool replace-by-callId)', () => {
+    let state = initialConversation
+    state = reduceConversation(state, {
+      type: 'timeline',
+      item: {
+        type: 'tool_call',
+        callId: 'c1',
+        name: 'bash',
+        detail: { type: 'shell', command: 'ls' },
+        status: 'running',
+        error: null,
+      } as never,
+    })
+    state = reduceConversation(state, {
+      type: 'timeline',
+      item: {
+        type: 'tool_call',
+        callId: 'c1',
+        name: 'bash',
+        detail: { type: 'shell', command: 'ls' },
+        status: 'completed',
+        error: null,
+      } as never,
+    })
+    expect(state.turns).toHaveLength(1)
+  })
+})

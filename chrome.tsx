@@ -1,0 +1,509 @@
+/**
+ * Window chrome: icon plumbing, buttons, status dots, the agent directory
+ * sidebar, the conversation header, and full-canvas center messages.
+ */
+
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import React, { useMemo } from 'react'
+import { DAEMON_URL, basename, displayName, groupLabel, relativeTime, sortAgents, type AgentEntry, type ConnStatus } from './paseo'
+import { C, SIDEBAR_WIDTH, TITLEBAR_HEIGHT, TRAFFIC_LIGHT_CLEARANCE } from './theme'
+
+function realAssetPath(virtualPath: string): string {
+  if (!virtualPath.includes('/$bunfs/')) return virtualPath
+  const destDir = path.join(tmpdir(), 'gpuix-chat-assets')
+  mkdirSync(destDir, { recursive: true })
+  const dest = path.join(destDir, path.basename(virtualPath))
+  writeFileSync(dest, readFileSync(virtualPath))
+  return dest
+}
+
+import iconCompose from './assets/icons/compose.svg' with { type: 'file' }
+import iconSearch from './assets/icons/search.svg' with { type: 'file' }
+import iconSidebar from './assets/icons/panel-left.svg' with { type: 'file' }
+import iconPanelRight from './assets/icons/panel-right.svg' with { type: 'file' }
+import iconArrowLeft from './assets/icons/arrow-left.svg' with { type: 'file' }
+import iconArrowRight from './assets/icons/arrow-right.svg' with { type: 'file' }
+import iconFolder from './assets/icons/folder.svg' with { type: 'file' }
+import iconSettings from './assets/icons/settings.svg' with { type: 'file' }
+import iconGitBranch from './assets/icons/git-branch.svg' with { type: 'file' }
+import iconLaptop from './assets/icons/laptop.svg' with { type: 'file' }
+import iconLock from './assets/icons/lock.svg' with { type: 'file' }
+import iconList from './assets/icons/list.svg' with { type: 'file' }
+import iconZap from './assets/icons/zap.svg' with { type: 'file' }
+import iconPencil from './assets/icons/pencil.svg' with { type: 'file' }
+import iconChevronDown from './assets/icons/chevron-down.svg' with { type: 'file' }
+import iconListFilter from './assets/icons/list-filter.svg' with { type: 'file' }
+import iconSparkle from './assets/icons/sparkle.svg' with { type: 'file' }
+import iconWrench from './assets/icons/wrench.svg' with { type: 'file' }
+import iconSend from './assets/icons/arrow-up.svg' with { type: 'file' }
+import iconCheck from './assets/icons/check.svg' with { type: 'file' }
+
+const ICONS = {
+  compose: realAssetPath(iconCompose),
+  search: realAssetPath(iconSearch),
+  sidebar: realAssetPath(iconSidebar),
+  panelRight: realAssetPath(iconPanelRight),
+  arrowLeft: realAssetPath(iconArrowLeft),
+  arrowRight: realAssetPath(iconArrowRight),
+  folder: realAssetPath(iconFolder),
+  settings: realAssetPath(iconSettings),
+  gitBranch: realAssetPath(iconGitBranch),
+  laptop: realAssetPath(iconLaptop),
+  lock: realAssetPath(iconLock),
+  list: realAssetPath(iconList),
+  zap: realAssetPath(iconZap),
+  pencil: realAssetPath(iconPencil),
+  chevronDown: realAssetPath(iconChevronDown),
+  listFilter: realAssetPath(iconListFilter),
+  sparkle: realAssetPath(iconSparkle),
+  wrench: realAssetPath(iconWrench),
+  send: realAssetPath(iconSend),
+  check: realAssetPath(iconCheck),
+} as const
+
+export type IconName = keyof typeof ICONS
+
+export function Icon({ name, size = 14, color }: { name: IconName; size?: number; color: string }) {
+  return <svg src={ICONS[name]} style={{ width: size, height: size, flexShrink: 0, color }} />
+}
+
+export function IconButton({
+  icon,
+  onClick,
+  dimmed,
+  size = 14,
+  testId,
+}: {
+  icon: IconName
+  onClick?: () => void
+  dimmed?: boolean
+  size?: number
+  testId?: string
+}) {
+  return (
+    <div
+      testId={testId}
+      style={{
+        width: 26,
+        height: 26,
+        flexShrink: 0,
+        borderRadius: 6,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        cursor: 'pointer',
+        opacity: dimmed ? 0.35 : 1,
+        hover: dimmed ? undefined : { backgroundColor: C.overlay },
+        active: dimmed ? undefined : { backgroundColor: C.overlayStrong },
+      }}
+      onClick={onClick}
+    >
+      <Icon name={icon} size={size} color={C.tertiary} />
+    </div>
+  )
+}
+
+export function StatusDot({ color, size = 7 }: { color: string; size?: number }) {
+  return (
+    <div
+      style={{
+        width: size,
+        height: size,
+        borderRadius: size / 2,
+        backgroundColor: color,
+        flexShrink: 0,
+      }}
+    />
+  )
+}
+
+export function agentStatusColor(entry: AgentEntry): string {
+  if (entry.requiresAttention) return C.accent
+  switch (entry.status) {
+    case 'running':
+      return C.running
+    case 'initializing':
+      return C.warn
+    case 'error':
+      return C.danger
+    case 'closed':
+      return C.ghost
+    default:
+      return C.ok
+  }
+}
+
+function SidebarAction({
+  icon,
+  label,
+  onClick,
+}: {
+  icon: IconName
+  label: string
+  onClick?: () => void
+}) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 10,
+        height: 32,
+        paddingLeft: 4,
+        paddingRight: 4,
+        borderRadius: 7,
+        cursor: 'pointer',
+        hover: { backgroundColor: C.item },
+        active: { backgroundColor: C.overlayStrong },
+      }}
+      onClick={onClick}
+    >
+      <div
+        style={{
+          width: 20,
+          height: 20,
+          flexShrink: 0,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        <Icon name={icon} size={14} color={C.secondary} />
+      </div>
+      <text style={{ fontSize: 13, color: C.secondary }}>{label}</text>
+    </div>
+  )
+}
+
+function AgentRow({
+  entry,
+  active,
+  onSelect,
+}: {
+  entry: AgentEntry
+  active: boolean
+  onSelect: (id: string) => void
+}) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 4,
+        paddingLeft: 8,
+        paddingRight: 8,
+        paddingTop: 7,
+        paddingBottom: 7,
+        borderRadius: 7,
+        cursor: 'pointer',
+        backgroundColor: active ? C.item : '#00000000',
+        hover: { backgroundColor: C.item },
+      }}
+      onClick={() => onSelect(entry.id)}
+    >
+      <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+        <text
+          style={{
+            fontSize: 13.5,
+            lineHeight: 18,
+            color: C.text,
+            whiteSpace: 'nowrap',
+            textOverflow: 'ellipsis',
+            minWidth: 0,
+            flexGrow: 1,
+          }}
+        >
+          {displayName(entry)}
+        </text>
+        {(entry.status === 'running' || entry.requiresAttention || entry.status === 'error') && (
+          <StatusDot color={agentStatusColor(entry)} />
+        )}
+        <text style={{ fontSize: 12.5, color: C.ghost, flexShrink: 0 }}>{relativeTime(entry)}</text>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+        <Icon name="folder" size={12.5} color={C.tertiary} />
+        <text
+          style={{
+            fontSize: 13,
+            lineHeight: 15,
+            color: C.tertiary,
+            flexGrow: 1,
+            minWidth: 0,
+            whiteSpace: 'nowrap',
+            textOverflow: 'ellipsis',
+          }}
+        >
+          {basename(entry.cwd)}
+        </text>
+        <text style={{ fontSize: 11.5, color: C.ghost, flexShrink: 0 }}>
+          {entry.model ?? entry.provider}
+        </text>
+      </div>
+    </div>
+  )
+}
+
+export function Sidebar({
+  agents,
+  activeId,
+  onSelect,
+  onNewTask,
+  onCollapse,
+  status,
+}: {
+  agents: AgentEntry[]
+  activeId: string | null
+  onSelect: (id: string) => void
+  onNewTask: () => void
+  onCollapse: () => void
+  status: ConnStatus
+}) {
+  const groups = useMemo(() => {
+    const out: { name: string; items: AgentEntry[] }[] = []
+    for (const entry of sortAgents(agents)) {
+      const name = groupLabel(entry)
+      const last = out[out.length - 1]
+      if (last && last.name === name) last.items.push(entry)
+      else out.push({ name, items: [entry] })
+    }
+    return out
+  }, [agents])
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        width: SIDEBAR_WIDTH,
+        flexShrink: 0,
+        height: '100%',
+        backgroundColor: C.sidebar,
+        userSelect: 'none',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'row',
+          alignItems: 'center',
+          height: TITLEBAR_HEIGHT,
+          flexShrink: 0,
+        }}
+      >
+        <div style={{ width: TRAFFIC_LIGHT_CLEARANCE, height: '100%', flexShrink: 0 }} />
+        <IconButton icon="sidebar" size={16} testId="sidebar-collapse" onClick={onCollapse} />
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 2,
+            marginLeft: 6,
+          }}
+        >
+          <IconButton icon="arrowLeft" dimmed />
+          <IconButton icon="arrowRight" dimmed />
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', paddingLeft: 10, paddingRight: 10 }}>
+        <SidebarAction icon="compose" label="New Task" onClick={onNewTask} />
+      </div>
+
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          flexGrow: 1,
+          minHeight: 0,
+          overflowY: 'scroll',
+          paddingLeft: 10,
+          paddingRight: 10,
+        }}
+      >
+        {groups.map((group, groupIndex) => (
+          <div
+            key={group.name}
+            style={{ display: 'flex', flexDirection: 'column', paddingBottom: 10 }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'row',
+                alignItems: 'center',
+                height: 28,
+                paddingLeft: 8,
+                paddingRight: 8,
+              }}
+            >
+              <text
+                style={{
+                  fontSize: 13,
+                  fontWeight: 500,
+                  color: C.secondary,
+                  flexGrow: 1,
+                  minWidth: 0,
+                }}
+              >
+                {group.name}
+              </text>
+              {groupIndex === 0 && <Icon name="listFilter" size={14} color={C.secondary} />}
+            </div>
+            {group.items.map((entry) => (
+              <AgentRow
+                key={entry.id}
+                entry={entry}
+                active={entry.id === activeId}
+                onSelect={onSelect}
+              />
+            ))}
+          </div>
+        ))}
+        {groups.length === 0 && (
+          <div style={{ padding: 14 }}>
+            <text style={{ fontSize: 12.5, lineHeight: 17, color: C.tertiary }}>
+              No agents yet. Start one from the composer.
+            </text>
+          </div>
+        )}
+      </div>
+
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: 8,
+          height: 40,
+          flexShrink: 0,
+          paddingLeft: 14,
+          paddingRight: 10,
+        }}
+      >
+        <StatusDot
+          color={status === 'connected' ? C.ok : status === 'connecting' ? C.warn : C.danger}
+          size={8}
+        />
+        <text style={{ fontSize: 12, color: C.tertiary, flexGrow: 1, minWidth: 0 }}>
+          {daemonHost()}
+        </text>
+        <IconButton icon="settings" />
+      </div>
+    </div>
+  )
+}
+
+export function daemonHost(): string {
+  try {
+    return new URL(DAEMON_URL).host
+  } catch {
+    return DAEMON_URL
+  }
+}
+
+export function CenterMessage({ title, detail }: { title: string; detail?: string }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 10,
+        flexGrow: 1,
+        minHeight: 0,
+      }}
+    >
+      <Icon name="sparkle" size={22} color={C.ghost} />
+      <text style={{ fontSize: 15, fontWeight: 600, color: C.secondary }}>{title}</text>
+      {detail && (
+        <text style={{ fontSize: 13, lineHeight: 18, color: C.tertiary, textAlign: 'center' }}>
+          {detail}
+        </text>
+      )}
+    </div>
+  )
+}
+
+export function Header({
+  collapsed,
+  onExpand,
+  title,
+  entry,
+}: {
+  collapsed: boolean
+  onExpand: () => void
+  title: string
+  entry: AgentEntry | null
+}) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+        height: TITLEBAR_HEIGHT,
+        flexShrink: 0,
+        paddingLeft: collapsed ? 0 : 14,
+        paddingRight: 14,
+        userSelect: 'none',
+      }}
+    >
+      {collapsed && (
+        <>
+          <div style={{ width: TRAFFIC_LIGHT_CLEARANCE - 8, height: '100%', flexShrink: 0 }} />
+          <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <IconButton icon="sidebar" testId="sidebar-expand" onClick={onExpand} />
+            <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 2 }}>
+              <IconButton icon="arrowLeft" dimmed />
+              <IconButton icon="arrowRight" dimmed />
+            </div>
+          </div>
+        </>
+      )}
+      <text
+        style={{
+          fontSize: 13,
+          fontWeight: 500,
+          color: C.text,
+          whiteSpace: 'nowrap',
+          textOverflow: 'ellipsis',
+          minWidth: 0,
+          flexShrink: 1,
+        }}
+      >
+        {title}
+      </text>
+      {entry?.requiresAttention && entry.attentionReason === 'permission' && (
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 5,
+            flexShrink: 0,
+            height: 20,
+            paddingLeft: 8,
+            paddingRight: 8,
+            borderRadius: 10,
+            backgroundColor: '#E2795B1A',
+          }}
+        >
+          <StatusDot color={C.accent} size={6} />
+          <text style={{ fontSize: 11.5, fontWeight: 500, color: C.accent }}>Needs approval</text>
+        </div>
+      )}
+      {entry?.status === 'running' && !entry.requiresAttention && (
+        <text style={{ fontSize: 12, fontWeight: 500, color: C.running, flexShrink: 0 }}>
+          Working…
+        </text>
+      )}
+      <div style={{ flexGrow: 1 }} />
+      <IconButton icon="panelRight" />
+    </div>
+  )
+}
