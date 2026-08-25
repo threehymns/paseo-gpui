@@ -11,9 +11,26 @@ import {
   modelChoices,
   findModel,
   basename,
+  toolDetailParts,
   type AgentEntry,
   type ProviderEntry,
+  type ToolCallDetail,
 } from './paseo'
+
+const toolCall = (over: {
+  callId?: string
+  name?: string
+  detail: unknown
+  status?: 'running' | 'completed' | 'failed'
+}): TimelineItem =>
+  ({
+    type: 'tool_call',
+    callId: over.callId ?? 'c1',
+    name: over.name ?? 'bash',
+    detail: over.detail,
+    status: over.status ?? 'running',
+    error: null,
+  }) as never
 
 // ---- timeline mapping ------------------------------------------------------
 
@@ -27,14 +44,7 @@ describe('timeline mapping', () => {
       { type: 'user_message', text: 'fix the bug' },
       { type: 'assistant_message', text: 'Looking' },
       { type: 'assistant_message', text: ' into it.' },
-      {
-        type: 'tool_call',
-        callId: 'c1',
-        name: 'bash',
-        detail: { type: 'shell', command: 'npm test' },
-        status: 'running',
-        error: null,
-      } as never,
+      toolCall({ detail: { type: 'shell', command: 'npm test' } }),
     ])
     expect(turns).toHaveLength(3)
     expect(turns[0]).toEqual({ kind: 'user', text: 'fix the bug' })
@@ -48,37 +58,43 @@ describe('timeline mapping', () => {
   })
 
   test('tool updates replace in place by callId', () => {
-    let turns = buildTurns([
-      {
-        type: 'tool_call',
-        callId: 'c1',
-        name: 'bash',
-        detail: { type: 'shell', command: 'npm test' },
-        status: 'running',
-        error: null,
-      } as never,
-    ])
-    turns = applyTimelineItem(turns, {
-      type: 'tool_call',
-      callId: 'c1',
-      name: 'bash',
-      detail: { type: 'shell', command: 'npm test', exitCode: 0 },
-      status: 'completed',
-      error: null,
-    } as never)
+    let turns = buildTurns([toolCall({ detail: { type: 'shell', command: 'npm test' } })])
+    turns = applyTimelineItem(
+      turns,
+      toolCall({ detail: { type: 'shell', command: 'npm test', exitCode: 0 }, status: 'completed' }),
+    )
     expect(turns).toHaveLength(1)
     expect((turns[0] as { status: string }).status).toBe('ok')
   })
 
+  test('tool turns carry the structured detail alongside the flattened summary', () => {
+    const turns = buildTurns([toolCall({ detail: { type: 'shell', command: 'npm test' } })])
+    const tool = turns[0] as { kind: string; detail?: string; structured?: ToolCallDetail }
+    expect(tool.kind).toBe('tool')
+    expect(tool.detail).toBe('npm test')
+    expect(tool.structured).toEqual({ type: 'shell', command: 'npm test' })
+  })
+
+  test('the structured detail survives replace-in-place streaming updates', () => {
+    let turns = buildTurns([toolCall({ detail: { type: 'shell', command: 'npm test' } })])
+    turns = applyTimelineItem(
+      turns,
+      toolCall({ detail: { type: 'shell', command: 'npm test', output: '3 passing\n', exitCode: 0 }, status: 'completed' }),
+    )
+    expect(turns).toHaveLength(1)
+    const tool = turns[0] as { status: string; detail?: string; structured?: { output?: string; exitCode?: number } }
+    expect(tool.status).toBe('ok')
+    expect(tool.detail).toBe('npm test')
+    expect(tool.structured).toEqual({ type: 'shell', command: 'npm test', output: '3 passing\n', exitCode: 0 })
+  })
+
   test('edit tool calls carry the patch', () => {
-    const turns = applyTimelineItem([], {
-      type: 'tool_call',
+    const turns = applyTimelineItem([], toolCall({
       callId: 'c2',
       name: 'edit_file',
       detail: { type: 'edit', filePath: 'src/x.ts', unifiedDiff: 'diff --git a/x b/x' },
       status: 'completed',
-      error: null,
-    } as never)
+    }))
     expect((turns[0] as { patch?: string }).patch).toBe('diff --git a/x b/x')
   })
 
@@ -91,6 +107,138 @@ describe('timeline mapping', () => {
   test('errors become error turns', () => {
     const turns = applyTimelineItem([], { type: 'error', message: 'boom' })
     expect(turns[turns.length - 1]!.kind).toBe('error')
+  })
+})
+
+// ---- expanded tool detail ---------------------------------------------------
+
+describe('tool detail parts', () => {
+  test('shell shows output then exit code, colored by success', () => {
+    const ok = toolDetailParts({ type: 'shell', command: 'npm test', output: '3 passing\n', exitCode: 0 })
+    expect(ok).toEqual([
+      { type: 'log', text: '3 passing' },
+      { type: 'meta', text: 'exit 0', tone: 'ok' },
+    ])
+    expect(toolDetailParts({ type: 'shell', command: 'rm -rf /', output: 'nope', exitCode: 1 })).toEqual([
+      { type: 'log', text: 'nope' },
+      { type: 'meta', text: 'exit 1', tone: 'danger' },
+    ])
+  })
+
+  test('shell with neither output nor exit code is not expandable', () => {
+    expect(toolDetailParts({ type: 'shell', command: 'npm test' })).toEqual([])
+    expect(toolDetailParts({ type: 'shell', command: 'npm test', output: '   ', exitCode: null })).toEqual([])
+  })
+
+  test('search shows match/file counts and result paths', () => {
+    const parts = toolDetailParts({
+      type: 'search',
+      query: 'useReducer',
+      numMatches: 1,
+      numFiles: 2,
+      filePaths: ['src/a.ts', 'src/b.ts'],
+    })
+    expect(parts).toEqual([
+      { type: 'meta', text: '1 match in 2 files' },
+      { type: 'log', label: 'paths', text: 'src/a.ts\nsrc/b.ts' },
+    ])
+    expect(
+      toolDetailParts({ type: 'search', query: 'q', numMatches: 5 })[0],
+    ).toEqual({ type: 'meta', text: '5 matches' })
+    expect(
+      toolDetailParts({ type: 'search', query: 'q', numFiles: 3 })[0],
+    ).toEqual({ type: 'meta', text: '3 files' })
+  })
+
+  test('web search shows results as paths', () => {
+    const parts = toolDetailParts({
+      type: 'search',
+      query: 'gpui',
+      toolName: 'web_search',
+      numMatches: 2,
+      webResults: [
+        { title: 'GPUI docs', url: 'https://example.com/gpui' },
+        { title: 'https://plain.url', url: 'https://plain.url' },
+      ],
+    })
+    expect(parts).toEqual([
+      { type: 'meta', text: '2 results' },
+      {
+        type: 'log',
+        label: 'results',
+        text: 'GPUI docs\n  https://example.com/gpui\nhttps://plain.url',
+      },
+    ])
+  })
+
+  test('fetch shows status code and result text', () => {
+    expect(toolDetailParts({ type: 'fetch', url: 'https://x.dev', code: 200, codeText: 'OK', result: '<html>' })).toEqual([
+      { type: 'meta', text: '200 OK', tone: 'ok' },
+      { type: 'log', text: '<html>' },
+    ])
+    expect(toolDetailParts({ type: 'fetch', url: 'https://x.dev', code: 404 })[0]).toEqual({
+      type: 'meta',
+      text: '404',
+      tone: 'danger',
+    })
+    expect(toolDetailParts({ type: 'fetch', url: 'https://x.dev', result: 'body' })).toEqual([
+      { type: 'log', text: 'body' },
+    ])
+  })
+
+  test('worktree setup renders each step with its log', () => {
+    const parts = toolDetailParts({
+      type: 'worktree_setup',
+      worktreePath: '/wt',
+      branchName: 'feature',
+      log: '',
+      commands: [
+        { index: 1, command: 'bun install', cwd: '/wt', log: 'installed 156 packages', status: 'completed', exitCode: 0 },
+        { index: 2, command: 'bun test', cwd: '/wt', log: '', status: 'failed', exitCode: 1 },
+        { index: 3, command: 'bun lint', cwd: '/wt', log: 'linting…', status: 'running', exitCode: null },
+      ],
+    })
+    expect(parts).toEqual([
+      { type: 'meta', text: '✓ bun install', tone: 'ok' },
+      { type: 'log', text: 'installed 156 packages' },
+      { type: 'meta', text: '✗ bun test (exit 1)', tone: 'danger' },
+      { type: 'meta', text: '• bun lint' },
+      { type: 'log', text: 'linting…' },
+    ])
+  })
+
+  test('worktree setup without steps falls back to its raw log', () => {
+    expect(
+      toolDetailParts({ type: 'worktree_setup', worktreePath: '/wt', branchName: 'b', log: 'did things', commands: [] }),
+    ).toEqual([{ type: 'log', text: 'did things' }])
+  })
+
+  test('sub-agent shows its step log followed by action summaries', () => {
+    const parts = toolDetailParts({
+      type: 'sub_agent',
+      subAgentType: 'explore',
+      description: 'find callers',
+      childSessionId: 's1',
+      log: 'reading src/x.ts\nreading src/y.ts',
+      actions: [
+        { index: 1, toolName: 'read', summary: 'src/x.ts' },
+        { index: 2, toolName: 'grep' },
+      ],
+    })
+    expect(parts).toEqual([
+      { type: 'log', text: 'reading src/x.ts\nreading src/y.ts' },
+      { type: 'meta', text: 'read: src/x.ts' },
+      { type: 'meta', text: 'grep' },
+    ])
+  })
+
+  test('kinds without a structured detail view are not expandable', () => {
+    expect(toolDetailParts({ type: 'read', filePath: 'a.ts' })).toEqual([])
+    expect(toolDetailParts({ type: 'write', filePath: 'a.ts' })).toEqual([])
+    expect(toolDetailParts({ type: 'edit', filePath: 'a.ts', unifiedDiff: 'diff' })).toEqual([])
+    expect(toolDetailParts({ type: 'plan', text: 'the plan' })).toEqual([])
+    expect(toolDetailParts({ type: 'plain_text', text: 'hi' })).toEqual([])
+    expect(toolDetailParts({ type: 'unknown', input: {}, output: {} })).toEqual([])
   })
 })
 

@@ -68,7 +68,7 @@ export type ProviderMode = NonNullable<ProviderEntry['modes']>[number]
 type StreamEvent = PaseoAgentStream['event']
 export type TimelineItem = Extract<StreamEvent, { type: 'timeline' }>['item']
 type ToolCallItem = Extract<TimelineItem, { type: 'tool_call' }>
-type ToolDetail = ToolCallItem['detail']
+export type ToolCallDetail = ToolCallItem['detail']
 
 // ---- permissions ------------------------------------------------------------
 
@@ -106,13 +106,15 @@ export type Turn =
       tool: ToolName
       title: string
       detail?: string
+      /** Structured detail from the daemon, expanded in place on activation. */
+      structured?: ToolCallDetail
       patch?: string
       status: ToolStatus
     }
   | { kind: 'error'; text: string }
 
 function toolMeta(item: ToolCallItem): Pick<Turn & { kind: 'tool' }, 'tool' | 'title' | 'detail' | 'patch'> {
-  const d: ToolDetail | undefined = item.detail
+  const d: ToolCallDetail | undefined = item.detail
   switch (d?.type) {
     case 'shell':
       return { tool: 'bash', title: 'Bash', detail: d.command }
@@ -147,6 +149,99 @@ function appendTurn(turns: Turn[], turn: Turn): Turn[] {
   return [...turns, turn]
 }
 
+// ---- expanded tool detail ---------------------------------------------------
+
+/**
+ * One rendered piece of an expanded tool row: a short status/count line
+ * (`meta`) or a preformatted output/log block (`log`).
+ */
+export type ToolDetailPart =
+  | { type: 'meta'; text: string; tone?: 'ok' | 'danger' }
+  | { type: 'log'; label?: string; text: string }
+
+function plural(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`
+}
+
+function searchCountMeta(d: Extract<ToolCallDetail, { type: 'search' }>): ToolDetailPart | null {
+  if (d.toolName === 'web_search') {
+    const count = d.webResults?.length ?? d.numMatches
+    return count == null ? null : { type: 'meta', text: plural(count, 'result', 'results') }
+  }
+  if (d.numMatches != null && d.numFiles != null) {
+    return { type: 'meta', text: `${plural(d.numMatches, 'match', 'matches')} in ${plural(d.numFiles, 'file', 'files')}` }
+  }
+  if (d.numMatches != null) return { type: 'meta', text: plural(d.numMatches, 'match', 'matches') }
+  if (d.numFiles != null) return { type: 'meta', text: plural(d.numFiles, 'file', 'files') }
+  return null
+}
+
+/** Maps a tool call's structured detail to the sections shown when its row expands. Empty means not expandable. */
+export function toolDetailParts(detail: ToolCallDetail): ToolDetailPart[] {
+  const parts: ToolDetailPart[] = []
+  switch (detail.type) {
+    case 'shell': {
+      const output = detail.output?.trimEnd()
+      if (output) parts.push({ type: 'log', text: output })
+      if (detail.exitCode != null) {
+        parts.push({ type: 'meta', text: `exit ${detail.exitCode}`, tone: detail.exitCode === 0 ? 'ok' : 'danger' })
+      }
+      return parts
+    }
+    case 'search': {
+      const count = searchCountMeta(detail)
+      if (count) parts.push(count)
+      if (detail.toolName === 'web_search' && detail.webResults?.length) {
+        parts.push({
+          type: 'log',
+          label: 'results',
+          text: detail.webResults.map((r) => (r.title && r.title !== r.url ? `${r.title}\n  ${r.url}` : r.url)).join('\n'),
+        })
+      } else if (detail.filePaths?.length) {
+        parts.push({ type: 'log', label: 'paths', text: detail.filePaths.join('\n') })
+      }
+      return parts
+    }
+    case 'fetch': {
+      const statusText = [detail.code, detail.codeText].filter((v) => v != null).join(' ')
+      if (statusText) {
+        const ok = detail.code == null || (detail.code >= 200 && detail.code < 300)
+        parts.push({ type: 'meta', text: statusText, tone: ok ? 'ok' : 'danger' })
+      }
+      const result = detail.result?.trimEnd()
+      if (result) parts.push({ type: 'log', text: result })
+      return parts
+    }
+    case 'worktree_setup': {
+      for (const step of detail.commands) {
+        const exitSuffix = step.status === 'failed' && step.exitCode != null ? ` (exit ${step.exitCode})` : ''
+        const marker = step.status === 'completed' ? '✓' : step.status === 'failed' ? '✗' : '•'
+        const label = `${marker} ${step.command}${exitSuffix}`
+        if (step.status === 'completed') parts.push({ type: 'meta', text: label, tone: 'ok' })
+        else if (step.status === 'failed') parts.push({ type: 'meta', text: label, tone: 'danger' })
+        else parts.push({ type: 'meta', text: label })
+        const log = step.log.trimEnd()
+        if (log) parts.push({ type: 'log', text: log })
+      }
+      if (parts.length === 0) {
+        const log = detail.log.trimEnd()
+        if (log) parts.push({ type: 'log', text: log })
+      }
+      return parts
+    }
+    case 'sub_agent': {
+      const log = detail.log.trimEnd()
+      if (log) parts.push({ type: 'log', text: log })
+      for (const action of detail.actions ?? []) {
+        parts.push({ type: 'meta', text: action.summary ? `${action.toolName}: ${action.summary}` : action.toolName })
+      }
+      return parts
+    }
+    default:
+      return parts
+  }
+}
+
 /** Folds one timeline item into the transcript. Streaming deltas merge into the previous turn of their kind. */
 export function applyTimelineItem(turns: Turn[], item: TimelineItem): Turn[] {
   switch (item.type) {
@@ -174,7 +269,7 @@ export function applyTimelineItem(turns: Turn[], item: TimelineItem): Turn[] {
       const index = findLastIndex(turns, (t) => t.kind === 'tool' && t.callId === item.callId)
       const status: ToolStatus =
         item.status === 'running' ? 'running' : item.status === 'completed' ? 'ok' : 'failed'
-      const next: Turn = { kind: 'tool', callId: item.callId, ...toolMeta(item), status }
+      const next: Turn = { kind: 'tool', callId: item.callId, ...toolMeta(item), structured: item.detail, status }
       if (index >= 0) return [...turns.slice(0, index), next, ...turns.slice(index + 1)]
       return appendTurn(turns, next)
     }

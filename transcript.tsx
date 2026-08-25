@@ -3,14 +3,16 @@
  * pending permission cards appended after the conversation.
  */
 
-import React, { memo } from 'react'
+import React, { memo, useState } from 'react'
 import { Icon, StatusDot, type IconName } from './chrome'
 import { SafeMdxContent } from './mdx'
 import {
   permissionDisplay,
   permissionKindLabel,
+  toolDetailParts,
   type PermissionKind,
   type PermissionResponse,
+  type ToolDetailPart,
   type ToolName,
   type Turn,
 } from './paseo'
@@ -98,9 +100,66 @@ function TranscriptRow({
   )
 }
 
+function ToolDetailBody({ parts }: { parts: ToolDetailPart[] }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+        minWidth: 0,
+        paddingLeft: 24,
+      }}
+    >
+      {parts.map((part, index) =>
+        part.type === 'meta' ? (
+          <text
+            key={index}
+            style={{
+              fontSize: 12,
+              lineHeight: 16,
+              color:
+                part.tone === 'ok' ? C.ok : part.tone === 'danger' ? C.danger : C.tertiary,
+              flexShrink: 0,
+            }}
+          >
+            {part.text}
+          </text>
+        ) : (
+          <div key={index} style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0 }}>
+            {part.label && (
+              <text style={{ fontSize: 10.5, fontWeight: 500, color: C.ghost, flexShrink: 0 }}>
+                {part.label.toUpperCase()}
+              </text>
+            )}
+            <text
+              style={{
+                fontSize: 12,
+                lineHeight: 17,
+                fontFamily: 'monospace',
+                color: C.secondary,
+                minWidth: 0,
+                maxWidth: '100%',
+              }}
+            >
+              {part.text}
+            </text>
+          </div>
+        ),
+      )}
+    </div>
+  )
+}
+
 function ToolRow({ turn }: { turn: Extract<Turn, { kind: 'tool' }> }) {
   const icon = TOOL_ICONS[turn.tool]
   const detail = oneLine(turn.detail)
+  // Expansion is component-local on purpose: replace-in-place updates to the
+  // same call id swap the turn value but keep this instance, so an open row
+  // stays open while its detail streams in.
+  const [expanded, setExpanded] = useState(false)
+  const parts = turn.structured ? toolDetailParts(turn.structured) : []
+  const expandable = parts.length > 0
   return (
     <div
       style={{
@@ -111,7 +170,20 @@ function ToolRow({ turn }: { turn: Extract<Turn, { kind: 'tool' }> }) {
         minWidth: 0,
       }}
     >
-      <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8, minWidth: 0 }}>
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: 8,
+          minWidth: 0,
+          borderRadius: 6,
+          ...(expandable
+            ? { cursor: 'pointer' as const, hover: { backgroundColor: C.overlay } }
+            : {}),
+        }}
+        onClick={expandable ? () => setExpanded((value) => !value) : undefined}
+      >
         <div style={{ width: 16, height: 16, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           {turn.status === 'running' ? (
             <StatusDot color={C.running} size={7} />
@@ -143,6 +215,7 @@ function ToolRow({ turn }: { turn: Extract<Turn, { kind: 'tool' }> }) {
           <text style={{ fontSize: 12, color: C.danger, flexShrink: 0 }}>failed</text>
         )}
       </div>
+      {expanded && expandable && <ToolDetailBody parts={parts} />}
       {turn.patch && <diff patch={turn.patch} wordDiff theme={CHAT_THEME} />}
     </div>
   )
@@ -416,8 +489,14 @@ export const Transcript = memo(function Transcript({
       estimatedItemHeight={220}
       style={{ flexGrow: 1, minHeight: 0, width: '100%' }}
     >
+      {/* Tool rows key by call id so a row's local expansion state follows its
+          turn through replace-in-place streaming updates and later insertions. */}
       {turns.map((turn, index) => (
-        <TranscriptRow key={`t${index}`} first={index === 0} last={index === rowCount - 1}>
+        <TranscriptRow
+          key={turn.kind === 'tool' ? `tool:${turn.callId}` : `t${index}`}
+          first={index === 0}
+          last={index === rowCount - 1}
+        >
           {turn.kind === 'user' && <UserTurn text={turn.text} />}
           {turn.kind === 'assistant' && <SafeMdxContent source={turn.source} />}
           {turn.kind === 'reasoning' && <ReasoningBlock text={turn.text} />}

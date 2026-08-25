@@ -25,7 +25,9 @@ assistant delta, reasoning delta, tool call, todo snapshot, error).
 **Turn**:
 A transcript row produced by folding timeline items: user, assistant,
 reasoning, tool, todo, or error. Streaming deltas merge into the previous turn
-of their kind; tool calls replace by call id.
+of their kind; tool calls replace by call id. A tool turn carries both a
+flattened summary and the daemon's structured detail; its row expands in place
+to show that detail, with expansion state kept by the row itself.
 _Avoid_: message, item
 
 **Transcript**:
