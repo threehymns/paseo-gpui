@@ -14,6 +14,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { motion, render, useGpuix } from '@gpuix/react'
 import type { PaseoAgentConfig, PaseoClient } from '@getpaseo/client'
+import type { DaemonClient } from '@getpaseo/client/internal/daemon-client'
 import {
   DAEMON_URL,
   applyAgentUpdate,
@@ -25,6 +26,7 @@ import {
   sortAgents,
   type AgentEntry,
   type ConnStatus,
+  type ProviderEntry,
 } from './paseo'
 import { C, CONTENT_MAX_WIDTH, SIDEBAR_WIDTH } from './theme'
 import { Sidebar, Header, CenterMessage, agentStatusColor, daemonHost } from './chrome'
@@ -32,12 +34,14 @@ import { Transcript } from './transcript'
 import { ModelPicker, OptionPicker, modeOptions, thinkingOptions } from './pickers'
 import { Composer, FooterBar } from './composer'
 import { useAgentConversation } from './conversation'
+import { useAgentPermissions } from './permissions'
 import { useDraftConfig } from './draft-config'
 
 // ---- daemon hooks ----------------------------------------------------------
 
 interface DaemonView {
   client: PaseoClient
+  daemon: DaemonClient
   status: ConnStatus
   error: string | null
   agents: AgentEntry[]
@@ -45,7 +49,7 @@ interface DaemonView {
 }
 
 function useDaemon(): DaemonView {
-  const [client] = useState(createDaemonClient)
+  const [{ client, daemon }] = useState(createDaemonClient)
   const [status, setStatus] = useState<ConnStatus>('connecting')
   const [error, setError] = useState<string | null>(null)
   const [agents, setAgents] = useState<AgentEntry[]>([])
@@ -109,14 +113,13 @@ function useDaemon(): DaemonView {
     }
   }, [])
 
-  return { client, status, error, agents, providers }
+  return { client, daemon, status, error, agents, providers }
 }
 
 // ---- app -------------------------------------------------------------------
 
 export function ChatApp() {
-  const daemon = useDaemon()
-  const { client, status, error, agents, providers } = daemon
+  const { client, daemon, status, error, agents, providers } = useDaemon()
 
   const [activeId, setActiveId] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState(false)
@@ -137,6 +140,7 @@ export function ChatApp() {
     onSeedConsumed: () => setPendingSeed(null),
   })
   const turns = conversation.turns
+  const permissions = useAgentPermissions(client, daemon, activeId)
   const activeEntry = agents.find((entry) => entry.id === activeId) ?? null
 
   const { entry: providerOfModel, model: modelDef } = useMemo(
@@ -307,7 +311,7 @@ export function ChatApp() {
           />
         ) : status === 'connecting' ? (
           <CenterMessage title={`Connecting to ${daemonHost()}…`} />
-        ) : visibleTurns.length === 0 ? (
+        ) : visibleTurns.length === 0 && permissions.cards.length === 0 ? (
           <CenterMessage
             title={activeId ? 'Starting agent…' : 'New task'}
             detail={
@@ -317,7 +321,12 @@ export function ChatApp() {
             }
           />
         ) : (
-          <Transcript turns={visibleTurns} listRef={listRef} />
+          <Transcript
+            turns={visibleTurns}
+            permissions={permissions.cards}
+            onRespond={permissions.respond}
+            listRef={listRef}
+          />
         )}
         {createError && (
           <div style={{ display: 'flex', flexDirection: 'row', justifyContent: 'center', paddingBottom: 4 }}>

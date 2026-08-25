@@ -11,23 +11,43 @@
  */
 
 import {
-  createPaseoClient,
+  createPaseoApi,
   type PaseoAgentListResult,
   type PaseoAgentStream,
   type PaseoAgentUpdate,
   type PaseoClient,
   type PaseoProviderSnapshotResult,
 } from '@getpaseo/client'
+import { DaemonClient } from '@getpaseo/client/internal/daemon-client'
 
 export const DAEMON_URL = process.env.PASEO_URL ?? 'ws://127.0.0.1:6767/ws'
 const DAEMON_PASSWORD = process.env.PASEO_PASSWORD
 
-export function createDaemonClient(): PaseoClient {
-  return createPaseoClient({
+/**
+ * The high-level client surface plus the low-level daemon driver it wraps.
+ * The driver is needed for RPCs the SDK does not lift (permission responses).
+ */
+export interface DaemonSession {
+  client: PaseoClient
+  daemon: DaemonClient
+}
+
+export function createDaemonClient(): DaemonSession {
+  const daemon = new DaemonClient({
     url: DAEMON_URL,
+    clientId: `gpuix-chat-${globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)}`,
+    clientType: 'cli',
     ...(DAEMON_PASSWORD ? { password: DAEMON_PASSWORD } : {}),
     reconnect: { enabled: true },
   })
+  const client: PaseoClient = {
+    ...createPaseoApi(daemon),
+    connect: () => daemon.connect(),
+    close: () => daemon.close(),
+    ensureConnected: () => daemon.ensureConnected(),
+    getConnectionState: () => daemon.getConnectionState(),
+  }
+  return { client, daemon }
 }
 
 export function errorMessage(err: unknown): string {
@@ -49,6 +69,15 @@ type StreamEvent = PaseoAgentStream['event']
 export type TimelineItem = Extract<StreamEvent, { type: 'timeline' }>['item']
 type ToolCallItem = Extract<TimelineItem, { type: 'tool_call' }>
 type ToolDetail = ToolCallItem['detail']
+
+// ---- permissions ------------------------------------------------------------
+
+export type PermissionRequestedEvent = Extract<StreamEvent, { type: 'permission_requested' }>
+export type PermissionResolvedEvent = Extract<StreamEvent, { type: 'permission_resolved' }>
+export type PermissionRequest = PermissionRequestedEvent['request']
+export type PermissionKind = PermissionRequest['kind']
+type RespondToPermissionAndWait = DaemonClient['respondToPermissionAndWait']
+export type PermissionResponse = Parameters<RespondToPermissionAndWait>[2]
 
 // ---- transcript turns ------------------------------------------------------
 
@@ -168,6 +197,63 @@ export function applyTimelineItem(turns: Turn[], item: TimelineItem): Turn[] {
 
 export function buildTurns(items: TimelineItem[]): Turn[] {
   return items.reduce(applyTimelineItem, [] as Turn[])
+}
+
+// ---- permission cards -------------------------------------------------------
+
+const KIND_LABELS: Record<PermissionKind, string> = {
+  tool: 'Tool',
+  plan: 'Plan',
+  question: 'Question',
+  mode: 'Mode',
+  other: 'Permission',
+}
+
+export function permissionKindLabel(kind: PermissionKind): string {
+  return KIND_LABELS[kind]
+}
+
+export interface PermissionDisplay {
+  title: string
+  detail?: string
+}
+
+/** One-line summary of what was requested, mirroring tool-call wording. */
+export function permissionDisplay(request: PermissionRequest): PermissionDisplay {
+  const title = request.title?.trim() || request.name
+  const d = request.detail
+  let detail: string | undefined
+  if (d) {
+    switch (d.type) {
+      case 'shell':
+        detail = d.command
+        break
+      case 'read':
+      case 'edit':
+      case 'write':
+        detail = d.filePath
+        break
+      case 'search':
+        detail = d.query
+        break
+      case 'fetch':
+        detail = d.url
+        break
+      case 'worktree_setup':
+        detail = d.branchName
+        break
+      case 'sub_agent':
+        detail = d.description ?? d.subAgentType
+        break
+      case 'plan':
+        detail = d.text
+        break
+      case 'plain_text':
+        detail = d.text ?? d.label
+        break
+    }
+  }
+  return { title, detail: detail ?? request.description ?? undefined }
 }
 
 function findLastIndex<T>(list: T[], predicate: (value: T) => boolean): number {
