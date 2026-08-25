@@ -1,11 +1,20 @@
 /**
- * The transcript: Turn values rendered as rows in a virtualized list.
+ * The transcript: Turn values rendered as rows in a virtualized list, plus
+ * pending permission cards appended after the conversation.
  */
 
 import React, { memo } from 'react'
 import { Icon, StatusDot, type IconName } from './chrome'
 import { SafeMdxContent } from './mdx'
-import type { ToolName, Turn } from './paseo'
+import {
+  permissionDisplay,
+  permissionKindLabel,
+  type PermissionKind,
+  type PermissionResponse,
+  type ToolName,
+  type Turn,
+} from './paseo'
+import { allowResponse, denyResponse, type PermissionEntry } from './permissions'
 import { C, CHAT_THEME, CONTENT_MAX_WIDTH } from './theme'
 
 const TOOL_ICONS: Record<ToolName, IconName> = {
@@ -229,13 +238,149 @@ function ErrorBlock({ text }: { text: string }) {
   )
 }
 
+const PERMISSION_ICONS: Record<PermissionKind, IconName> = {
+  tool: 'wrench',
+  plan: 'list',
+  question: 'sparkle',
+  mode: 'lock',
+  other: 'lock',
+}
+
+function PermissionButton({
+  label,
+  kind,
+  disabled,
+  onClick,
+}: {
+  label: string
+  kind: 'allow' | 'deny'
+  disabled?: boolean
+  onClick?: () => void
+}) {
+  const filled = kind === 'allow'
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        height: 26,
+        paddingLeft: 14,
+        paddingRight: 14,
+        borderRadius: 7,
+        cursor: disabled ? undefined : 'pointer',
+        opacity: disabled ? 0.4 : 1,
+        backgroundColor: filled ? C.inverse : C.overlayStrong,
+        hover: disabled ? undefined : { opacity: 0.85 },
+      }}
+      onClick={disabled ? undefined : onClick}
+    >
+      <text style={{ fontSize: 12.5, fontWeight: 500, color: filled ? C.onInverse : C.secondary }}>
+        {label}
+      </text>
+    </div>
+  )
+}
+
+export function PermissionCard({
+  entry,
+  responding,
+  onRespond,
+}: {
+  entry: PermissionEntry
+  responding: boolean
+  onRespond?: (request: PermissionEntry['request'], response: PermissionResponse) => void
+}) {
+  const { title, detail } = permissionDisplay(entry.request)
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+        width: '100%',
+        minWidth: 0,
+        backgroundColor: C.raised,
+        borderRadius: 10,
+        borderWidth: 1,
+        borderColor: responding ? C.border : C.accent,
+        padding: 12,
+      }}
+    >
+      <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8, minWidth: 0 }}>
+        <Icon name={PERMISSION_ICONS[entry.request.kind]} size={13} color={C.accent} />
+        <text style={{ fontSize: 11.5, fontWeight: 500, color: C.accent, flexShrink: 0, textTransform: 'uppercase' }}>
+          {permissionKindLabel(entry.request.kind)}
+        </text>
+        <text
+          style={{
+            fontSize: 13.5,
+            fontWeight: 500,
+            color: C.text,
+            whiteSpace: 'nowrap',
+            textOverflow: 'ellipsis',
+            minWidth: 0,
+            flexGrow: 1,
+          }}
+        >
+          {title}
+        </text>
+        {responding && (
+          <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+            <StatusDot color={C.running} size={7} />
+            <text style={{ fontSize: 12, color: C.running }}>responding…</text>
+          </div>
+        )}
+      </div>
+      {detail && (
+        <text
+          style={{
+            fontSize: 13,
+            lineHeight: 19,
+            color: C.secondary,
+            minWidth: 0,
+            maxWidth: '100%',
+          }}
+        >
+          {oneLine(detail)}
+        </text>
+      )}
+      <div style={{ display: 'flex', flexDirection: 'row', justifyContent: 'flex-end', gap: 8 }}>
+        <PermissionButton
+          label="Deny"
+          kind="deny"
+          disabled={responding}
+          onClick={() => onRespond?.(entry.request, denyResponse(entry.request))}
+        />
+        <PermissionButton
+          label="Allow"
+          kind="allow"
+          disabled={responding}
+          onClick={() => onRespond?.(entry.request, allowResponse(entry.request))}
+        />
+      </div>
+    </div>
+  )
+}
+
+export interface PendingPermission {
+  entry: PermissionEntry
+  responding: boolean
+}
+
 export const Transcript = memo(function Transcript({
   turns,
+  permissions,
+  onRespond,
   listRef,
 }: {
   turns: Turn[]
+  permissions?: PendingPermission[]
+  onRespond?: (request: PermissionEntry['request'], response: PermissionResponse) => void
   listRef?: React.Ref<{ id: number }>
 }) {
+  const cards = permissions ?? []
+  const rowCount = turns.length + cards.length
   return (
     <virtual-list
       ref={listRef}
@@ -244,13 +389,22 @@ export const Transcript = memo(function Transcript({
       style={{ flexGrow: 1, minHeight: 0, width: '100%' }}
     >
       {turns.map((turn, index) => (
-        <TranscriptRow key={index} first={index === 0} last={index === turns.length - 1}>
+        <TranscriptRow key={`t${index}`} first={index === 0} last={index === rowCount - 1}>
           {turn.kind === 'user' && <UserTurn text={turn.text} />}
           {turn.kind === 'assistant' && <SafeMdxContent source={turn.source} />}
           {turn.kind === 'reasoning' && <ReasoningBlock text={turn.text} />}
           {turn.kind === 'tool' && <ToolRow turn={turn} />}
           {turn.kind === 'todo' && <TodoBlock items={turn.items} />}
           {turn.kind === 'error' && <ErrorBlock text={turn.text} />}
+        </TranscriptRow>
+      ))}
+      {cards.map(({ entry, responding }, index) => (
+        <TranscriptRow
+          key={`p${entry.agentId}:${entry.requestId}`}
+          first={turns.length === 0 && index === 0}
+          last={index === rowCount - 1}
+        >
+          <PermissionCard entry={entry} responding={responding} onRespond={onRespond} />
         </TranscriptRow>
       ))}
     </virtual-list>
