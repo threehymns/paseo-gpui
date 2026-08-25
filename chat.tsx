@@ -23,13 +23,14 @@ import {
   displayName,
   errorMessage,
   findModel,
+  isArchived,
   sortAgents,
   type AgentEntry,
   type ConnStatus,
   type ProviderEntry,
 } from './paseo'
 import { C, CONTENT_MAX_WIDTH, SIDEBAR_WIDTH } from './theme'
-import { Sidebar, Header, CenterMessage, agentStatusColor, daemonHost } from './chrome'
+import { Sidebar, Header, CenterMessage, agentStatusColor, daemonHost, type RowActionRef, type RowActionVerb } from './chrome'
 import { Transcript } from './transcript'
 import { ModelPicker, OptionPicker, modeOptions, thinkingOptions } from './pickers'
 import { Composer, ConfigNotice, FooterBar } from './composer'
@@ -70,8 +71,10 @@ function useDaemon(): DaemonView {
       unsubs.push(
         client.agents.subscribe((update) => setAgents((prev) => applyAgentUpdate(prev, update))),
       )
+      // Archived entries ride along so the sidebar toggle can reveal them;
+      // visibility is decided at render time.
       const sort = [{ key: 'updated_at' as const, direction: 'desc' as const }]
-      const filter = { includeArchived: false }
+      const filter = { includeArchived: true }
       await client.agents.list({ scope: 'active', filter, sort, subscribe: {} })
       const page = await client.agents.list({ scope: 'active', filter, sort })
       if (!disposed) setAgents(sortAgents(page.entries.map((entry) => entry.agent)))
@@ -143,6 +146,35 @@ export function ChatApp() {
   const turns = conversation.turns
   const permissions = useAgentPermissions(client, daemon, activeId)
   const activeEntry = agents.find((entry) => entry.id === activeId) ?? null
+
+  // An agent that vanished from the directory (deleted) or was archived can no
+  // longer host a conversation — Paseo's own client redirects away in both cases.
+  const activeEntryGone =
+    activeId != null &&
+    status === 'connected' &&
+    agents.length > 0 &&
+    !agents.some((entry) => entry.id === activeId && !isArchived(entry))
+  useEffect(() => {
+    if (activeEntryGone) setActiveId(null)
+  }, [activeEntryGone])
+
+  // Row lifecycle actions disable per row while their daemon call is in flight;
+  // directory truth arrives through the subscription, never from these results.
+  const [busyRows, setBusyRows] = useState<RowActionRef[]>([])
+  const runRowAction = async (verb: RowActionVerb, id: string, action: () => Promise<unknown>) => {
+    setBusyRows((prev) => [...prev, { verb, id }])
+    try {
+      await action()
+    } catch (err) {
+      setCreateError(errorMessage(err))
+    } finally {
+      setBusyRows((prev) => prev.filter((row) => row.verb !== verb || row.id !== id))
+    }
+  }
+  const archiveAgentRow = (id: string) => runRowAction('archive', id, () => daemon.archiveAgent(id))
+  const deleteAgentRow = (id: string) => runRowAction('delete', id, () => daemon.deleteAgent(id))
+  const renameAgentRow = (id: string, name: string) =>
+    runRowAction('rename', id, () => daemon.updateAgent(id, { name }))
 
   // Chip values for an active agent come from the live agent; the draft stays
   // authoritative only while no agent is selected.
@@ -305,6 +337,10 @@ export function ChatApp() {
           onNewTask={() => setActiveId(null)}
           onCollapse={() => setCollapsed(true)}
           status={status}
+          busyRows={busyRows}
+          onArchive={archiveAgentRow}
+          onDelete={deleteAgentRow}
+          onRename={renameAgentRow}
         />
         <div style={{ width: 1, height: '100%', flexShrink: 0, backgroundColor: C.sidebarBorder }} />
       </motion.div>

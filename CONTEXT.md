@@ -15,7 +15,9 @@ owns one conversation timeline.
 
 **Agent directory**:
 The list of known agents, kept fresh by subscription updates, grouped by
-recency in the sidebar.
+status bucket in the sidebar (Needs input, Failed, Ready to review, Working,
+Done — mirroring Paseo's own groups). Archived agents stay hidden behind a
+sidebar toggle and read dimmed when revealed; archiving is one-way.
 _Avoid_: session list, conversation list
 
 **Timeline item**:

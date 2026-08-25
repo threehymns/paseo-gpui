@@ -500,22 +500,64 @@ export function displayName(entry: AgentEntry): string {
   return basename(entry.cwd)
 }
 
+// ---- sidebar status groups --------------------------------------------------
+//
+// The directory groups by state bucket rather than date, mirroring Paseo's own
+// sidebar (packages/app, STATUS_BUCKET_ORDER): trouble first, then attention,
+// then live work, then finished.
+
+export type StatusBucket = 'needs_input' | 'failed' | 'review' | 'working' | 'done'
+
+export const STATUS_BUCKETS: readonly StatusBucket[] = ['needs_input', 'failed', 'review', 'working', 'done']
+
+export const STATUS_BUCKET_LABELS: Record<StatusBucket, string> = {
+  needs_input: 'Needs input',
+  failed: 'Failed',
+  review: 'Ready to review',
+  working: 'Working',
+  done: 'Done',
+}
+
+/** Maps an agent's snapshot to its directory bucket. Attention outranks status. */
+export function statusBucket(entry: AgentEntry): StatusBucket {
+  if (entry.requiresAttention && entry.attentionReason === 'permission') return 'needs_input'
+  if (entry.status === 'error') return 'failed'
+  if (entry.requiresAttention && entry.attentionReason === 'finished') return 'review'
+  if (entry.status === 'running' || entry.status === 'initializing') return 'working'
+  return 'done'
+}
+
+/** True once the daemon has archived the agent; archiving is one-way. */
+export function isArchived(entry: AgentEntry): boolean {
+  return entry.archivedAt != null
+}
+
+/** Live agents only unless archived ones are revealed. */
+export function visibleAgents(entries: AgentEntry[], showArchived: boolean): AgentEntry[] {
+  return showArchived ? entries : entries.filter((entry) => !isArchived(entry))
+}
+
+/**
+ * Folds the directory into labeled groups for the sidebar: non-empty status
+ * buckets in Paseo's order, each recency-sorted, plus a trailing Archived
+ * group when one is revealed.
+ */
+export function statusGroups(
+  entries: AgentEntry[],
+  showArchived: boolean,
+): { name: string; items: AgentEntry[] }[] {
+  const sorted = sortAgents(visibleAgents(entries, showArchived))
+  const groups: { name: string; items: AgentEntry[] }[] = []
+  for (const bucket of STATUS_BUCKETS) {
+    const items = sorted.filter((entry) => !isArchived(entry) && statusBucket(entry) === bucket)
+    if (items.length > 0) groups.push({ name: STATUS_BUCKET_LABELS[bucket], items })
+  }
+  const archived = showArchived ? sorted.filter(isArchived) : []
+  if (archived.length > 0) groups.push({ name: 'Archived', items: archived })
+  return groups
+}
+
 const DAY_MS = 86_400_000
-
-function startOfDay(ms: number): number {
-  const date = new Date(ms)
-  date.setHours(0, 0, 0, 0)
-  return date.getTime()
-}
-
-export function groupLabel(entry: AgentEntry): string {
-  const day = startOfDay(activityAt(entry))
-  const today = startOfDay(Date.now())
-  if (day === today) return 'Today'
-  if (day === today - DAY_MS) return 'Yesterday'
-  if (day > today - 7 * DAY_MS) return 'Previous 7 Days'
-  return 'Earlier'
-}
 
 export function relativeTime(entry: AgentEntry): string {
   const delta = Math.max(0, Date.now() - activityAt(entry))
