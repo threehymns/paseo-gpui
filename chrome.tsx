@@ -13,10 +13,12 @@ import {
   basename,
   displayName,
   isArchived,
+  projectGroups,
   relativeTime,
   statusGroups,
   type AgentEntry,
   type ConnStatus,
+  type DirectoryGroupMode,
 } from './paseo'
 import { C, SIDEBAR_WIDTH, TITLEBAR_HEIGHT, TRAFFIC_LIGHT_CLEARANCE } from './theme'
 
@@ -45,6 +47,7 @@ import iconZap from './assets/icons/zap.svg' with { type: 'file' }
 import iconPencil from './assets/icons/pencil.svg' with { type: 'file' }
 import iconChevronDown from './assets/icons/chevron-down.svg' with { type: 'file' }
 import iconEllipsis from './assets/icons/ellipsis.svg' with { type: 'file' }
+import iconArchive from './assets/icons/archive.svg' with { type: 'file' }
 import iconListFilter from './assets/icons/list-filter.svg' with { type: 'file' }
 import iconSparkle from './assets/icons/sparkle.svg' with { type: 'file' }
 import iconWrench from './assets/icons/wrench.svg' with { type: 'file' }
@@ -68,6 +71,7 @@ const ICONS = {
   pencil: realAssetPath(iconPencil),
   chevronDown: realAssetPath(iconChevronDown),
   ellipsis: realAssetPath(iconEllipsis),
+  archive: realAssetPath(iconArchive),
   listFilter: realAssetPath(iconListFilter),
   sparkle: realAssetPath(iconSparkle),
   wrench: realAssetPath(iconWrench),
@@ -196,6 +200,126 @@ export type RowActionVerb = 'rename' | 'archive' | 'delete'
 export interface RowActionRef {
   verb: RowActionVerb
   id: string
+}
+
+const VIEW_MENU_WIDTH = 232
+
+/**
+ * One decision row of the view menu: leading icon, label, and the engine's own
+ * check when this is the current answer.
+ */
+function ViewOption({
+  icon,
+  label,
+  selected,
+}: {
+  icon: IconName
+  label: string
+  selected: boolean
+}) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+        width: '100%',
+        paddingTop: 5,
+        paddingBottom: 5,
+        paddingLeft: 8,
+        paddingRight: 8,
+        borderRadius: 7,
+        hover: { backgroundColor: '#404040' },
+      }}
+    >
+      <Icon name={icon} size={13} color={C.tertiary} />
+      <text style={{ fontSize: 12.5, fontWeight: 500, color: C.text, flexGrow: 1, minWidth: 0 }}>
+        {label}
+      </text>
+      {selected && <Icon name="check" size={11} color={C.secondary} />}
+    </div>
+  )
+}
+
+function ViewSection({ label }: { label: string }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        alignItems: 'center',
+        height: 22,
+        paddingLeft: 8,
+      }}
+    >
+      <text style={{ fontSize: 11.5, fontWeight: 500, color: C.ghost }}>{label}</text>
+    </div>
+  )
+}
+
+function ViewSeparator() {
+  return <div style={{ height: 1, backgroundColor: C.border, marginTop: 4, marginBottom: 4 }} />
+}
+
+/**
+ * The sidebar's display-preferences popover, mirroring Paseo's: one trigger in
+ * the section header, grouping as a radio choice, visibility toggles under
+ * Show. Decisions that would be dead controls here (title source, trailing
+ * diff stat, host/project/label filters) have no backing data on this client
+ * and stay out.
+ */
+function ViewPreferencesMenu({
+  groupMode,
+  onGroupModeChange,
+  showArchived,
+  onShowArchivedChange,
+}: {
+  groupMode: DirectoryGroupMode
+  onGroupModeChange: (mode: DirectoryGroupMode) => void
+  showArchived: boolean
+  onShowArchivedChange: (show: boolean) => void
+}) {
+  const runChoice = (choice: string) => {
+    if (choice.startsWith('grouping:')) onGroupModeChange(choice.slice('grouping:'.length) as DirectoryGroupMode)
+    else if (choice === 'show:archived') onShowArchivedChange(!showArchived)
+  }
+
+  return (
+    <Select value="" onValueChange={runChoice}>
+      <SelectTrigger
+        testId="sidebar-view-menu"
+        style={(state) => ({
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          width: 26,
+          height: 26,
+          flexShrink: 0,
+          borderRadius: 6,
+          cursor: 'pointer',
+          backgroundColor: state.open ? C.overlay : '#00000000',
+          hover: { backgroundColor: C.overlay },
+        })}
+      >
+        <Icon name="listFilter" size={14} color={C.secondary} />
+      </SelectTrigger>
+      <SelectContent side="bottom" align="end" sideOffset={4} style={{ width: VIEW_MENU_WIDTH }}>
+        <ViewSection label="Grouping" />
+        <SelectItem value="grouping:project" textValue="Project">
+          <ViewOption icon="folder" label="Project" selected={groupMode === 'project'} />
+        </SelectItem>
+        <SelectItem value="grouping:status" textValue="Status">
+          <ViewOption icon="list" label="Status" selected={groupMode === 'status'} />
+        </SelectItem>
+        <ViewSeparator />
+        <ViewSection label="Show" />
+        <SelectItem value="show:archived" textValue="Archived agents">
+          <ViewOption icon="archive" label="Archived agents" selected={showArchived} />
+        </SelectItem>
+      </SelectContent>
+    </Select>
+  )
 }
 
 function AgentRow({
@@ -417,7 +541,11 @@ export function Sidebar({
   onRename: (id: string, name: string) => void
 }) {
   const [showArchived, setShowArchived] = useState(false)
-  const groups = useMemo(() => statusGroups(agents, showArchived), [agents, showArchived])
+  const [groupMode, setGroupMode] = useState<DirectoryGroupMode>('status')
+  const groups = useMemo(
+    () => (groupMode === 'project' ? projectGroups(agents, showArchived) : statusGroups(agents, showArchived)),
+    [agents, showArchived, groupMode],
+  )
 
   return (
     <div
@@ -475,11 +603,11 @@ export function Sidebar({
         <text style={{ fontSize: 13, fontWeight: 500, color: C.secondary, flexGrow: 1, minWidth: 0 }}>
           Agents
         </text>
-        <IconButton
-          icon="listFilter"
-          testId="sidebar-archived-toggle"
-          dimmed={!showArchived}
-          onClick={() => setShowArchived((prev) => !prev)}
+        <ViewPreferencesMenu
+          groupMode={groupMode}
+          onGroupModeChange={setGroupMode}
+          showArchived={showArchived}
+          onShowArchivedChange={setShowArchived}
         />
       </div>
 

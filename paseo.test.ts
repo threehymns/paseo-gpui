@@ -8,6 +8,7 @@ import {
   relativeTime,
   statusBucket,
   statusGroups,
+  projectGroups,
   visibleAgents,
   STATUS_BUCKET_LABELS,
   defaultModelValue,
@@ -543,6 +544,39 @@ describe('statusGroups', () => {
     ]
     const groups = statusGroups(entries, false)
     expect(groups[0]!.items.map((e) => e.id)).toEqual(['new', 'old'])
+  })
+})
+
+describe('projectGroups', () => {
+  test('groups by directory basename, most recently active project first', () => {
+    const entries = [
+      entry({ id: 'store-1', cwd: '/home/me/dev/storefront', updatedAt: '2026-08-24T11:00:00Z' }),
+      entry({ id: 'api-1', cwd: '/home/me/dev/api', updatedAt: '2026-08-24T11:30:00Z' }),
+      entry({ id: 'store-2', cwd: '/other/place/storefront', updatedAt: '2026-08-24T10:00:00Z' }),
+    ]
+    const groups = projectGroups(entries, false)
+    expect(groups.map((group) => group.name)).toEqual(['api', 'storefront'])
+    expect(groups[1]!.items.map((e) => e.id)).toEqual(['store-1', 'store-2'])
+  })
+
+  test('archived entries trail in their own group only when revealed', () => {
+    const entries = [
+      entry({ id: 'live', cwd: '/home/me/dev/storefront' }),
+      entry({ id: 'gone', cwd: '/home/me/dev/api', archivedAt: '2026-08-24T09:00:00Z' }),
+    ]
+    expect(projectGroups(entries, false).map((group) => group.name)).toEqual(['storefront'])
+    const revealed = projectGroups(entries, true)
+    expect(revealed.map((group) => group.name)).toEqual(['storefront', 'Archived'])
+    expect(revealed[1]!.items.map((e) => e.id)).toEqual(['gone'])
+  })
+
+  test('status and project grouping agree on what is visible', () => {
+    const entries = [
+      entry({ id: 'live' }),
+      entry({ id: 'gone', archivedAt: '2026-08-24T09:00:00Z' }),
+    ]
+    const flat = (groups: { items: AgentEntry[] }[]) => groups.flatMap((group) => group.items.map((e) => e.id))
+    expect(flat(statusGroups(entries, true))).toEqual(flat(projectGroups(entries, true)))
   })
 })
 

@@ -537,6 +537,17 @@ export function visibleAgents(entries: AgentEntry[], showArchived: boolean): Age
   return showArchived ? entries : entries.filter((entry) => !isArchived(entry))
 }
 
+/** Appends the trailing Archived group when one is revealed; both group modes share it. */
+function withArchivedTail(
+  groups: { name: string; items: AgentEntry[] }[],
+  sorted: AgentEntry[],
+  showArchived: boolean,
+): { name: string; items: AgentEntry[] }[] {
+  const archived = showArchived ? sorted.filter(isArchived) : []
+  if (archived.length > 0) groups.push({ name: 'Archived', items: archived })
+  return groups
+}
+
 /**
  * Folds the directory into labeled groups for the sidebar: non-empty status
  * buckets in Paseo's order, each recency-sorted, plus a trailing Archived
@@ -552,9 +563,30 @@ export function statusGroups(
     const items = sorted.filter((entry) => !isArchived(entry) && statusBucket(entry) === bucket)
     if (items.length > 0) groups.push({ name: STATUS_BUCKET_LABELS[bucket], items })
   }
-  const archived = showArchived ? sorted.filter(isArchived) : []
-  if (archived.length > 0) groups.push({ name: 'Archived', items: archived })
-  return groups
+  return withArchivedTail(groups, sorted, showArchived)
+}
+
+/** How the sidebar arranges the directory, chosen in its view menu. */
+export type DirectoryGroupMode = 'status' | 'project'
+
+/**
+ * Folds the directory into per-project groups named by working directory,
+ * most recently active project first, plus the shared Archived tail.
+ */
+export function projectGroups(
+  entries: AgentEntry[],
+  showArchived: boolean,
+): { name: string; items: AgentEntry[] }[] {
+  const sorted = sortAgents(visibleAgents(entries, showArchived))
+  const groups: { name: string; items: AgentEntry[] }[] = []
+  for (const entry of sorted) {
+    if (isArchived(entry)) continue
+    const name = basename(entry.cwd)
+    const last = groups[groups.length - 1]
+    if (last && last.name === name) last.items.push(entry)
+    else groups.push({ name, items: [entry] })
+  }
+  return withArchivedTail(groups, sorted, showArchived)
 }
 
 const DAY_MS = 86_400_000
