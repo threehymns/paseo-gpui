@@ -37,6 +37,7 @@ import { useAgentConversation } from './conversation'
 import { useAgentPermissions } from './permissions'
 import { useDraftConfig } from './draft-config'
 import { liveTruth, useLiveAgentConfig, type DaemonTruth, type ProviderNotice } from './live-config'
+import type { ComposerCommands } from './composer'
 
 // ---- daemon hooks ----------------------------------------------------------
 
@@ -272,6 +273,16 @@ export function ChatApp() {
     </>
   )
 
+  // Slash commands ask about the active agent, or the draft for a new one.
+  const composerCommands: ComposerCommands | undefined =
+    status === 'connected'
+      ? {
+          seam: daemon,
+          agentId: activeId,
+          draft: activeId ? null : { modelValue, thinkingId, modeId, cwd },
+        }
+      : undefined
+
   return (
     <div
       style={{
@@ -365,6 +376,7 @@ export function ChatApp() {
           onSend={send}
           disabledReason={disabledReason}
           chips={draftChips}
+          commands={composerCommands}
         />
         <FooterBar
           cwd={activeEntry?.cwd ?? cwd}

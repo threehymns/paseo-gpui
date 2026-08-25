@@ -1,12 +1,19 @@
 /**
- * The composer: draft textarea with chips, plus the workspace footer bar.
+ * The composer: draft textarea with chips, the slash-command menu, plus the
+ * workspace footer bar.
  */
 
-import React, { useMemo } from 'react'
+import React, { useMemo, useRef, useState } from 'react'
 import { Icon, StatusDot } from './chrome'
 import { OptionPicker } from './pickers'
 import { basename } from './paseo'
 import type { ProviderNotice } from './live-config'
+import {
+  useSlashCommandMenu,
+  type DaemonCommandsSeam,
+  type DraftCommandsInput,
+  type SlashCommand,
+} from './slash-commands'
 import { C, CHAT_THEME, CONTENT_MAX_WIDTH } from './theme'
 
 const NOTICE_COLORS: Record<ProviderNotice['type'], string> = {
@@ -26,25 +33,75 @@ export function ConfigNotice({ notice }: { notice: ProviderNotice }) {
   )
 }
 
+/** Who the daemon should list commands for while this composer is live. */
+export interface ComposerCommands {
+  seam: DaemonCommandsSeam
+  agentId: string | null
+  draft: DraftCommandsInput | null
+}
+
 export function Composer({
   value,
   onChange,
   onSend,
   disabledReason,
   chips,
+  commands,
 }: {
   value: string
   onChange: (next: string) => void
   onSend: (text: string) => void
   disabledReason: string | null
   chips: React.ReactNode
+  commands?: ComposerCommands
 }) {
   const ready = value.trim().length > 0 && !disabledReason
+
+  // The native textarea reports values but not caret offsets, so the caret is
+  // tracked here: edits at the end stay at the end, arrows and home/end move it.
+  const [caret, setCaret] = useState(value.length)
+  const lastValueRef = useRef(value)
+  const trackChange = (next: string, explicitCaret?: number) => {
+    const previousValue = lastValueRef.current
+    setCaret(
+      explicitCaret ??
+        (caret >= previousValue.length ? next.length : Math.min(caret, next.length)),
+    )
+    lastValueRef.current = next
+    onChange(next)
+  }
+
+  const menu = useSlashCommandMenu({
+    seam: commands?.seam ?? null,
+    agentId: commands?.agentId ?? null,
+    draft: commands?.draft ?? null,
+    text: value,
+    caret,
+    onTextChange: (next, nextCaret) => trackChange(next, nextCaret),
+  })
+
   const send = (text: string) => {
+    // Enter with the menu open never submits.
+    if (menu.visible) return
     const next = text.trim()
     if (!next || disabledReason) return
     onSend(next)
   }
+
+  const handleKeyDown = (event: { key?: string }) => {
+    const key = event.key ?? ''
+    if (key && menu.handleKey(key)) return
+    if (key === 'left' || key === 'right') {
+      setCaret((current) =>
+        Math.max(0, Math.min(current + (key === 'left' ? -1 : 1), value.length)),
+      )
+    } else if (key === 'home') {
+      setCaret(0)
+    } else if (key === 'end') {
+      setCaret(value.length)
+    }
+  }
+
   return (
     <div
       style={{
@@ -65,36 +122,46 @@ export function Composer({
           width: '100%',
           maxWidth: CONTENT_MAX_WIDTH,
           overflow: 'visible',
-          backgroundColor: C.composer,
-          borderRadius: 13,
-          borderWidth: 1,
-          borderColor: C.border,
-          paddingTop: 10,
-          paddingBottom: 10,
         }}
       >
-        <textarea
-          testId="composer"
-          value={value}
-          placeholder="Describe a task for your agent..."
-          minRows={1}
-          maxRows={3}
-          autoFocus
-          theme={CHAT_THEME}
+        {menu.visible && <SlashCommandMenu menu={menu} />}
+        <div
           style={{
+            display: 'flex',
+            flexDirection: 'column',
             width: '100%',
-            minWidth: 0,
-            fontSize: 14,
-            lineHeight: 20,
-            color: C.text,
-            backgroundColor: '#00000000',
-            borderWidth: 0,
-            paddingLeft: 10,
-            paddingRight: 10,
+            overflow: 'visible',
+            backgroundColor: C.composer,
+            borderRadius: 13,
+            borderWidth: 1,
+            borderColor: C.border,
+            paddingTop: 10,
+            paddingBottom: 10,
           }}
-          onChange={(event) => onChange(event.value ?? '')}
-          onSubmit={(event) => send(event.value ?? value)}
-        />
+        >
+          <textarea
+            testId="composer"
+            value={value}
+            placeholder="Describe a task for your agent..."
+            minRows={1}
+            maxRows={3}
+            autoFocus
+            theme={CHAT_THEME}
+            style={{
+              width: '100%',
+              minWidth: 0,
+              fontSize: 14,
+              lineHeight: 20,
+              color: C.text,
+              backgroundColor: '#00000000',
+              borderWidth: 0,
+              paddingLeft: 10,
+              paddingRight: 10,
+            }}
+            onChange={(event) => trackChange(event.value ?? '')}
+            onKeyDown={handleKeyDown}
+            onSubmit={(event) => send(event.value ?? value)}
+          />
         {disabledReason && (
           <text
             style={{
@@ -139,7 +206,143 @@ export function Composer({
             <Icon name="send" size={16} color={ready ? C.onInverse : C.ghost} />
           </div>
         </div>
+        </div>
       </div>
+    </div>
+  )
+}
+
+function SlashCommandMenu({ menu }: { menu: ReturnType<typeof useSlashCommandMenu> }) {
+  return (
+    <div
+      testId="slash-command-menu"
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        width: '100%',
+        maxHeight: 264,
+        overflowY: 'scroll',
+        marginBottom: 6,
+        paddingTop: 4,
+        paddingBottom: 4,
+        paddingLeft: 4,
+        paddingRight: 4,
+        backgroundColor: C.raised,
+        borderWidth: 1,
+        borderColor: C.borderStrong,
+        borderRadius: 12,
+      }}
+    >
+      {menu.error ? (
+        <text
+          testId="slash-command-error"
+          style={{ fontSize: 12.5, color: C.danger, paddingTop: 5, paddingBottom: 5, paddingLeft: 8 }}
+        >
+          {menu.error}
+        </text>
+      ) : menu.rows.length === 0 ? (
+        <text style={{ fontSize: 12.5, color: C.tertiary, paddingTop: 5, paddingBottom: 5, paddingLeft: 8 }}>
+          No commands found
+        </text>
+      ) : (
+        <>
+          {menu.detail && (
+            <div
+              testId="slash-command-detail"
+              style={{
+                display: 'flex',
+                flexDirection: 'row',
+                alignItems: 'baseline',
+                gap: 10,
+                paddingLeft: 8,
+                paddingRight: 8,
+                paddingBottom: 6,
+              }}
+            >
+              <text style={{ fontSize: 12.5, color: C.secondary, whiteSpace: 'nowrap' }}>
+                /{menu.detail.name}
+              </text>
+              {menu.detail.argumentHint && (
+                <text style={{ fontSize: 11.5, color: C.ghost, flexShrink: 0 }}>{menu.detail.argumentHint}</text>
+              )}
+              <text
+                style={{
+                  fontSize: 12.5,
+                  color: C.tertiary,
+                  flexGrow: 1,
+                  minWidth: 0,
+                  textAlign: 'right',
+                  whiteSpace: 'nowrap',
+                  textOverflow: 'ellipsis',
+                }}
+              >
+                {menu.detail.description}
+              </text>
+            </div>
+          )}
+          <div style={{ height: 1, backgroundColor: C.border, marginBottom: 2 }} />
+          {menu.rows.map((command, index) => (
+            <CommandRow
+              key={command.name}
+              command={command}
+              highlighted={index === menu.selectedIndex}
+              onClick={() => menu.select(index)}
+            />
+          ))}
+        </>
+      )}
+    </div>
+  )
+}
+
+function CommandRow({
+  command,
+  highlighted,
+  onClick,
+}: {
+  command: SlashCommand
+  highlighted: boolean
+  onClick: () => void
+}) {
+  return (
+    <div
+      testId="slash-command-row"
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        alignItems: 'baseline',
+        gap: 10,
+        width: '100%',
+        paddingTop: 6,
+        paddingBottom: 6,
+        paddingLeft: 8,
+        paddingRight: 8,
+        borderRadius: 7,
+        backgroundColor: highlighted ? '#404040' : C.raised,
+        hover: { backgroundColor: '#404040' },
+        cursor: 'pointer',
+      }}
+      onClick={onClick}
+    >
+      <text style={{ fontSize: 13, fontWeight: highlighted ? 600 : 500, color: C.text, flexShrink: 0 }}>
+        /{command.name}
+      </text>
+      {command.argumentHint && (
+        <text style={{ fontSize: 11.5, color: C.ghost, flexShrink: 0 }}>{command.argumentHint}</text>
+      )}
+      <text
+        style={{
+          fontSize: 12.5,
+          color: C.tertiary,
+          flexGrow: 1,
+          minWidth: 0,
+          textAlign: 'right',
+          whiteSpace: 'nowrap',
+          textOverflow: 'ellipsis',
+        }}
+      >
+        {command.description}
+      </text>
     </div>
   )
 }
