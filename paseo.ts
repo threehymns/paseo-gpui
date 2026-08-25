@@ -349,15 +349,20 @@ export function modelChoices(entries: ProviderEntry[]): ModelChoice[] {
   return out
 }
 
+/** Splits a `provider/model` chip value into its parts; empty for empty input. */
+export function splitModelValue(value: string): { provider: string; modelId: string } {
+  const slash = value.indexOf('/')
+  if (slash < 0) return { provider: value, modelId: '' }
+  return { provider: value.slice(0, slash), modelId: value.slice(slash + 1) }
+}
+
 export function findModel(entries: ProviderEntry[], value: string | null): {
   choice: ModelChoice | undefined
   entry: ProviderEntry | undefined
   model: ProviderModel | undefined
 } {
   if (!value) return { choice: undefined, entry: undefined, model: undefined }
-  const slash = value.indexOf('/')
-  const providerId = slash >= 0 ? value.slice(0, slash) : value
-  const modelId = slash >= 0 ? value.slice(slash + 1) : ''
+  const { provider: providerId, modelId } = splitModelValue(value)
   const entry = entries.find((candidate) => candidate.provider === providerId)
   const model = entry?.models?.find((candidate) => candidate.id === modelId)
   const choice = modelChoices(entries).find((candidate) => candidate.value === value)

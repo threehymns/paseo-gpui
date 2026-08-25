@@ -6,7 +6,25 @@ import React, { useMemo } from 'react'
 import { Icon, StatusDot } from './chrome'
 import { OptionPicker } from './pickers'
 import { basename } from './paseo'
+import type { ProviderNotice } from './live-config'
 import { C, CHAT_THEME, CONTENT_MAX_WIDTH } from './theme'
+
+const NOTICE_COLORS: Record<ProviderNotice['type'], string> = {
+  info: C.secondary,
+  warning: C.warn,
+  error: C.danger,
+}
+
+/** Inline provider feedback (e.g. a mode change with side effects) above the composer. */
+export function ConfigNotice({ notice }: { notice: ProviderNotice }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'row', justifyContent: 'center', paddingBottom: 4 }}>
+      <text style={{ fontSize: 12, color: NOTICE_COLORS[notice.type], width: CONTENT_MAX_WIDTH }}>
+        {notice.message}
+      </text>
+    </div>
+  )
+}
 
 export function Composer({
   value,

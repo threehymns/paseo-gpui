@@ -10,6 +10,7 @@ import {
   defaultModelValue,
   modelChoices,
   findModel,
+  splitModelValue,
   basename,
   type AgentEntry,
   type ProviderEntry,
@@ -173,6 +174,15 @@ describe('provider catalog', () => {
 
   test('findModel resolves value back to entry and model', () => {
     expect(findModel(providers, 'claude-code/opus-4.6').model?.id).toBe('opus-4.6')
+  })
+
+  test('splitModelValue separates provider from plain model id', () => {
+    expect(splitModelValue('claude-code/opus-4.6')).toEqual({
+      provider: 'claude-code',
+      modelId: 'opus-4.6',
+    })
+    expect(splitModelValue('').provider).toBe('')
+    expect(splitModelValue('').modelId).toBe('')
   })
 
   test('basename takes the last path segment', () => {
