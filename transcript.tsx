@@ -9,9 +9,11 @@ import { SafeMdxContent } from './mdx'
 import {
   permissionDisplay,
   permissionKindLabel,
+  reasoningLabel,
   toolDetailParts,
   type PermissionKind,
   type PermissionResponse,
+  type ReasoningTurn,
   type ToolDetailPart,
   type ToolName,
   type Turn,
@@ -100,7 +102,7 @@ function TranscriptRow({
   )
 }
 
-function ToolDetailBody({ parts }: { parts: ToolDetailPart[] }) {
+function ToolDetailBody({ parts, patch }: { parts: ToolDetailPart[]; patch?: string }) {
   return (
     <div
       style={{
@@ -147,6 +149,7 @@ function ToolDetailBody({ parts }: { parts: ToolDetailPart[] }) {
           </div>
         ),
       )}
+      {patch && <diff patch={patch} wordDiff theme={CHAT_THEME} />}
     </div>
   )
 }
@@ -159,7 +162,7 @@ function ToolRow({ turn }: { turn: Extract<Turn, { kind: 'tool' }> }) {
   // stays open while its detail streams in.
   const [expanded, setExpanded] = useState(false)
   const parts = turn.structured ? toolDetailParts(turn.structured) : []
-  const expandable = parts.length > 0
+  const expandable = parts.length > 0 || Boolean(turn.patch)
   return (
     <div
       style={{
@@ -215,8 +218,7 @@ function ToolRow({ turn }: { turn: Extract<Turn, { kind: 'tool' }> }) {
           <text style={{ fontSize: 12, color: C.danger, flexShrink: 0 }}>failed</text>
         )}
       </div>
-      {expanded && expandable && <ToolDetailBody parts={parts} />}
-      {turn.patch && <diff patch={turn.patch} wordDiff theme={CHAT_THEME} />}
+      {expanded && expandable && <ToolDetailBody parts={parts} patch={turn.patch} />}
     </div>
   )
 }
@@ -238,6 +240,50 @@ function ReasoningBlock({ text }: { text: string }) {
       <text style={{ fontSize: 13, lineHeight: 19, color: C.tertiary, minWidth: 0, maxWidth: '100%' }}>
         {text.trim()}
       </text>
+    </div>
+  )
+}
+
+function ReasoningRow({ turn }: { turn: ReasoningTurn }) {
+  // Component-local like ToolRow's: the fold swaps the turn value as deltas
+  // merge in, but this instance survives, so an open block stays expanded.
+  const [expanded, setExpanded] = useState(false)
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+        width: '100%',
+        minWidth: 0,
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: 8,
+          minWidth: 0,
+          borderRadius: 6,
+          cursor: 'pointer' as const,
+          hover: { backgroundColor: C.overlay },
+        }}
+        onClick={() => setExpanded((value) => !value)}
+      >
+        <Icon name="sparkle" size={12.5} color={turn.durationMs == null ? C.running : C.tertiary} />
+        <text
+          style={{
+            fontSize: 13,
+            fontWeight: 500,
+            color: turn.durationMs == null ? C.secondary : C.tertiary,
+            flexShrink: 0,
+          }}
+        >
+          {reasoningLabel(turn)}
+        </text>
+      </div>
+      {expanded && <ReasoningBlock text={turn.text} />}
     </div>
   )
 }
@@ -499,7 +545,7 @@ export const Transcript = memo(function Transcript({
         >
           {turn.kind === 'user' && <UserTurn text={turn.text} />}
           {turn.kind === 'assistant' && <SafeMdxContent source={turn.source} />}
-          {turn.kind === 'reasoning' && <ReasoningBlock text={turn.text} />}
+          {turn.kind === 'reasoning' && <ReasoningRow turn={turn} />}
           {turn.kind === 'tool' && <ToolRow turn={turn} />}
           {turn.kind === 'todo' && <TodoBlock items={turn.items} />}
           {turn.kind === 'error' && <ErrorBlock text={turn.text} />}

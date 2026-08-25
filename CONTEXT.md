@@ -27,8 +27,17 @@ A transcript row produced by folding timeline items: user, assistant,
 reasoning, tool, todo, or error. Streaming deltas merge into the previous turn
 of their kind; tool calls replace by call id. A tool turn carries both a
 flattened summary and the daemon's structured detail; its row expands in place
-to show that detail, with expansion state kept by the row itself.
+to show that detail, with expansion state kept by the row itself. An edit turn's
+expansion shows its patch as a diff. A reasoning turn stays collapsed until
+opened: while deltas stream it reads "Thinking…", and once anything proves
+thinking has stopped (the next appended item or the turn's end) its length is
+sealed from the delta timestamps and the row reads "Thought for <duration>".
 _Avoid_: message, item
+
+**Sealed**:
+The frozen duration of a finished reasoning block, measured first-delta to
+last-delta; quiet gaps before the next item do not count as thinking.
+_Avoid_: closed, ended
 
 **Transcript**:
 The ordered turns shown for one agent, including optimistic sends not yet

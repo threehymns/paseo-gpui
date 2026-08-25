@@ -11,7 +11,15 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PaseoClient } from '@getpaseo/client'
-import { applyTimelineItem, buildTurns, errorMessage, type TimelineItem, type Turn } from './paseo'
+import {
+  applyTimelineItem,
+  buildTurns,
+  errorMessage,
+  sealTrailingReasoning,
+  type TimelineEntry,
+  type TimelineItem,
+  type Turn,
+} from './paseo'
 
 export type ConversationStatus = 'loading' | 'ready' | 'error'
 
@@ -25,9 +33,10 @@ export interface ConversationState {
 
 export type ConversationEvent =
   | { type: 'reset'; seedText?: string }
-  | { type: 'loaded'; items: TimelineItem[] }
+  | { type: 'loaded'; items: TimelineEntry[] }
   | { type: 'loadFailed'; error: unknown }
-  | { type: 'timeline'; item: TimelineItem }
+  | { type: 'timeline'; item: TimelineItem; at?: number }
+  | { type: 'turnCompleted'; at?: number }
   | { type: 'turnFailed'; message: string }
   | { type: 'sendQueued'; text: string }
   | { type: 'sendFailed'; error: unknown }
@@ -45,6 +54,13 @@ function popMatch(list: string[], text: string): string[] {
   return [...list.slice(0, index), ...list.slice(index + 1)]
 }
 
+/** ISO stream/entry timestamp to epoch ms; undefined when absent or unparseable. */
+function eventTime(timestamp?: string): number | undefined {
+  if (!timestamp) return undefined
+  const at = Date.parse(timestamp)
+  return Number.isFinite(at) ? at : undefined
+}
+
 export function reduceConversation(state: ConversationState, event: ConversationEvent): ConversationState {
   switch (event.type) {
     case 'reset':
@@ -55,12 +71,15 @@ export function reduceConversation(state: ConversationState, event: Conversation
       // e.g. the agent was archived while we were opening it.
       return { ...state, status: 'error', error: errorMessage(event.error) }
     case 'timeline': {
-      const next = { ...state, turns: applyTimelineItem(state.turns, event.item) }
+      const next = { ...state, turns: applyTimelineItem(state.turns, event.item, event.at) }
       if (event.item.type === 'user_message') {
         return { ...next, pending: popMatch(next.pending, event.item.text) }
       }
       return next
     }
+    case 'turnCompleted':
+      // Ends any still-open trailing thinking block with nothing after it.
+      return { ...state, turns: sealTrailingReasoning(state.turns, event.at ?? Date.now()) }
     case 'turnFailed':
       return { ...state, turns: applyTimelineItem(state.turns, { type: 'error', message: event.message }) }
     case 'sendQueued':
@@ -117,10 +136,17 @@ export function useAgentConversation(
         const handle = client.agents.ref(agentId)
         const page = await handle.timeline.refetch({ direction: 'tail', limit: 300 })
         if (disposed) return
-        setState((prev) => reduceConversation(prev, { type: 'loaded', items: page.entries.map((entry) => entry.item) }))
-        unsub = handle.timeline.subscribe(({ event }) => {
+        setState((prev) =>
+          reduceConversation(prev, {
+            type: 'loaded',
+            items: page.entries.map((entry) => ({ item: entry.item, at: eventTime(entry.timestamp) })),
+          }),
+        )
+        unsub = handle.timeline.subscribe(({ event, timestamp }) => {
           if (event.type === 'timeline') {
-            setState((prev) => reduceConversation(prev, { type: 'timeline', item: event.item }))
+            setState((prev) => reduceConversation(prev, { type: 'timeline', item: event.item, at: eventTime(timestamp) }))
+          } else if (event.type === 'turn_completed') {
+            setState((prev) => reduceConversation(prev, { type: 'turnCompleted', at: eventTime(timestamp) }))
           } else if (event.type === 'turn_failed') {
             setState((prev) => reduceConversation(prev, { type: 'turnFailed', message: event.error }))
           }

@@ -11,9 +11,14 @@ import {
   modelChoices,
   findModel,
   basename,
+  formatDuration,
+  reasoningLabel,
+  sealTrailingReasoning,
   toolDetailParts,
   type AgentEntry,
   type ProviderEntry,
+  type TimelineEntry,
+  type TimelineItem,
   type ToolCallDetail,
 } from './paseo'
 
@@ -32,6 +37,9 @@ const toolCall = (over: {
     error: null,
   }) as never
 
+/** Wraps a bare item as a fetched/streamed entry so tests can control arrival times. */
+const timed = (item: TimelineItem, at?: number): TimelineEntry => ({ item, at })
+
 // ---- timeline mapping ------------------------------------------------------
 
 describe('timeline mapping', () => {
@@ -41,10 +49,10 @@ describe('timeline mapping', () => {
 
   test('streaming deltas merge into single turns', () => {
     const turns = buildTurns([
-      { type: 'user_message', text: 'fix the bug' },
-      { type: 'assistant_message', text: 'Looking' },
-      { type: 'assistant_message', text: ' into it.' },
-      toolCall({ detail: { type: 'shell', command: 'npm test' } }),
+      timed({ type: 'user_message', text: 'fix the bug' }),
+      timed({ type: 'assistant_message', text: 'Looking' }),
+      timed({ type: 'assistant_message', text: ' into it.' }),
+      timed(toolCall({ detail: { type: 'shell', command: 'npm test' } })),
     ])
     expect(turns).toHaveLength(3)
     expect(turns[0]).toEqual({ kind: 'user', text: 'fix the bug' })
@@ -58,7 +66,7 @@ describe('timeline mapping', () => {
   })
 
   test('tool updates replace in place by callId', () => {
-    let turns = buildTurns([toolCall({ detail: { type: 'shell', command: 'npm test' } })])
+    let turns = buildTurns([timed(toolCall({ detail: { type: 'shell', command: 'npm test' } }))])
     turns = applyTimelineItem(
       turns,
       toolCall({ detail: { type: 'shell', command: 'npm test', exitCode: 0 }, status: 'completed' }),
@@ -68,7 +76,7 @@ describe('timeline mapping', () => {
   })
 
   test('tool turns carry the structured detail alongside the flattened summary', () => {
-    const turns = buildTurns([toolCall({ detail: { type: 'shell', command: 'npm test' } })])
+    const turns = buildTurns([timed(toolCall({ detail: { type: 'shell', command: 'npm test' } }))])
     const tool = turns[0] as { kind: string; detail?: string; structured?: ToolCallDetail }
     expect(tool.kind).toBe('tool')
     expect(tool.detail).toBe('npm test')
@@ -76,13 +84,17 @@ describe('timeline mapping', () => {
   })
 
   test('the structured detail survives replace-in-place streaming updates', () => {
-    let turns = buildTurns([toolCall({ detail: { type: 'shell', command: 'npm test' } })])
+    let turns = buildTurns([timed(toolCall({ detail: { type: 'shell', command: 'npm test' } }))])
     turns = applyTimelineItem(
       turns,
       toolCall({ detail: { type: 'shell', command: 'npm test', output: '3 passing\n', exitCode: 0 }, status: 'completed' }),
     )
     expect(turns).toHaveLength(1)
-    const tool = turns[0] as { status: string; detail?: string; structured?: { output?: string; exitCode?: number } }
+    const tool = turns[0] as {
+      status: string
+      detail?: string
+      structured?: { type: string; command: string; output?: string; exitCode?: number }
+    }
     expect(tool.status).toBe('ok')
     expect(tool.detail).toBe('npm test')
     expect(tool.structured).toEqual({ type: 'shell', command: 'npm test', output: '3 passing\n', exitCode: 0 })
@@ -107,6 +119,118 @@ describe('timeline mapping', () => {
   test('errors become error turns', () => {
     const turns = applyTimelineItem([], { type: 'error', message: 'boom' })
     expect(turns[turns.length - 1]!.kind).toBe('error')
+  })
+})
+
+// ---- reasoning timing -------------------------------------------------------
+
+describe('reasoning timing', () => {
+  test('formatDuration renders human-readable amounts', () => {
+    expect(formatDuration(0)).toBe('0s')
+    expect(formatDuration(-5)).toBe('0s')
+    expect(formatDuration(Number.NaN)).toBe('0s')
+    expect(formatDuration(400)).toBe('0s')
+    expect(formatDuration(5_000)).toBe('5s')
+    expect(formatDuration(59_999)).toBe('59s')
+    expect(formatDuration(60_000)).toBe('1m')
+    expect(formatDuration(90_000)).toBe('1m 30s')
+    expect(formatDuration(3_600_000)).toBe('1h')
+    expect(formatDuration(7_500_000)).toBe('2h 5m')
+  })
+
+  test('reasoningLabel shows live progress while open, then the frozen duration', () => {
+    let turns = applyTimelineItem([], { type: 'reasoning', text: 'hmm' }, 1_000)
+    const open = turns[0] as { kind: 'reasoning'; text: string; startedAt?: number; lastDeltaAt?: number; durationMs?: number }
+    expect(open.startedAt).toBe(1_000)
+    expect(open.durationMs).toBeUndefined()
+    expect(reasoningLabel(open)).toBe('Thinking…')
+    turns = applyTimelineItem(turns, { type: 'reasoning', text: '…' }, 6_000)
+    // Sealing long after the last delta must not inflate the length.
+    const sealed = sealTrailingReasoning(turns, 99_999)[0] as { kind: 'reasoning'; text: string; durationMs?: number }
+    expect(sealed.durationMs).toBe(5_000)
+    expect(reasoningLabel(sealed)).toBe('Thought for 5s')
+  })
+
+  test('deltas merge keeping the first timestamp and advancing the last', () => {
+    let turns = applyTimelineItem([], { type: 'reasoning', text: 'a' }, 1_000)
+    turns = applyTimelineItem(turns, { type: 'reasoning', text: 'b' }, 1_400)
+    turns = applyTimelineItem(turns, { type: 'reasoning', text: 'c' }, 2_000)
+    const turn = turns[0] as { kind: string; text: string; startedAt?: number; lastDeltaAt?: number }
+    expect(turn.text).toBe('abc')
+    expect(turn.startedAt).toBe(1_000)
+    expect(turn.lastDeltaAt).toBe(2_000)
+  })
+
+  test('the next appended item seals the trailing block at its last delta, not the item time', () => {
+    const turns = buildTurns([
+      timed({ type: 'reasoning', text: 'thinking' }, 1_000),
+      timed({ type: 'reasoning', text: ' more' }, 4_000),
+      // A long pause before anything else arrives must not count as thinking.
+      timed({ type: 'user_message', text: 'go on' }, 60_000),
+      timed({ type: 'assistant_message', text: 'ok' }, 61_000),
+    ])
+    const thinking = turns[0] as { kind: string; durationMs?: number }
+    expect(thinking.kind).toBe('reasoning')
+    expect(thinking.durationMs).toBe(3_000)
+    expect(reasoningLabel(turns[0] as never)).toBe('Thought for 3s')
+  })
+
+  test('fetched history folds to sealed durations from entry timestamps', () => {
+    const turns = buildTurns([
+      timed(toolCall({ detail: { type: 'shell', command: 'ls' } }), 1_000),
+      timed({ type: 'reasoning', text: 'reading output' }, 2_000),
+      timed({ type: 'reasoning', text: '…' }, 5_500),
+      timed({ type: 'assistant_message', text: 'Here is what I found.' }, 6_000),
+    ])
+    const tool = turns[0] as { kind: string }
+    const thinking = turns[1] as { kind: string; durationMs?: number }
+    expect(tool.kind).toBe('tool')
+    expect(thinking.kind).toBe('reasoning')
+    expect(thinking.durationMs).toBe(3_500)
+  })
+
+  test('replace-in-place updates do not seal a trailing block started after that call', () => {
+    let turns = buildTurns([
+      timed(toolCall({ callId: 'c1', detail: { type: 'shell', command: 'npm test' }, status: 'running' }), 1_000),
+      timed({ type: 'reasoning', text: 'watching tests' }, 2_000),
+    ])
+    turns = applyTimelineItem(
+      turns,
+      toolCall({ callId: 'c1', detail: { type: 'shell', command: 'npm test', exitCode: 0 }, status: 'completed' }),
+      9_000,
+    )
+    const thinking = turns[1] as { kind: string; durationMs?: number }
+    expect(thinking.kind).toBe('reasoning')
+    expect(thinking.durationMs).toBeUndefined()
+    expect(reasoningLabel(thinking as never)).toBe('Thinking…')
+  })
+
+  test('reasoning after an interleaved tool call starts a fresh block', () => {
+    const turns = buildTurns([
+      timed({ type: 'reasoning', text: 'first' }, 1_000),
+      timed({ type: 'reasoning', text: ' run' }, 1_800),
+      timed({ type: 'assistant_message', text: 'partial' }, 2_000),
+      timed({ type: 'reasoning', text: 'second run' }, 10_000),
+      timed({ type: 'assistant_message', text: '!done' }, 12_000),
+    ])
+    const blocks = turns.filter((t) => t.kind === 'reasoning') as { kind: string; text: string; durationMs?: number }[]
+    expect(blocks).toHaveLength(2)
+    expect(blocks[0]?.kind).toBe('reasoning')
+    expect(blocks[0]?.text).toBe('first run')
+    expect(blocks[0]?.durationMs).toBe(800)
+    expect(blocks[1]?.text).toBe('second run')
+    // A block from a single delta measures zero — nothing elapsed between its start and end.
+    expect(blocks[1]?.durationMs).toBe(0)
+  })
+
+  test('sealing is idempotent and skips non-reasoning tails', () => {
+    const turns = buildTurns([
+      timed({ type: 'reasoning', text: 'done' }, 1_000),
+      timed({ type: 'assistant_message', text: 'answer' }, 3_000),
+    ])
+    expect(sealTrailingReasoning(turns, 99_999)).toEqual(turns)
+    const sealed = sealTrailingReasoning(buildTurns([timed({ type: 'reasoning', text: 'x' }, 1_000)]), 4_000)
+    expect(sealTrailingReasoning(sealed, 99_999)).toEqual(sealed)
   })
 })
 

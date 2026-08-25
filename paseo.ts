@@ -95,10 +95,21 @@ export type ToolName =
 
 export type ToolStatus = 'running' | 'ok' | 'failed'
 
+export type ReasoningTurn = {
+  kind: 'reasoning'
+  text: string
+  /** Epoch ms of the first delta; present only while the block is still open. */
+  startedAt?: number
+  /** Epoch ms of the most recent delta; present only while the block is still open. */
+  lastDeltaAt?: number
+  /** Frozen wall-clock length once thinking has ended; undefined while streaming. */
+  durationMs?: number
+}
+
 export type Turn =
   | { kind: 'user'; text: string }
   | { kind: 'assistant'; source: string; messageId?: string }
-  | { kind: 'reasoning'; text: string }
+  | ReasoningTurn
   | { kind: 'todo'; items: { text: string; completed: boolean; active: boolean }[] }
   | {
       kind: 'tool'
@@ -147,6 +158,42 @@ function toolMeta(item: ToolCallItem): Pick<Turn & { kind: 'tool' }, 'tool' | 't
 
 function appendTurn(turns: Turn[], turn: Turn): Turn[] {
   return [...turns, turn]
+}
+
+/**
+ * Freezes the wall-clock length of a still-streaming trailing reasoning block.
+ * A reasoning block is open until any later timeline item (or turn end) proves
+ * thinking has stopped; only the trailing block can be open. The length runs
+ * from the first to the last delta — a quiet gap before the next item does not
+ * count as thinking.
+ */
+export function sealTrailingReasoning(turns: Turn[], at: number): Turn[] {
+  const last = turns[turns.length - 1]
+  if (last?.kind !== 'reasoning' || last.durationMs != null) return turns
+  const startedAt = last.startedAt ?? at
+  const endedAt = last.lastDeltaAt ?? at
+  const sealed: ReasoningTurn = { kind: 'reasoning', text: last.text, durationMs: Math.max(0, endedAt - startedAt) }
+  return [...turns.slice(0, -1), sealed]
+}
+
+/** Human-readable wall-clock length, e.g. "47s", "1m 30s", "2h 5m". */
+export function formatDuration(durationMs: number): string {
+  if (!Number.isFinite(durationMs) || durationMs < 0) return '0s'
+  const totalSeconds = durationMs / 1000
+  if (totalSeconds < 60) return `${Math.floor(totalSeconds)}s`
+  const totalMinutes = Math.floor(totalSeconds / 60)
+  if (totalMinutes < 60) {
+    const seconds = Math.floor(totalSeconds) % 60
+    return seconds === 0 ? `${totalMinutes}m` : `${totalMinutes}m ${seconds}s`
+  }
+  const hours = Math.floor(totalMinutes / 60)
+  const remMinutes = totalMinutes % 60
+  return remMinutes === 0 ? `${hours}h` : `${hours}h ${remMinutes}m`
+}
+
+/** Collapsed-row label for a reasoning block: live progress until sealed, then its frozen duration. */
+export function reasoningLabel(turn: ReasoningTurn): string {
+  return turn.durationMs == null ? 'Thinking…' : `Thought for ${formatDuration(turn.durationMs)}`
 }
 
 // ---- expanded tool detail ---------------------------------------------------
@@ -242,28 +289,43 @@ export function toolDetailParts(detail: ToolCallDetail): ToolDetailPart[] {
   }
 }
 
-/** Folds one timeline item into the transcript. Streaming deltas merge into the previous turn of their kind. */
-export function applyTimelineItem(turns: Turn[], item: TimelineItem): Turn[] {
+/**
+ * Folds one timeline item into the transcript. Streaming deltas merge into the
+ * previous turn of their kind. `at` is the item's epoch-ms arrival time (live
+ * event timestamp or fetched entry timestamp); it times reasoning blocks.
+ *
+ * Appended items seal the trailing open reasoning block — anything arriving
+ * after it proves thinking has moved on. Items that replace an earlier turn
+ * in place do not.
+ */
+export function applyTimelineItem(turns: Turn[], item: TimelineItem, at: number = Date.now()): Turn[] {
   switch (item.type) {
     case 'user_message':
-      return appendTurn(turns, { kind: 'user', text: item.text })
+      return appendTurn(sealTrailingReasoning(turns, at), { kind: 'user', text: item.text })
     case 'assistant_message': {
-      const last = turns[turns.length - 1]
+      const base = sealTrailingReasoning(turns, at)
+      const last = base[base.length - 1]
       if (
         last?.kind === 'assistant' &&
         (item.messageId == null || last.messageId == null || last.messageId === item.messageId)
       ) {
         const merged: Turn = { kind: 'assistant', source: last.source + item.text, messageId: item.messageId ?? last.messageId }
-        return [...turns.slice(0, -1), merged]
+        return [...base.slice(0, -1), merged]
       }
-      return appendTurn(turns, { kind: 'assistant', source: item.text, messageId: item.messageId })
+      return appendTurn(base, { kind: 'assistant', source: item.text, messageId: item.messageId })
     }
     case 'reasoning': {
       const last = turns[turns.length - 1]
-      if (last?.kind === 'reasoning') {
-        return [...turns.slice(0, -1), { kind: 'reasoning', text: last.text + item.text }]
+      if (last?.kind === 'reasoning' && last.durationMs == null) {
+        const merged: ReasoningTurn = {
+          kind: 'reasoning',
+          text: last.text + item.text,
+          startedAt: last.startedAt ?? at,
+          lastDeltaAt: at,
+        }
+        return [...turns.slice(0, -1), merged]
       }
-      return appendTurn(turns, { kind: 'reasoning', text: item.text })
+      return appendTurn(turns, { kind: 'reasoning', text: item.text, startedAt: at, lastDeltaAt: at })
     }
     case 'tool_call': {
       const index = findLastIndex(turns, (t) => t.kind === 'tool' && t.callId === item.callId)
@@ -271,7 +333,7 @@ export function applyTimelineItem(turns: Turn[], item: TimelineItem): Turn[] {
         item.status === 'running' ? 'running' : item.status === 'completed' ? 'ok' : 'failed'
       const next: Turn = { kind: 'tool', callId: item.callId, ...toolMeta(item), structured: item.detail, status }
       if (index >= 0) return [...turns.slice(0, index), next, ...turns.slice(index + 1)]
-      return appendTurn(turns, next)
+      return appendTurn(sealTrailingReasoning(turns, at), next)
     }
     case 'todo': {
       const items = item.items.map((task, i) => ({
@@ -279,19 +341,26 @@ export function applyTimelineItem(turns: Turn[], item: TimelineItem): Turn[] {
         completed: task.completed || task.status === 'completed',
         active: task.status ? task.status === 'in_progress' : !task.completed && i === item.items.findIndex((t) => !t.completed),
       }))
-      const last = turns[turns.length - 1]
-      if (last?.kind === 'todo') return [...turns.slice(0, -1), { kind: 'todo', items }]
-      return appendTurn(turns, { kind: 'todo', items })
+      const base = sealTrailingReasoning(turns, at)
+      const last = base[base.length - 1]
+      if (last?.kind === 'todo') return [...base.slice(0, -1), { kind: 'todo', items }]
+      return appendTurn(base, { kind: 'todo', items })
     }
     case 'error':
-      return appendTurn(turns, { kind: 'error', text: item.message })
+      return appendTurn(sealTrailingReasoning(turns, at), { kind: 'error', text: item.message })
     default:
       return turns
   }
 }
 
-export function buildTurns(items: TimelineItem[]): Turn[] {
-  return items.reduce(applyTimelineItem, [] as Turn[])
+export interface TimelineEntry {
+  item: TimelineItem
+  /** Epoch-ms arrival time used to time reasoning blocks; falls back to now. */
+  at?: number
+}
+
+export function buildTurns(entries: TimelineEntry[]): Turn[] {
+  return entries.reduce((turns, entry) => applyTimelineItem(turns, entry.item, entry.at), [] as Turn[])
 }
 
 // ---- permission cards -------------------------------------------------------
