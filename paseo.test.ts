@@ -5,8 +5,12 @@ import {
   applyAgentUpdate,
   sortAgents,
   displayName,
-  groupLabel,
   relativeTime,
+  statusBucket,
+  statusGroups,
+  projectGroups,
+  visibleAgents,
+  STATUS_BUCKET_LABELS,
   defaultModelValue,
   modelChoices,
   findModel,
@@ -449,9 +453,130 @@ describe('agent directory', () => {
     expect(removed).toHaveLength(2)
   })
 
-  test('groupLabel and relativeTime produce known shapes', () => {
-    expect(['Today', 'Yesterday', 'Previous 7 Days', 'Earlier']).toContain(groupLabel(list[0]!))
+  test('relativeTime produces known shapes', () => {
     expect(relativeTime(list[0]!)).toMatch(/^now|\d+[mhd]|\w{3} \d{1,2}$/)
+  })
+})
+
+describe('status buckets', () => {
+  test('labels mirror Paseo\'s sidebar groups', () => {
+    expect(STATUS_BUCKET_LABELS).toEqual({
+      needs_input: 'Needs input',
+      failed: 'Failed',
+      review: 'Ready to review',
+      working: 'Working',
+      done: 'Done',
+    })
+  })
+
+  test('permission attention buckets as needs input', () => {
+    const e = entry({ status: 'running', requiresAttention: true, attentionReason: 'permission' })
+    expect(statusBucket(e)).toBe('needs_input')
+  })
+
+  test('finished attention is ready to review', () => {
+    const e = entry({ status: 'idle', requiresAttention: true, attentionReason: 'finished' })
+    expect(statusBucket(e)).toBe('review')
+  })
+
+  test('error status buckets as failed even with unrelated attention', () => {
+    expect(statusBucket(entry({ status: 'error' }))).toBe('failed')
+  })
+
+  test('running and initializing bucket as working', () => {
+    expect(statusBucket(entry({ status: 'running' }))).toBe('working')
+    expect(statusBucket(entry({ status: 'initializing' }))).toBe('working')
+  })
+
+  test('idle and closed fall through to done', () => {
+    expect(statusBucket(entry({ status: 'idle' }))).toBe('done')
+    expect(statusBucket(entry({ status: 'closed' }))).toBe('done')
+  })
+})
+
+describe('statusGroups', () => {
+  test('groups follow Paseo\'s bucket order, dropping empty ones', () => {
+    const entries = [
+      entry({ id: 'idle-1', updatedAt: '2026-08-24T11:00:00Z' }),
+      entry({ id: 'err-1', status: 'error', updatedAt: '2026-08-24T11:01:00Z' }),
+      entry({ id: 'run-1', status: 'running', updatedAt: '2026-08-24T11:02:00Z' }),
+      entry({
+        id: 'perm-1',
+        status: 'running',
+        requiresAttention: true,
+        attentionReason: 'permission',
+        updatedAt: '2026-08-24T11:03:00Z',
+      }),
+    ]
+    const groups = statusGroups(entries, false)
+    expect(groups.map((group) => group.name)).toEqual(['Needs input', 'Failed', 'Working', 'Done'])
+    expect(groups[0]!.items.map((e) => e.id)).toEqual(['perm-1'])
+    expect(groups[3]!.items.map((e) => e.id)).toEqual(['idle-1'])
+  })
+
+  test('review sits between failed and working', () => {
+    const entries = [
+      entry({ id: 'rev-1', requiresAttention: true, attentionReason: 'finished' }),
+      entry({ id: 'done-1' }),
+    ]
+    const groups = statusGroups(entries, false)
+    expect(groups.map((group) => group.name)).toEqual(['Ready to review', 'Done'])
+  })
+
+  test('archived entries stay hidden until revealed, then trail in their own group', () => {
+    const entries = [
+      entry({ id: 'live', updatedAt: '2026-08-24T11:00:00Z' }),
+      entry({ id: 'gone', archivedAt: '2026-08-24T09:00:00Z' }),
+    ]
+    expect(visibleAgents(entries, false).map((e) => e.id)).toEqual(['live'])
+    expect(statusGroups(entries, false)).toHaveLength(1)
+
+    expect(visibleAgents(entries, true).map((e) => e.id)).toEqual(['live', 'gone'])
+    const groups = statusGroups(entries, true)
+    expect(groups.map((group) => group.name)).toEqual(['Done', 'Archived'])
+    expect(groups[1]!.items.map((e) => e.id)).toEqual(['gone'])
+  })
+
+  test('revealing archived keeps live groups sorted by recency within each bucket', () => {
+    const entries = [
+      entry({ id: 'old', updatedAt: '2026-08-24T10:00:00Z' }),
+      entry({ id: 'new', updatedAt: '2026-08-24T12:00:00Z' }),
+    ]
+    const groups = statusGroups(entries, false)
+    expect(groups[0]!.items.map((e) => e.id)).toEqual(['new', 'old'])
+  })
+})
+
+describe('projectGroups', () => {
+  test('groups by directory basename, most recently active project first', () => {
+    const entries = [
+      entry({ id: 'store-1', cwd: '/home/me/dev/storefront', updatedAt: '2026-08-24T11:00:00Z' }),
+      entry({ id: 'api-1', cwd: '/home/me/dev/api', updatedAt: '2026-08-24T11:30:00Z' }),
+      entry({ id: 'store-2', cwd: '/other/place/storefront', updatedAt: '2026-08-24T10:00:00Z' }),
+    ]
+    const groups = projectGroups(entries, false)
+    expect(groups.map((group) => group.name)).toEqual(['api', 'storefront'])
+    expect(groups[1]!.items.map((e) => e.id)).toEqual(['store-1', 'store-2'])
+  })
+
+  test('archived entries trail in their own group only when revealed', () => {
+    const entries = [
+      entry({ id: 'live', cwd: '/home/me/dev/storefront' }),
+      entry({ id: 'gone', cwd: '/home/me/dev/api', archivedAt: '2026-08-24T09:00:00Z' }),
+    ]
+    expect(projectGroups(entries, false).map((group) => group.name)).toEqual(['storefront'])
+    const revealed = projectGroups(entries, true)
+    expect(revealed.map((group) => group.name)).toEqual(['storefront', 'Archived'])
+    expect(revealed[1]!.items.map((e) => e.id)).toEqual(['gone'])
+  })
+
+  test('status and project grouping agree on what is visible', () => {
+    const entries = [
+      entry({ id: 'live' }),
+      entry({ id: 'gone', archivedAt: '2026-08-24T09:00:00Z' }),
+    ]
+    const flat = (groups: { items: AgentEntry[] }[]) => groups.flatMap((group) => group.items.map((e) => e.id))
+    expect(flat(statusGroups(entries, true))).toEqual(flat(projectGroups(entries, true)))
   })
 })
 

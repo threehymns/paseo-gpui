@@ -14,8 +14,11 @@ A running (or finished) Paseo agent working in a workspace directory. One agent
 owns one conversation timeline.
 
 **Agent directory**:
-The list of known agents, kept fresh by subscription updates, grouped by
-recency in the sidebar.
+The list of known agents, kept fresh by subscription updates, arranged in the
+sidebar by status bucket (Needs input, Failed, Ready to review, Working,
+Done) or by project, chosen in the sidebar's view menu. Archived agents stay
+hidden behind the view menu's Show section and read dimmed when revealed;
+archiving is one-way.
 _Avoid_: session list, conversation list
 
 **Timeline item**:
