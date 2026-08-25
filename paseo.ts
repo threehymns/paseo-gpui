@@ -142,6 +142,26 @@ export function formatEditDiff(filePath: string, oldString: string, newString: s
   return [header, ...deleted, ...added].join('\n')
 }
 
+export interface DiffStats {
+  additions: number
+  deletions: number
+}
+
+/** Counts additions and deletions across all hunks in a unified git patch. */
+export function diffStats(patch: string | undefined): DiffStats | undefined {
+  if (!patch) return undefined
+  let additions = 0
+  let deletions = 0
+  for (const line of patch.split('\n')) {
+    if (line.startsWith('+') && !line.startsWith('+++')) {
+      additions++
+    } else if (line.startsWith('-') && !line.startsWith('---')) {
+      deletions++
+    }
+  }
+  return additions === 0 && deletions === 0 ? undefined : { additions, deletions }
+}
+
 function toolMeta(item: ToolCallItem): Pick<Turn & { kind: 'tool' }, 'tool' | 'title' | 'detail' | 'patch'> {
   const d: ToolCallDetail | undefined = item.detail
   switch (d?.type) {

@@ -7,6 +7,7 @@ import React, { memo, useState } from 'react'
 import { Icon, StatusDot, type IconName } from './chrome'
 import { SafeMdxContent } from './mdx'
 import {
+  diffStats,
   permissionDisplay,
   permissionKindLabel,
   reasoningLabel,
@@ -149,7 +150,13 @@ function ToolDetailBody({ parts, patch }: { parts: ToolDetailPart[]; patch?: str
           </div>
         ),
       )}
-      {patch && <diff patch={patch} wordDiff theme={CHAT_THEME} />}
+      {patch && (
+        <div style={{ overflow: 'hidden', minWidth: 0, borderRadius: 8 }}>
+          <div style={{ marginTop: -34, minWidth: 0 }}>
+            <diff patch={patch} wordDiff theme={CHAT_THEME} />
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -162,6 +169,7 @@ function ToolRow({ turn }: { turn: Extract<Turn, { kind: 'tool' }> }) {
   // stays open while its detail streams in.
   const [expanded, setExpanded] = useState(false)
   const parts = turn.structured ? toolDetailParts(turn.structured) : []
+  const stats = turn.patch ? diffStats(turn.patch) : undefined
   const expandable = parts.length > 0 || Boolean(turn.patch)
   return (
     <div
@@ -213,6 +221,20 @@ function ToolRow({ turn }: { turn: Extract<Turn, { kind: 'tool' }> }) {
           >
             {detail}
           </text>
+        )}
+        {stats && (
+          <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+            {stats.additions > 0 && (
+              <text style={{ fontSize: 12, fontWeight: 500, color: C.ok, whiteSpace: 'nowrap', flexShrink: 0 }}>
+                {`+\u2060${stats.additions}`}
+              </text>
+            )}
+            {stats.deletions > 0 && (
+              <text style={{ fontSize: 12, fontWeight: 500, color: C.danger, whiteSpace: 'nowrap', flexShrink: 0 }}>
+                {`-\u2060${stats.deletions}`}
+              </text>
+            )}
+          </div>
         )}
         {turn.status === 'failed' && (
           <text style={{ fontSize: 12, color: C.danger, flexShrink: 0 }}>failed</text>

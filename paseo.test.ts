@@ -13,6 +13,7 @@ import {
   basename,
   formatDuration,
   formatEditDiff,
+  diffStats,
   reasoningLabel,
   sealTrailingReasoning,
   toolDetailParts,
@@ -137,6 +138,16 @@ describe('timeline mapping', () => {
     expect(formatEditDiff('lib/old.ts', 'bye\n', '')).toBe(
       '--- a/lib/old.ts\n+++ b/lib/old.ts\n@@ -1,1 +0,0 @@\n-bye',
     )
+  })
+
+  test('diffStats counts additions and deletions ignoring diff headers', () => {
+    expect(diffStats(undefined)).toBeUndefined()
+    expect(diffStats('')).toBeUndefined()
+    expect(diffStats('--- a/x\n+++ b/x\n@@ -1,1 +1,1 @@\n context line')).toBeUndefined()
+    expect(diffStats('--- a/x\n+++ b/x\n@@ -1,2 +1,3 @@\n-line1\n-line2\n+line1\n+line2-mod\n+line3')).toEqual({
+      additions: 3,
+      deletions: 2,
+    })
   })
 
   test('todo snapshots replace rather than append', () => {
