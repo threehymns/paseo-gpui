@@ -12,6 +12,7 @@ import {
   findModel,
   basename,
   formatDuration,
+  formatEditDiff,
   reasoningLabel,
   sealTrailingReasoning,
   toolDetailParts,
@@ -108,6 +109,34 @@ describe('timeline mapping', () => {
       status: 'completed',
     }))
     expect((turns[0] as { patch?: string }).patch).toBe('diff --git a/x b/x')
+  })
+
+  test('edit tool calls synthesize unified diff from oldString and newString when unifiedDiff is absent', () => {
+    const turns = applyTimelineItem([], toolCall({
+      callId: 'c3',
+      name: 'edit_file',
+      detail: {
+        type: 'edit',
+        filePath: 'src/x.ts',
+        oldString: 'const a = 1\n',
+        newString: 'const a = 2\n',
+      },
+      status: 'completed',
+    }))
+    const turn = turns[0] as { patch?: string }
+    expect(turn.patch).toBe('--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1,1 +1,1 @@\n-const a = 1\n+const a = 2')
+  })
+
+  test('formatEditDiff handles multi-line edits, additions, and deletions', () => {
+    expect(formatEditDiff('lib/util.ts', 'line1\nline2\n', 'line1\nline2-modified\nline3\n')).toBe(
+      '--- a/lib/util.ts\n+++ b/lib/util.ts\n@@ -1,2 +1,3 @@\n-line1\n-line2\n+line1\n+line2-modified\n+line3',
+    )
+    expect(formatEditDiff('lib/new.ts', '', 'hello\nworld')).toBe(
+      '--- a/lib/new.ts\n+++ b/lib/new.ts\n@@ -0,0 +1,2 @@\n+hello\n+world',
+    )
+    expect(formatEditDiff('lib/old.ts', 'bye\n', '')).toBe(
+      '--- a/lib/old.ts\n+++ b/lib/old.ts\n@@ -1,1 +0,0 @@\n-bye',
+    )
   })
 
   test('todo snapshots replace rather than append', () => {

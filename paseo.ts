@@ -124,6 +124,24 @@ export type Turn =
     }
   | { kind: 'error'; text: string }
 
+function splitLines(text: string): string[] {
+  if (!text) return []
+  const normalized = text.endsWith('\r\n') ? text.slice(0, -2) : text.endsWith('\n') ? text.slice(0, -1) : text
+  return normalized === '' ? [''] : normalized.split(/\r?\n/)
+}
+
+/** Synthesizes a unified git patch for an edit replacement when the daemon omitted unifiedDiff. */
+export function formatEditDiff(filePath: string, oldString: string, newString: string): string {
+  const oldLines = splitLines(oldString)
+  const newLines = splitLines(newString)
+  const oldRange = oldLines.length === 0 ? '0,0' : `1,${oldLines.length}`
+  const newRange = newLines.length === 0 ? '0,0' : `1,${newLines.length}`
+  const header = `--- a/${filePath}\n+++ b/${filePath}\n@@ -${oldRange} +${newRange} @@`
+  const deleted = oldLines.map((l) => `-${l}`)
+  const added = newLines.map((l) => `+${l}`)
+  return [header, ...deleted, ...added].join('\n')
+}
+
 function toolMeta(item: ToolCallItem): Pick<Turn & { kind: 'tool' }, 'tool' | 'title' | 'detail' | 'patch'> {
   const d: ToolCallDetail | undefined = item.detail
   switch (d?.type) {
@@ -131,8 +149,14 @@ function toolMeta(item: ToolCallItem): Pick<Turn & { kind: 'tool' }, 'tool' | 't
       return { tool: 'bash', title: 'Bash', detail: d.command }
     case 'read':
       return { tool: 'read', title: 'Read', detail: d.filePath }
-    case 'edit':
-      return { tool: 'edit', title: 'Edit', detail: d.filePath, patch: d.unifiedDiff }
+    case 'edit': {
+      const patch =
+        d.unifiedDiff ??
+        (d.oldString != null || d.newString != null
+          ? formatEditDiff(d.filePath, d.oldString ?? '', d.newString ?? '')
+          : undefined)
+      return { tool: 'edit', title: 'Edit', detail: d.filePath, patch }
+    }
     case 'write':
       return { tool: 'write', title: 'Write', detail: d.filePath }
     case 'search':
