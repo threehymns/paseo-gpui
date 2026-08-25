@@ -7,9 +7,12 @@ import {
   type ConversationState,
 } from './conversation'
 import type { TimelineItem } from './paseo'
+import type { ImageAttachment } from './attachments'
 
 const user = (text: string): TimelineItem => ({ type: 'user_message', text })
 const assistant = (text: string): TimelineItem => ({ type: 'assistant_message', text })
+
+const chip = (id: string): ImageAttachment => ({ id, name: `${id}.png`, mimeType: 'image/png', data: 'aGk=' })
 
 function run(events: ConversationEvent[]): ConversationState {
   return events.reduce(reduceConversation, initialConversation)
@@ -18,8 +21,13 @@ function run(events: ConversationEvent[]): ConversationState {
 describe('agent conversation', () => {
   test('reset seeds the pending queue for a freshly created agent', () => {
     const state = run([{ type: 'reset', seedText: 'fix the bug' }])
-    expect(state.pending).toEqual(['fix the bug'])
-    expect(visibleTurns(state)).toEqual([{ kind: 'user', text: 'fix the bug' }])
+    expect(state.pending).toEqual([{ text: 'fix the bug', images: [] }])
+    expect(visibleTurns(state)).toEqual([{ kind: 'user', text: 'fix the bug', queued: true }])
+  })
+
+  test('reset seeds staged chips alongside the first prompt', () => {
+    const state = run([{ type: 'reset', seedText: 'what is this?', seedImages: [chip('a')] }])
+    expect(state.pending[0]!.images).toEqual([chip('a')])
   })
 
   test('loaded replaces turns and marks ready', () => {
@@ -49,7 +57,7 @@ describe('agent conversation', () => {
       { type: 'sendQueued', text: 'do it' },
       { type: 'timeline', item: user('something else entirely') },
     ])
-    expect(state.pending).toEqual(['do it'])
+    expect(state.pending).toEqual([{ text: 'do it', images: [] }])
   })
 
   test('the optimistic turn disappears once settled, not before', () => {
@@ -57,10 +65,35 @@ describe('agent conversation', () => {
       { type: 'loaded', items: [{ item: assistant('hi') }] },
       { type: 'sendQueued', text: 'hello' },
     ])
-    expect(visibleTurns(mid).at(-1)).toEqual({ kind: 'user', text: 'hello' })
+    expect(visibleTurns(mid).at(-1)).toEqual({ kind: 'user', text: 'hello', queued: true })
     const settled = reduceConversation(mid, { type: 'timeline', item: user('hello') })
     expect(visibleTurns(settled).filter((turn) => turn.kind === 'user')).toHaveLength(1)
     expect(settled.pending).toEqual([])
+  })
+
+  test('queued sends carry their attachments until the echo settles them', () => {
+    let state = run([
+      { type: 'sendQueued', text: 'read this', images: [chip('a'), chip('b')] },
+      { type: 'sendQueued', text: 'and this' },
+    ])
+    expect(state.pending).toEqual([
+      { text: 'read this', images: [chip('a'), chip('b')] },
+      { text: 'and this', images: [] },
+    ])
+    state = reduceConversation(state, { type: 'timeline', item: user('read this') })
+    // Only the matching send settles; its chips go with it.
+    expect(state.pending).toEqual([{ text: 'and this', images: [] }])
+  })
+
+  test('unqueue pulls a queued send back out (first match wins)', () => {
+    const mid = run([
+      { type: 'sendQueued', text: 'same text' },
+      { type: 'sendQueued', text: 'same text', images: [chip('a')] },
+    ])
+    const edited = reduceConversation(mid, { type: 'sendUnqueued', text: 'same text' })
+    expect(edited.pending).toEqual([{ text: 'same text', images: [chip('a')] }])
+    // Unqueueing an unknown text is a no-op.
+    expect(reduceConversation(mid, { type: 'sendUnqueued', text: 'nope' })).toEqual(mid)
   })
 
   test('sendFailed drops the queued send and surfaces an error turn', () => {

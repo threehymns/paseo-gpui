@@ -3,9 +3,10 @@
  */
 
 import React, { useMemo } from 'react'
-import { Icon, StatusDot } from './chrome'
+import { Icon, IconButton, StatusDot } from './chrome'
 import { OptionPicker } from './pickers'
 import { basename } from './paseo'
+import type { ImageAttachment, PastePayload } from './attachments'
 import type { ProviderNotice } from './live-config'
 import { C, CHAT_THEME, CONTENT_MAX_WIDTH } from './theme'
 
@@ -26,18 +27,82 @@ export function ConfigNotice({ notice }: { notice: ProviderNotice }) {
   )
 }
 
+/** One removable attachment chip: thumbnail, name, and an × that deletes the staged bytes. */
+function AttachmentChip({
+  attachment,
+  onRemove,
+}: {
+  attachment: ImageAttachment
+  onRemove: (id: string) => void
+}) {
+  return (
+    <div
+      testId={`attachment-${attachment.name}`}
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        height: 26,
+        paddingLeft: 3,
+        paddingRight: 3,
+        borderRadius: 7,
+        backgroundColor: C.item,
+        flexShrink: 0,
+      }}
+    >
+      <img
+        src={`data:${attachment.mimeType};base64,${attachment.data}`}
+        objectFit="cover"
+        alt={attachment.name}
+        style={{ width: 20, height: 20, borderRadius: 5 }}
+      />
+      <text
+        style={{
+          fontSize: 12,
+          lineHeight: 16,
+          color: C.secondary,
+          whiteSpace: 'nowrap',
+          textOverflow: 'ellipsis',
+          minWidth: 0,
+          maxWidth: 120,
+        }}
+      >
+        {attachment.name}
+      </text>
+      <IconButton icon="x" size={10} onClick={() => onRemove(attachment.id)} testId={`detach-${attachment.id}`} />
+    </div>
+  )
+}
+
 export function Composer({
   value,
   onChange,
   onSend,
   disabledReason,
   chips,
+  attachments = [],
+  onRemoveAttachment,
+  onAttach,
+  onPastePayload,
+  attachNotice,
 }: {
   value: string
   onChange: (next: string) => void
   onSend: (text: string) => void
   disabledReason: string | null
   chips: React.ReactNode
+  /** Staged image chips shown above the input. */
+  attachments?: readonly ImageAttachment[]
+  onRemoveAttachment?: (id: string) => void
+  /** Opens the raster-filtered file picker; attaching disables while disconnected. */
+  onAttach?: () => void
+  /**
+   * Receives clipboard contents (text, or files with name/mime/size/bytes) once
+   * a runtime bridge offers them; raster images become chips, text falls through.
+   */
+  onPastePayload?: (payload: PastePayload) => void
+  attachNotice?: { text: string; tone: 'warn' | 'danger' } | null
 }) {
   const ready = value.trim().length > 0 && !disabledReason
   const send = (text: string) => {
@@ -95,6 +160,39 @@ export function Composer({
           onChange={(event) => onChange(event.value ?? '')}
           onSubmit={(event) => send(event.value ?? value)}
         />
+        {attachments.length > 0 && (
+          <div
+            testId="attachment-chips"
+            style={{
+              display: 'flex',
+              flexDirection: 'row',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              gap: 6,
+              marginTop: 8,
+              paddingLeft: 10,
+              paddingRight: 10,
+            }}
+          >
+            {attachments.map((attachment) => (
+              <AttachmentChip key={attachment.id} attachment={attachment} onRemove={onRemoveAttachment ?? (() => {})} />
+            ))}
+          </div>
+        )}
+        {attachNotice && (
+          <text
+            testId="attach-notice"
+            style={{
+              fontSize: 12,
+              color: attachNotice.tone === 'danger' ? C.danger : C.warn,
+              paddingLeft: 10,
+              paddingRight: 10,
+              paddingTop: 6,
+            }}
+          >
+            {attachNotice.text}
+          </text>
+        )}
         {disabledReason && (
           <text
             style={{
@@ -121,6 +219,23 @@ export function Composer({
         >
           {chips}
           <div style={{ flexGrow: 1 }} />
+          <div
+            testId="attach"
+            style={{
+              width: 26,
+              height: 26,
+              borderRadius: 13,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: disabledReason || !onAttach ? undefined : 'pointer',
+              opacity: disabledReason ? 0.35 : 1,
+              hover: disabledReason || !onAttach ? undefined : { backgroundColor: C.overlay },
+            }}
+            onClick={disabledReason || !onAttach ? undefined : onAttach}
+          >
+            <Icon name="image" size={15} color={C.tertiary} />
+          </div>
           <div
             testId="send"
             style={{

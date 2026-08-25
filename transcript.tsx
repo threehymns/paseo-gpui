@@ -41,7 +41,7 @@ function oneLine(text: string | undefined, limit = 140): string | undefined {
   return flat.length > limit ? `${flat.slice(0, limit - 1)}…` : flat || undefined
 }
 
-function UserTurn({ text }: { text: string }) {
+function UserTurn({ text, queued, onEdit }: { text: string; queued?: boolean; onEdit?: () => void }) {
   return (
     <div
       style={{
@@ -52,6 +52,8 @@ function UserTurn({ text }: { text: string }) {
       }}
     >
       <div
+        testId={queued ? 'queued-send' : undefined}
+        onClick={onEdit}
         style={{
           maxWidth: 540,
           minWidth: 0,
@@ -61,6 +63,8 @@ function UserTurn({ text }: { text: string }) {
           paddingBottom: 8,
           paddingLeft: 12,
           paddingRight: 12,
+          cursor: onEdit ? 'pointer' : undefined,
+          hover: onEdit ? { backgroundColor: '#2A2A2A' } : undefined,
         }}
       >
         <text style={{ fontSize: 14, lineHeight: 20, color: C.text, minWidth: 0, maxWidth: '100%' }}>
@@ -541,11 +545,14 @@ export const Transcript = memo(function Transcript({
   turns,
   permissions,
   onRespond,
+  onEditQueued,
   listRef,
 }: {
   turns: Turn[]
   permissions?: PendingPermission[]
   onRespond?: (request: PermissionEntry['request'], response: PermissionResponse) => void
+  /** Pulls a queued (optimistic) send back into the composer for editing. */
+  onEditQueued?: (text: string) => void
   listRef?: React.Ref<{ id: number }>
 }) {
   const cards = permissions ?? []
@@ -565,7 +572,13 @@ export const Transcript = memo(function Transcript({
           first={index === 0}
           last={index === rowCount - 1}
         >
-          {turn.kind === 'user' && <UserTurn text={turn.text} />}
+          {turn.kind === 'user' && (
+            <UserTurn
+              text={turn.text}
+              queued={turn.queued}
+              onEdit={turn.queued && onEditQueued ? () => onEditQueued(turn.text) : undefined}
+            />
+          )}
           {turn.kind === 'assistant' && <SafeMdxContent source={turn.source} />}
           {turn.kind === 'reasoning' && <ReasoningRow turn={turn} />}
           {turn.kind === 'tool' && <ToolRow turn={turn} />}

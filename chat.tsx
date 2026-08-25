@@ -28,6 +28,15 @@ import {
   type ConnStatus,
   type ProviderEntry,
 } from './paseo'
+import {
+  classifyPaste,
+  planAttachments,
+  removeAttachment,
+  toSendImages,
+  type ImageAttachment,
+  type IncomingImage,
+  type PastePayload,
+} from './attachments'
 import { C, CONTENT_MAX_WIDTH, SIDEBAR_WIDTH } from './theme'
 import { Sidebar, Header, CenterMessage, agentStatusColor, daemonHost } from './chrome'
 import { Transcript } from './transcript'
@@ -121,14 +130,28 @@ function useDaemon(): DaemonView {
 
 const NO_TRUTH: DaemonTruth = { modelValue: null, thinkingId: null, modeId: null }
 
+/**
+ * Opens the raster-filtered multi-select file dialog through a native bridge.
+ * @gpuix ships no dialog API yet; when one lands, pass it
+ * `imagePickerDialogOptions()` from attachments.ts and resolve each chosen path
+ * into an IncomingImage (name, size, raw base64 data). Null means no bridge.
+ */
+async function openImagePicker(): Promise<IncomingImage[] | null> {
+  return null
+}
+
 export function ChatApp() {
   const { client, daemon, status, error, agents, providers } = useDaemon()
 
   const [activeId, setActiveId] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState(false)
   const [draft, setDraft] = useState('')
+  const [draftImages, setDraftImages] = useState<ImageAttachment[]>([])
+  const [attachNotice, setAttachNotice] = useState<{ text: string; tone: 'warn' | 'danger' } | null>(null)
   const [createError, setCreateError] = useState<string | null>(null)
-  const [pendingSeed, setPendingSeed] = useState<{ agentId: string; text: string } | null>(null)
+  const [pendingSeed, setPendingSeed] = useState<{ agentId: string; text: string; images: ImageAttachment[] } | null>(
+    null,
+  )
 
   const { config: draftConfig, setModel: setDraftModel, setThinking: setDraftThinking, setMode: setDraftMode } =
     useDraftConfig(providers)
@@ -138,6 +161,7 @@ export function ChatApp() {
 
   const conversation = useAgentConversation(client, activeId, {
     seedText: pendingSeed && pendingSeed.agentId === activeId ? pendingSeed.text : null,
+    seedImages: pendingSeed && pendingSeed.agentId === activeId ? pendingSeed.images : null,
     onSeedConsumed: () => setPendingSeed(null),
   })
   const turns = conversation.turns
@@ -207,14 +231,22 @@ export function ChatApp() {
   const send = async (raw: string) => {
     const text = raw.trim()
     if (!text || status !== 'connected') return
+    const stagedImages = draftImages
+    const outgoing = toSendImages(stagedImages)
+    // Chips clear immediately; a failed send restores them next to the text.
     setDraft('')
+    setDraftImages([])
     setCreateError(null)
+    setAttachNotice(null)
     if (activeId) {
-      void conversation.send(text)
+      void conversation.send(text, stagedImages).then((ok) => {
+        if (!ok) restoreDraft(text, stagedImages)
+      })
       return
     }
     if (!modelValue) {
       setCreateError('No provider model is ready yet.')
+      restoreDraft(text, stagedImages)
       return
     }
     try {
@@ -225,13 +257,71 @@ export function ChatApp() {
         config,
         cwd,
         prompt: text,
+        ...(outgoing.length > 0 ? { images: outgoing } : {}),
         ...(worktree === 'worktree' ? { git: { createWorktree: true } } : {}),
       })
-      setPendingSeed({ agentId: handle.id, text })
+      setPendingSeed({ agentId: handle.id, text, images: stagedImages })
       setActiveId(handle.id)
     } catch (err) {
       setCreateError(errorMessage(err))
+      restoreDraft(text, stagedImages)
     }
+  }
+
+  /** Puts a failed send back into the composer unless newer content took its place. */
+  const restoreDraft = (text: string, images: ImageAttachment[]) => {
+    setDraft((prev) => (prev.length === 0 ? text : prev))
+    setDraftImages((prev) => (prev.length === 0 ? images : prev))
+  }
+
+  // Brief inline notices dismiss themselves.
+  useEffect(() => {
+    if (!attachNotice) return
+    const timer = setTimeout(() => setAttachNotice(null), 4_000)
+    return () => clearTimeout(timer)
+  }, [attachNotice])
+
+  /** Validates offered files and stages survivors as chips; attaching needs a daemon. */
+  const offerImages = (files: readonly IncomingImage[]) => {
+    if (disabledReason) return
+    const plan = planAttachments(files)
+    if (plan.images.length > 0) setDraftImages((prev) => [...prev, ...plan.images])
+    if (plan.notice) setAttachNotice({ text: plan.notice, tone: plan.blocked ? 'danger' : 'warn' })
+  }
+
+  /**
+   * Receives clipboard contents once a runtime bridge offers them: raster image
+   * files become chips, everything else falls through as normal text. Bound via
+   * the composer's onPastePayload contract until @gpuix exposes paste events.
+   */
+  const offerPaste = (payload: PastePayload) => {
+    const classified = classifyPaste(payload)
+    if (classified.kind === 'files') {
+      offerImages(classified.files)
+      return
+    }
+    setDraft((prev) => prev + classified.text)
+  }
+
+  const pickAttachments = async () => {
+    if (disabledReason) return
+    const picked = await openImagePicker()
+    if (picked === null) {
+      setAttachNotice({ text: 'Picking files needs a native dialog; paste an image instead.', tone: 'warn' })
+      return
+    }
+    if (picked.length > 0) offerImages(picked)
+  }
+
+  /** Pulls a queued send back into the composer for editing, chips included. */
+  const editQueued = (text: string) => {
+    const entry = conversation.pending.find((queued) => queued.text === text)
+    if (!entry) return
+    conversation.unqueue(text)
+    setDraft(text)
+    setDraftImages(entry.images)
+    setCreateError(null)
+    setAttachNotice(null)
   }
 
   const title = activeId ? (activeEntry ? displayName(activeEntry) : 'Agent') : 'New Task'
@@ -345,6 +435,7 @@ export function ChatApp() {
             turns={visibleTurns}
             permissions={permissions.cards}
             onRespond={permissions.respond}
+            onEditQueued={editQueued}
             listRef={listRef}
           />
         )}
@@ -365,6 +456,11 @@ export function ChatApp() {
           onSend={send}
           disabledReason={disabledReason}
           chips={draftChips}
+          attachments={draftImages}
+          onRemoveAttachment={(id) => setDraftImages((prev) => removeAttachment(prev, id))}
+          onAttach={() => void pickAttachments()}
+          onPastePayload={offerPaste}
+          attachNotice={attachNotice}
         />
         <FooterBar
           cwd={activeEntry?.cwd ?? cwd}
