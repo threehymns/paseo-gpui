@@ -32,10 +32,11 @@ import { C, CONTENT_MAX_WIDTH, SIDEBAR_WIDTH } from './theme'
 import { Sidebar, Header, CenterMessage, agentStatusColor, daemonHost } from './chrome'
 import { Transcript } from './transcript'
 import { ModelPicker, OptionPicker, modeOptions, thinkingOptions } from './pickers'
-import { Composer, FooterBar } from './composer'
+import { Composer, ConfigNotice, FooterBar } from './composer'
 import { useAgentConversation } from './conversation'
 import { useAgentPermissions } from './permissions'
 import { useDraftConfig } from './draft-config'
+import { liveTruth, useLiveAgentConfig, type DaemonTruth, type ProviderNotice } from './live-config'
 
 // ---- daemon hooks ----------------------------------------------------------
 
@@ -118,6 +119,8 @@ function useDaemon(): DaemonView {
 
 // ---- app -------------------------------------------------------------------
 
+const NO_TRUTH: DaemonTruth = { modelValue: null, thinkingId: null, modeId: null }
+
 export function ChatApp() {
   const { client, daemon, status, error, agents, providers } = useDaemon()
 
@@ -127,10 +130,8 @@ export function ChatApp() {
   const [createError, setCreateError] = useState<string | null>(null)
   const [pendingSeed, setPendingSeed] = useState<{ agentId: string; text: string } | null>(null)
 
-  const { config: draftConfig, setModel: setModelValue, setThinking: setThinkingId, setMode: setModeId } = useDraftConfig(providers)
-  const modelValue = draftConfig.modelValue
-  const thinkingId = draftConfig.thinkingId
-  const modeId = draftConfig.modeId
+  const { config: draftConfig, setModel: setDraftModel, setThinking: setDraftThinking, setMode: setDraftMode } =
+    useDraftConfig(providers)
   const [cwd, setCwd] = useState(process.cwd())
   const [cwdOptions, setCwdOptions] = useState<string[]>([])
   const [worktree, setWorktree] = useState('local')
@@ -142,6 +143,21 @@ export function ChatApp() {
   const turns = conversation.turns
   const permissions = useAgentPermissions(client, daemon, activeId)
   const activeEntry = agents.find((entry) => entry.id === activeId) ?? null
+
+  // Chip values for an active agent come from the live agent; the draft stays
+  // authoritative only while no agent is selected.
+  const truthOfActive = useMemo(() => (activeEntry ? liveTruth(activeEntry) : null), [activeEntry])
+  const live = useLiveAgentConfig(daemon, activeId, truthOfActive ?? NO_TRUTH)
+  const editingLive = activeId != null && truthOfActive != null
+  const chipValues = editingLive ? live.config : draftConfig
+  const modelValue = chipValues.modelValue
+  const thinkingId = chipValues.thinkingId
+  const modeId = chipValues.modeId
+  // A running agent is one provider's process, so only that provider's models apply.
+  const chipProviders = useMemo(
+    () => (activeEntry ? providers.filter((entry) => entry.provider === activeEntry.provider) : providers),
+    [providers, activeEntry],
+  )
 
   const { entry: providerOfModel, model: modelDef } = useMemo(
     () => findModel(providers, modelValue),
@@ -229,12 +245,16 @@ export function ChatApp() {
         ? 'Waiting for an available provider model…'
         : null
 
+  const onModelChange = editingLive ? live.setModel : setDraftModel
+  const onThinkingChange = editingLive ? live.setThinking : setDraftThinking
+  const onModeChange = editingLive ? live.setMode : setDraftMode
+
   const draftChips = (
     <>
-      <ModelPicker providers={providers} value={modelValue} onChange={setModelValue} />
+      <ModelPicker providers={chipProviders} value={modelValue} onChange={onModelChange} />
       <OptionPicker
         value={thinkingId}
-        onChange={setThinkingId}
+        onChange={onThinkingChange}
         options={thinkingOptions(modelDef)}
         icon="zap"
         sectionLabel="Reasoning"
@@ -242,7 +262,7 @@ export function ChatApp() {
       />
       <OptionPicker
         value={modeId}
-        onChange={setModeId}
+        onChange={onModeChange}
         options={modeOptions(providerOfModel?.modes)}
         icon="lock"
         sectionLabel="Access"
@@ -335,6 +355,7 @@ export function ChatApp() {
             </text>
           </div>
         )}
+        {editingLive && live.notice && <ConfigNotice notice={live.notice} />}
         <Composer
           value={draft}
           onChange={(next) => {
