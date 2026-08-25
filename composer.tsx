@@ -9,6 +9,7 @@ import { OptionPicker } from './pickers'
 import { basename } from './paseo'
 import type { ProviderNotice } from './live-config'
 import {
+  nextCaretAfterEdit,
   useSlashCommandMenu,
   type DaemonCommandsSeam,
   type DraftCommandsInput,
@@ -62,11 +63,7 @@ export function Composer({
   const [caret, setCaret] = useState(value.length)
   const lastValueRef = useRef(value)
   const trackChange = (next: string, explicitCaret?: number) => {
-    const previousValue = lastValueRef.current
-    setCaret(
-      explicitCaret ??
-        (caret >= previousValue.length ? next.length : Math.min(caret, next.length)),
-    )
+    setCaret(explicitCaret ?? nextCaretAfterEdit(lastValueRef.current, next, caret))
     lastValueRef.current = next
     onChange(next)
   }
@@ -162,50 +159,50 @@ export function Composer({
             onKeyDown={handleKeyDown}
             onSubmit={(event) => send(event.value ?? value)}
           />
-        {disabledReason && (
-          <text
+          {disabledReason && (
+            <text
+              style={{
+                fontSize: 12,
+                color: C.warn,
+                paddingLeft: 10,
+                paddingRight: 10,
+                paddingTop: 6,
+              }}
+            >
+              {disabledReason}
+            </text>
+          )}
+          <div
             style={{
-              fontSize: 12,
-              color: C.warn,
+              display: 'flex',
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 4,
+              marginTop: 8,
               paddingLeft: 10,
               paddingRight: 10,
-              paddingTop: 6,
             }}
           >
-            {disabledReason}
-          </text>
-        )}
-        <div
-          style={{
-            display: 'flex',
-            flexDirection: 'row',
-            alignItems: 'center',
-            gap: 4,
-            marginTop: 8,
-            paddingLeft: 10,
-            paddingRight: 10,
-          }}
-        >
-          {chips}
-          <div style={{ flexGrow: 1 }} />
-          <div
-            testId="send"
-            style={{
-              width: 26,
-              height: 26,
-              borderRadius: 13,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              cursor: ready ? 'pointer' : undefined,
-              backgroundColor: ready ? C.inverse : C.overlayStrong,
-              hover: ready ? { opacity: 0.9 } : undefined,
-            }}
-            onClick={() => send(value)}
-          >
-            <Icon name="send" size={16} color={ready ? C.onInverse : C.ghost} />
+            {chips}
+            <div style={{ flexGrow: 1 }} />
+            <div
+              testId="send"
+              style={{
+                width: 26,
+                height: 26,
+                borderRadius: 13,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: ready ? 'pointer' : undefined,
+                backgroundColor: ready ? C.inverse : C.overlayStrong,
+                hover: ready ? { opacity: 0.9 } : undefined,
+              }}
+              onClick={() => send(value)}
+            >
+              <Icon name="send" size={16} color={ready ? C.onInverse : C.ghost} />
+            </div>
           </div>
-        </div>
         </div>
       </div>
     </div>

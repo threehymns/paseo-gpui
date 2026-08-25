@@ -13,6 +13,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { compareMatchScores, scoreTextFields } from '@getpaseo/protocol/search/text-match'
 import { errorMessage, splitModelValue } from './paseo'
+import type { DraftConfig } from './draft-config'
 
 export type SlashCommandKind = 'command' | 'skill'
 
@@ -129,13 +130,19 @@ export function caretAfterReplacement(range: SlashCommandRange, textLength: numb
   return range.start + 1 + commandNameLength + (range.end === textLength ? 1 : 0)
 }
 
+/**
+ * Best-known caret after a plain edit: edits at the end of the text stay at
+ * the end; elsewhere the caret holds its position, clamped to the new length.
+ */
+export function nextCaretAfterEdit(previousValue: string, nextValue: string, previousCaret: number): number {
+  if (previousCaret >= previousValue.length) return nextValue.length
+  return Math.max(0, Math.min(previousCaret, nextValue.length))
+}
+
 // ---- draft config ----------------------------------------------------------
 
 /** What the composer knows about a not-yet-created agent. */
-export interface DraftCommandsInput {
-  modelValue: string
-  thinkingId: string | null
-  modeId: string | null
+export interface DraftCommandsInput extends DraftConfig {
   cwd: string
 }
 
@@ -272,11 +279,8 @@ export class CommandCatalog {
 // ---- hook -------------------------------------------------------------------
 
 export interface SlashCommandMenuController {
-  /** A `/` token is active and the menu has not been escaped away. */
-  open: boolean
   /** Something is on screen: rows, the empty state, or the error row. */
   visible: boolean
-  loading: boolean
   error: string | null
   /** Display order, best match last so it sits nearest the composer. */
   rows: SlashCommand[]
@@ -356,14 +360,11 @@ export function useSlashCommandMenu(input: UseSlashCommandMenuInput): SlashComma
   )
   const rows = useMemo(() => [...ranked].reverse(), [ranked])
 
+  // The menu shows once the catalog has answered: rows, or the empty/error
+  // states. While the fetch is in flight there is nothing to show yet.
   const open = range != null && !dismissed
-  const loading = load.status === 'loading'
-  const visible =
-    open &&
-    target != null &&
-    seam != null &&
-    !loading &&
-    (rows.length > 0 || load.status === 'error')
+  const settled = load.status === 'ready' || load.status === 'error'
+  const visible = open && target != null && seam != null && settled
 
   // -1 means "unset"; it resolves to the best match, nearest the composer.
   const resolvedIndex = selectedIndex >= 0 && selectedIndex < rows.length ? selectedIndex : rows.length - 1
@@ -400,9 +401,7 @@ export function useSlashCommandMenu(input: UseSlashCommandMenuInput): SlashComma
   }
 
   return {
-    open,
     visible,
-    loading: loading && open,
     error: load.status === 'error' ? load.error : null,
     rows,
     selectedIndex: resolvedIndex,

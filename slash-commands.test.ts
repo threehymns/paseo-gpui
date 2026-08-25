@@ -12,6 +12,7 @@ import {
   filterAndRankCommands,
   filterInlineSkillCommands,
   findActiveSlashCommand,
+  nextCaretAfterEdit,
   nextSelectedIndex,
   slashCommandMenuEntries,
   type DaemonCommandsSeam,
@@ -216,6 +217,22 @@ describe('caretAfterReplacement', () => {
   test('lands right after the inserted name mid-line', () => {
     const mid = range({ start: 3, end: 6 })
     expect(caretAfterReplacement(mid, 10, 'tdd-done'.length)).toBe(3 + 1 + 'tdd-done'.length)
+  })
+})
+
+describe('nextCaretAfterEdit', () => {
+  test('edits at the end of the text stay at the end', () => {
+    expect(nextCaretAfterEdit('/td', '/tdd', 3)).toBe(4)
+    expect(nextCaretAfterEdit('/tdd', '/td', 4)).toBe(3)
+  })
+
+  test('mid-text edits hold the caret position, clamped', () => {
+    expect(nextCaretAfterEdit('go /td now', 'go /txd now', 6)).toBe(6)
+    expect(nextCaretAfterEdit('short', 'r', 5)).toBe(1)
+  })
+
+  test('an out-of-range caret clamps to zero for empty text', () => {
+    expect(nextCaretAfterEdit('/td', '', -2)).toBe(0)
   })
 })
 
