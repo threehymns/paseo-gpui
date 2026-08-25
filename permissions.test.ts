@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import {
-  allowResponse,
-  denyResponse,
   initialPermissions,
   isResponding,
+  permissionActions,
   permissionKey,
+  permissionPlanMarkdown,
   reducePermissions,
   visiblePermissions,
   type PermissionsEvent,
@@ -167,23 +167,73 @@ describe('pending permissions', () => {
     expect(state.responding).toEqual([])
   })
 
-  test('allow/deny responses reuse the daemon-suggested action when offered', () => {
-    const withActions = toolRequest({
-      actions: [
-        { id: 'allow-once', label: 'Allow once', behavior: 'allow' },
-        { id: 'deny-msg', label: 'Deny', behavior: 'deny' },
-      ],
-    })
-    expect(allowResponse(withActions)).toEqual({ behavior: 'allow', selectedActionId: 'allow-once' })
-    expect(denyResponse(withActions)).toEqual({ behavior: 'deny', selectedActionId: 'deny-msg' })
-
-    const bare = toolRequest()
-    expect(allowResponse(bare)).toEqual({ behavior: 'allow' })
-    expect(denyResponse(bare)).toEqual({ behavior: 'deny' })
-  })
-
   test('permissionKey pairs agent and request', () => {
     expect(permissionKey(agentA, 'r1')).toBe(`${agentA}:r1`)
     expect(permissionKey(agentB, 'r1')).not.toBe(permissionKey(agentA, 'r1'))
+  })
+
+  test('provider actions become button choices whose responses carry the action id', () => {
+    const request = toolRequest({
+      actions: [
+        { id: 'allow-once', label: 'Allow once', behavior: 'allow', variant: 'secondary' },
+        { id: 'always-allow', label: 'Always allow', behavior: 'allow', variant: 'primary' },
+        { id: 'deny-msg', label: 'No thanks', behavior: 'deny', variant: 'danger' },
+      ],
+    })
+    expect(permissionActions(request)).toEqual([
+      {
+        id: 'allow-once',
+        label: 'Allow once',
+        behavior: 'allow',
+        variant: 'secondary',
+        response: { behavior: 'allow', selectedActionId: 'allow-once' },
+      },
+      {
+        id: 'always-allow',
+        label: 'Always allow',
+        behavior: 'allow',
+        variant: 'primary',
+        response: { behavior: 'allow', selectedActionId: 'always-allow' },
+      },
+      {
+        id: 'deny-msg',
+        label: 'No thanks',
+        behavior: 'deny',
+        variant: 'danger',
+        response: { behavior: 'deny', selectedActionId: 'deny-msg' },
+      },
+    ])
+  })
+
+  test('requests without actions fall back to plain allow/deny', () => {
+    const bare = toolRequest()
+    expect(permissionActions(bare)).toEqual([
+      {
+        id: 'fallback-deny',
+        label: 'Deny',
+        behavior: 'deny',
+        variant: 'secondary',
+        response: { behavior: 'deny' },
+      },
+      {
+        id: 'fallback-allow',
+        label: 'Allow',
+        behavior: 'allow',
+        variant: 'primary',
+        response: { behavior: 'allow' },
+      },
+    ])
+    expect(permissionActions(toolRequest({ actions: [] }))).toEqual(permissionActions(bare))
+  })
+
+  test('plan-kind requests expose their markdown content', () => {
+    const plan = toolRequest({
+      kind: 'plan',
+      detail: { type: 'plan', text: '# Ship it\n\n1. write tests' },
+    })
+    expect(permissionPlanMarkdown(plan)).toBe('# Ship it\n\n1. write tests')
+    expect(permissionPlanMarkdown(toolRequest({ detail: { type: 'shell', command: 'ls' } }))).toBeUndefined()
+    expect(permissionPlanMarkdown(toolRequest())).toBeUndefined()
+    expect(permissionPlanMarkdown(toolRequest({ detail: { type: 'plan', text: '   ' } }))).toBeUndefined()
   })
 })

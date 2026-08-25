@@ -28,6 +28,8 @@ export const C = {
   running: '#4C8DF6',
   warn: '#D9A050',
   danger: '#E5484D',
+  dangerWash: '#E5484D14',
+  dangerBorder: '#E5484D30',
 }
 
 export const SIDEBAR_WIDTH = 252

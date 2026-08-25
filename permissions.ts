@@ -116,15 +116,56 @@ export function isResponding(state: PermissionsState, agentId: string, requestId
   return state.responding.includes(permissionKey(agentId, requestId))
 }
 
-/** Allow/deny payloads that prefer the daemon-suggested action when offered. */
-export function allowResponse(request: PermissionRequest): PermissionResponse {
-  const action = request.actions?.find((candidate) => candidate.behavior === 'allow')
-  return { behavior: 'allow', ...(action ? { selectedActionId: action.id } : {}) }
+/** One renderable button on a permission card, with the exact payload clicking it sends. */
+export interface PermissionActionChoice {
+  id: string
+  label: string
+  behavior: 'allow' | 'deny'
+  variant?: 'primary' | 'secondary' | 'danger'
+  response: PermissionResponse
 }
 
-export function denyResponse(request: PermissionRequest): PermissionResponse {
-  const action = request.actions?.find((candidate) => candidate.behavior === 'deny')
-  return { behavior: 'deny', ...(action ? { selectedActionId: action.id } : {}) }
+const FALLBACK_DENY: PermissionActionChoice = {
+  id: 'fallback-deny',
+  label: 'Deny',
+  behavior: 'deny',
+  variant: 'secondary',
+  response: { behavior: 'deny' },
+}
+
+const FALLBACK_ALLOW: PermissionActionChoice = {
+  id: 'fallback-allow',
+  label: 'Allow',
+  behavior: 'allow',
+  variant: 'primary',
+  response: { behavior: 'allow' },
+}
+
+/**
+ * The buttons a permission card offers: the provider's own actions when it
+ * supplies them — each carrying its id in the response — or plain allow/deny
+ * when it does not.
+ */
+export function permissionActions(request: PermissionRequest): PermissionActionChoice[] {
+  const provided = request.actions ?? []
+  if (provided.length === 0) return [FALLBACK_DENY, FALLBACK_ALLOW]
+  return provided.map((action) => ({
+    id: action.id,
+    label: action.label,
+    behavior: action.behavior,
+    ...(action.variant ? { variant: action.variant } : {}),
+    response:
+      action.behavior === 'allow'
+        ? { behavior: 'allow', selectedActionId: action.id }
+        : { behavior: 'deny', selectedActionId: action.id },
+  }))
+}
+
+/** Plan-kind requests carry their proposed plan as markdown to read before approving. */
+export function permissionPlanMarkdown(request: PermissionRequest): string | undefined {
+  if (request.detail?.type !== 'plan') return undefined
+  const text = request.detail.text.trim()
+  return text || undefined
 }
 
 export function useAgentPermissions(client: PaseoClient, daemon: DaemonClient, agentId: string | null) {

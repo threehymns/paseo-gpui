@@ -14,7 +14,7 @@ import {
   type ToolName,
   type Turn,
 } from './paseo'
-import { allowResponse, denyResponse, type PermissionEntry } from './permissions'
+import { permissionActions, permissionPlanMarkdown, type PermissionEntry } from './permissions'
 import { C, CHAT_THEME, CONTENT_MAX_WIDTH } from './theme'
 
 const TOOL_ICONS: Record<ToolName, IconName> = {
@@ -223,10 +223,10 @@ function ErrorBlock({ text }: { text: string }) {
         gap: 9,
         width: '100%',
         minWidth: 0,
-        backgroundColor: '#E5484D14',
+        backgroundColor: C.dangerWash,
         borderRadius: 10,
         borderWidth: 1,
-        borderColor: '#E5484D30',
+        borderColor: C.dangerBorder,
         padding: 12,
       }}
     >
@@ -246,18 +246,31 @@ const PERMISSION_ICONS: Record<PermissionKind, IconName> = {
   other: 'lock',
 }
 
+type ButtonLook = 'primary' | 'secondary' | 'danger'
+
+/** The provider's variant decides when supplied; behavior otherwise. */
+function actionLook(behavior: 'allow' | 'deny', variant?: 'primary' | 'secondary' | 'danger'): ButtonLook {
+  return variant ?? (behavior === 'allow' ? 'primary' : 'secondary')
+}
+
+const BUTTON_LOOKS: Record<ButtonLook, { backgroundColor: string; borderColor?: string; color: string }> = {
+  primary: { backgroundColor: C.inverse, color: C.onInverse },
+  secondary: { backgroundColor: C.overlayStrong, color: C.secondary },
+  danger: { backgroundColor: C.dangerWash, borderColor: C.dangerBorder, color: C.danger },
+}
+
 function PermissionButton({
   label,
-  kind,
+  look,
   disabled,
   onClick,
 }: {
   label: string
-  kind: 'allow' | 'deny'
+  look: ButtonLook
   disabled?: boolean
   onClick?: () => void
 }) {
-  const filled = kind === 'allow'
+  const { backgroundColor, borderColor, color } = BUTTON_LOOKS[look]
   return (
     <div
       style={{
@@ -268,14 +281,16 @@ function PermissionButton({
         paddingLeft: 14,
         paddingRight: 14,
         borderRadius: 7,
+        borderWidth: borderColor ? 1 : undefined,
+        borderColor,
         cursor: disabled ? undefined : 'pointer',
         opacity: disabled ? 0.4 : 1,
-        backgroundColor: filled ? C.inverse : C.overlayStrong,
+        backgroundColor,
         hover: disabled ? undefined : { opacity: 0.85 },
       }}
       onClick={disabled ? undefined : onClick}
     >
-      <text style={{ fontSize: 12.5, fontWeight: 500, color: filled ? C.onInverse : C.secondary }}>
+      <text style={{ fontSize: 12.5, fontWeight: 500, color }}>
         {label}
       </text>
     </div>
@@ -292,6 +307,8 @@ export function PermissionCard({
   onRespond?: (request: PermissionEntry['request'], response: PermissionResponse) => void
 }) {
   const { title, detail } = permissionDisplay(entry.request)
+  const actions = permissionActions(entry.request)
+  const planMarkdown = permissionPlanMarkdown(entry.request)
   return (
     <div
       style={{
@@ -332,7 +349,21 @@ export function PermissionCard({
           </div>
         )}
       </div>
-      {detail && (
+      {planMarkdown && (
+        <div
+          style={{
+            borderWidth: 1,
+            borderColor: C.border,
+            borderRadius: 8,
+            backgroundColor: C.canvas,
+            padding: 12,
+            minWidth: 0,
+          }}
+        >
+          <SafeMdxContent source={planMarkdown} />
+        </div>
+      )}
+      {!planMarkdown && detail && (
         <text
           style={{
             fontSize: 13,
@@ -345,19 +376,16 @@ export function PermissionCard({
           {oneLine(detail)}
         </text>
       )}
-      <div style={{ display: 'flex', flexDirection: 'row', justifyContent: 'flex-end', gap: 8 }}>
-        <PermissionButton
-          label="Deny"
-          kind="deny"
-          disabled={responding}
-          onClick={() => onRespond?.(entry.request, denyResponse(entry.request))}
-        />
-        <PermissionButton
-          label="Allow"
-          kind="allow"
-          disabled={responding}
-          onClick={() => onRespond?.(entry.request, allowResponse(entry.request))}
-        />
+      <div style={{ display: 'flex', flexDirection: 'row', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 8 }}>
+        {actions.map((action, index) => (
+          <PermissionButton
+            key={`${action.id}-${index}`}
+            label={action.label}
+            look={actionLook(action.behavior, action.variant)}
+            disabled={responding}
+            onClick={() => onRespond?.(entry.request, action.response)}
+          />
+        ))}
       </div>
     </div>
   )
