@@ -3,17 +3,17 @@ import {
   MAX_ATTACHMENT_BYTES,
   RASTER_IMAGE_EXTENSIONS,
   addAttachment,
-  classifyPaste,
   getFileExtension,
   getRasterImageMimeTypeFromPath,
   imagePickerDialogOptions,
+  planAttachments,
+  planPaste,
   removeAttachment,
   resolveRasterImageMimeType,
   stageAttachments,
   toSendImages,
-  tooLargeMessage,
-  unsupportedImagesMessage,
-  planAttachments,
+  tooLargeNotice,
+  unsupportedImagesNotice,
   type ImageAttachment,
   type IncomingImage,
 } from './attachments'
@@ -58,20 +58,30 @@ describe('raster image vocabulary', () => {
 
 describe('paste classification', () => {
   test('text falls through as normal text', () => {
-    const out = classifyPaste({ kind: 'text', text: 'fix the bug' })
-    expect(out).toEqual({ kind: 'text', text: 'fix the bug' })
+    const out = planPaste({ kind: 'text', text: 'fix the bug' })
+    expect(out.appendText).toBe('fix the bug')
+    expect(out.plan).toBeNull()
   })
 
-  test('file lists are routed to the attach planner', () => {
-    const files = [png(), png({ name: 'clip.gif', mimeType: 'image/gif' })]
-    const out = classifyPaste({ kind: 'files', files })
-    expect(out.kind).toBe('files')
+  test('file lists route to the attach planner, not the draft', () => {
+    const out = planPaste({ kind: 'files', files: [png()] })
+    expect(out.appendText).toBeNull()
+    expect(out.plan!.images).toHaveLength(1)
+  })
+
+  test('a file paste never leaks into the text path', () => {
+    const out = planPaste({
+      kind: 'files',
+      files: [png({ name: 'notes.pdf', mimeType: 'application/pdf' })],
+    })
+    expect(out.appendText).toBeNull()
+    expect(out.plan!.notice).toContain('notes.pdf')
   })
 })
 
 describe('size validation blocks before anything is staged', () => {
   test('the paseo upload cap message names the file', () => {
-    expect(tooLargeMessage('big.png')).toBe('big.png is too large (max 50MB)')
+    expect(tooLargeNotice('big.png')).toBe('big.png is too large (max 50MB)')
     expect(MAX_ATTACHMENT_BYTES).toBe(50 * 1024 * 1024)
   })
 
@@ -79,19 +89,16 @@ describe('size validation blocks before anything is staged', () => {
     const plan = planAttachments([png(), png({ name: 'big.png', size: MAX_ATTACHMENT_BYTES + 1 })])
     expect(plan.images).toEqual([])
     expect(plan.notice).toBe('big.png is too large (max 50MB)')
-    expect(plan.blocked).toBe(true)
   })
 
   test('exactly at the cap still attaches', () => {
     const plan = planAttachments([png({ size: MAX_ATTACHMENT_BYTES })])
     expect(plan.images).toHaveLength(1)
     expect(plan.notice).toBeNull()
-    expect(plan.blocked).toBe(false)
   })
 
   test('oversize wins over classification for picked files too', () => {
     const plan = planAttachments([png({ name: 'huge.heic', mimeType: 'image/heic', size: 51 * 1024 * 1024 })])
-    expect(plan.blocked).toBe(true)
     expect(plan.images).toEqual([])
   })
 })
@@ -99,7 +106,6 @@ describe('size validation blocks before anything is staged', () => {
 describe('attach planning', () => {
   test('raster images become staged chips carrying name, mime, and bytes', () => {
     const plan = planAttachments([png(), png({ name: 'photo.avif', mimeType: null })])
-    expect(plan.blocked).toBe(false)
     expect(plan.notice).toBeNull()
     expect(plan.images.map((image) => [image.name, image.mimeType])).toEqual([
       ['shot.png', 'image/png'],
@@ -113,15 +119,14 @@ describe('attach planning', () => {
   test('a paste with no raster image names the rejected item instead of a dead chip', () => {
     const plan = planAttachments([png({ name: 'notes.pdf', mimeType: 'application/pdf' })])
     expect(plan.images).toEqual([])
-    expect(plan.notice).toBe(unsupportedImagesMessage(['notes.pdf']))
-    expect(plan.blocked).toBe(true)
+    expect(plan.notice).toBe(unsupportedImagesNotice(['notes.pdf']))
   })
 
   test('a mixed paste attaches the rasters and names the rest', () => {
     const plan = planAttachments([png({ name: 'doc.pdf', mimeType: 'application/pdf' }), png()])
     expect(plan.images).toHaveLength(1)
     expect(plan.rejectedNames).toEqual(['doc.pdf'])
-    expect(plan.blocked).toBe(false)
+    expect(plan.notice).toBe(unsupportedImagesNotice(['doc.pdf']))
   })
 
   test('mime type derives from the file name when absent', () => {

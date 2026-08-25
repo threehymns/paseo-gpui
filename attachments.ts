@@ -88,20 +88,30 @@ export function resolveRasterImageMimeType(input: {
 /** What a clipboard hand-off contains: plain text, or a list of files. */
 export type PastePayload = { kind: 'text'; text: string } | { kind: 'files'; files: readonly IncomingImage[] }
 
-export function classifyPaste(payload: PastePayload): PastePayload {
-  return payload
+/** A paste routed to either the draft text or the attach planner. */
+export interface PastePlan {
+  /** Text to fall through into the draft; null when files were offered. */
+  appendText: string | null
+  /** Attach plan for a file paste; null for plain text. */
+  plan: AttachmentPlan | null
+}
+
+/** Raster image files become chips; everything else falls through as normal text. */
+export function planPaste(payload: PastePayload): PastePlan {
+  if (payload.kind === 'text') return { appendText: payload.text, plan: null }
+  return { appendText: null, plan: planAttachments(payload.files) }
 }
 
 // ---- size validation -------------------------------------------------------
 
-export function tooLargeMessage(name: string): string {
+export function tooLargeNotice(name: string): string {
   return `${name} is too large (max ${MAX_ATTACHMENT_LABEL})`
 }
 
-export function unsupportedImagesMessage(names: readonly string[]): string {
+export function unsupportedImagesNotice(names: readonly string[]): string {
   const listed = names.join(', ')
   const plural = names.length > 1 ? 's' : ''
-  return `${listed} can't be attached — only image${plural} can`
+  return `${listed} can't be attached — only image${plural}s can`
 }
 
 function findOversizedName(files: readonly IncomingImage[]): string | null {
@@ -111,14 +121,12 @@ function findOversizedName(files: readonly IncomingImage[]): string | null {
 // ---- planning: validate, then stage ----------------------------------------
 
 export interface AttachmentPlan {
-  /** Chips to add; empty whenever blocked. */
+  /** Chips to add; empty whenever everything was rejected. */
   images: ImageAttachment[]
   /** Non-raster items that were skipped, named for the inline notice. */
   rejectedNames: string[]
   /** Inline notice text, set when items were rejected or the paste was blocked. */
   notice: string | null
-  /** True when nothing could be attached at all. */
-  blocked: boolean
 }
 
 /**
@@ -128,7 +136,7 @@ export interface AttachmentPlan {
 export function planAttachments(files: readonly IncomingImage[]): AttachmentPlan {
   const oversized = findOversizedName(files)
   if (oversized) {
-    return { images: [], rejectedNames: [], notice: tooLargeMessage(oversized), blocked: true }
+    return { images: [], rejectedNames: [], notice: tooLargeNotice(oversized) }
   }
 
   const accepted: ResolvedImage[] = []
@@ -139,16 +147,11 @@ export function planAttachments(files: readonly IncomingImage[]): AttachmentPlan
     else rejectedNames.push(file.name)
   }
 
-  if (accepted.length === 0 && rejectedNames.length > 0) {
-    return {
-      images: [],
-      rejectedNames,
-      notice: unsupportedImagesMessage(rejectedNames),
-      blocked: true,
-    }
+  return {
+    images: stageAttachments(accepted),
+    rejectedNames,
+    notice: rejectedNames.length > 0 ? unsupportedImagesNotice(rejectedNames) : null,
   }
-
-  return { images: stageAttachments(accepted), rejectedNames, notice: null, blocked: false }
 }
 
 // ---- chip list operations ---------------------------------------------------

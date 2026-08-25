@@ -3,7 +3,7 @@
  */
 
 import React, { useMemo } from 'react'
-import { Icon, IconButton, StatusDot } from './chrome'
+import { Icon, IconButton, StatusDot, type IconName } from './chrome'
 import { OptionPicker } from './pickers'
 import { basename } from './paseo'
 import type { ImageAttachment, PastePayload } from './attachments'
@@ -75,6 +75,48 @@ function AttachmentChip({
   )
 }
 
+/** A 26px circular icon button at the composer's foot. */
+function RoundButton({
+  testId,
+  icon,
+  iconSize,
+  iconColor,
+  enabled,
+  filled,
+  dimWhenDisabled,
+  onClick,
+}: {
+  testId: string
+  icon: IconName
+  iconSize: number
+  iconColor: string
+  enabled: boolean
+  filled?: boolean
+  dimWhenDisabled?: boolean
+  onClick?: () => void
+}) {
+  return (
+    <div
+      testId={testId}
+      style={{
+        width: 26,
+        height: 26,
+        borderRadius: 13,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        cursor: enabled ? 'pointer' : undefined,
+        opacity: !enabled && dimWhenDisabled ? 0.35 : 1,
+        backgroundColor: filled && enabled ? C.inverse : C.overlayStrong,
+        hover: enabled ? { opacity: 0.9 } : undefined,
+      }}
+      onClick={enabled ? onClick : undefined}
+    >
+      <Icon name={icon} size={iconSize} color={iconColor} />
+    </div>
+  )
+}
+
 export function Composer({
   value,
   onChange,
@@ -138,6 +180,25 @@ export function Composer({
           paddingBottom: 10,
         }}
       >
+        {attachments.length > 0 && (
+          <div
+            testId="attachment-chips"
+            style={{
+              display: 'flex',
+              flexDirection: 'row',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              gap: 6,
+              marginBottom: 8,
+              paddingLeft: 10,
+              paddingRight: 10,
+            }}
+          >
+            {attachments.map((attachment) => (
+              <AttachmentChip key={attachment.id} attachment={attachment} onRemove={onRemoveAttachment ?? (() => {})} />
+            ))}
+          </div>
+        )}
         <textarea
           testId="composer"
           value={value}
@@ -160,25 +221,6 @@ export function Composer({
           onChange={(event) => onChange(event.value ?? '')}
           onSubmit={(event) => send(event.value ?? value)}
         />
-        {attachments.length > 0 && (
-          <div
-            testId="attachment-chips"
-            style={{
-              display: 'flex',
-              flexDirection: 'row',
-              alignItems: 'center',
-              flexWrap: 'wrap',
-              gap: 6,
-              marginTop: 8,
-              paddingLeft: 10,
-              paddingRight: 10,
-            }}
-          >
-            {attachments.map((attachment) => (
-              <AttachmentChip key={attachment.id} attachment={attachment} onRemove={onRemoveAttachment ?? (() => {})} />
-            ))}
-          </div>
-        )}
         {attachNotice && (
           <text
             testId="attach-notice"
@@ -219,40 +261,24 @@ export function Composer({
         >
           {chips}
           <div style={{ flexGrow: 1 }} />
-          <div
+          <RoundButton
             testId="attach"
-            style={{
-              width: 26,
-              height: 26,
-              borderRadius: 13,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              cursor: disabledReason || !onAttach ? undefined : 'pointer',
-              opacity: disabledReason ? 0.35 : 1,
-              hover: disabledReason || !onAttach ? undefined : { backgroundColor: C.overlay },
-            }}
-            onClick={disabledReason || !onAttach ? undefined : onAttach}
-          >
-            <Icon name="image" size={15} color={C.tertiary} />
-          </div>
-          <div
+            icon="image"
+            iconSize={15}
+            iconColor={C.tertiary}
+            enabled={!disabledReason && onAttach != null}
+            dimWhenDisabled
+            onClick={onAttach}
+          />
+          <RoundButton
             testId="send"
-            style={{
-              width: 26,
-              height: 26,
-              borderRadius: 13,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              cursor: ready ? 'pointer' : undefined,
-              backgroundColor: ready ? C.inverse : C.overlayStrong,
-              hover: ready ? { opacity: 0.9 } : undefined,
-            }}
+            icon="send"
+            iconSize={16}
+            iconColor={ready ? C.onInverse : C.ghost}
+            enabled={ready}
+            filled
             onClick={() => send(value)}
-          >
-            <Icon name="send" size={16} color={ready ? C.onInverse : C.ghost} />
-          </div>
+          />
         </div>
       </div>
     </div>

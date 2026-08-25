@@ -29,10 +29,11 @@ import {
   type ProviderEntry,
 } from './paseo'
 import {
-  classifyPaste,
   planAttachments,
+  planPaste,
   removeAttachment,
   toSendImages,
+  type AttachmentPlan,
   type ImageAttachment,
   type IncomingImage,
   type PastePayload,
@@ -155,13 +156,14 @@ export function ChatApp() {
 
   const { config: draftConfig, setModel: setDraftModel, setThinking: setDraftThinking, setMode: setDraftMode } =
     useDraftConfig(providers)
+  const seed = pendingSeed && pendingSeed.agentId === activeId ? pendingSeed : null
   const [cwd, setCwd] = useState(process.cwd())
   const [cwdOptions, setCwdOptions] = useState<string[]>([])
   const [worktree, setWorktree] = useState('local')
 
   const conversation = useAgentConversation(client, activeId, {
-    seedText: pendingSeed && pendingSeed.agentId === activeId ? pendingSeed.text : null,
-    seedImages: pendingSeed && pendingSeed.agentId === activeId ? pendingSeed.images : null,
+    seedText: seed?.text ?? null,
+    seedImages: seed?.images ?? null,
     onSeedConsumed: () => setPendingSeed(null),
   })
   const turns = conversation.turns
@@ -240,6 +242,7 @@ export function ChatApp() {
     setAttachNotice(null)
     if (activeId) {
       void conversation.send(text, stagedImages).then((ok) => {
+        // A failed send restores the exact previous chips next to the text.
         if (!ok) restoreDraft(text, stagedImages)
       })
       return
@@ -268,10 +271,10 @@ export function ChatApp() {
     }
   }
 
-  /** Puts a failed send back into the composer unless newer content took its place. */
+  /** Puts a failed send back into the composer, text and chips both restored. */
   const restoreDraft = (text: string, images: ImageAttachment[]) => {
-    setDraft((prev) => (prev.length === 0 ? text : prev))
-    setDraftImages((prev) => (prev.length === 0 ? images : prev))
+    setDraft(text)
+    setDraftImages(images)
   }
 
   // Brief inline notices dismiss themselves.
@@ -281,12 +284,18 @@ export function ChatApp() {
     return () => clearTimeout(timer)
   }, [attachNotice])
 
+  /** Stages an attach plan's chips and surfaces its inline notice, if any. */
+  const applyPlan = (plan: AttachmentPlan) => {
+    if (plan.images.length > 0) setDraftImages((prev) => [...prev, ...plan.images])
+    if (plan.notice) {
+      setAttachNotice({ text: plan.notice, tone: plan.images.length === 0 ? 'danger' : 'warn' })
+    }
+  }
+
   /** Validates offered files and stages survivors as chips; attaching needs a daemon. */
   const offerImages = (files: readonly IncomingImage[]) => {
     if (disabledReason) return
-    const plan = planAttachments(files)
-    if (plan.images.length > 0) setDraftImages((prev) => [...prev, ...plan.images])
-    if (plan.notice) setAttachNotice({ text: plan.notice, tone: plan.blocked ? 'danger' : 'warn' })
+    applyPlan(planAttachments(files))
   }
 
   /**
@@ -295,12 +304,9 @@ export function ChatApp() {
    * the composer's onPastePayload contract until @gpuix exposes paste events.
    */
   const offerPaste = (payload: PastePayload) => {
-    const classified = classifyPaste(payload)
-    if (classified.kind === 'files') {
-      offerImages(classified.files)
-      return
-    }
-    setDraft((prev) => prev + classified.text)
+    const { appendText, plan } = planPaste(payload)
+    if (plan) applyPlan(plan)
+    else if (appendText != null) setDraft((prev) => prev + appendText)
   }
 
   const pickAttachments = async () => {
@@ -314,11 +320,11 @@ export function ChatApp() {
   }
 
   /** Pulls a queued send back into the composer for editing, chips included. */
-  const editQueued = (text: string) => {
-    const entry = conversation.pending.find((queued) => queued.text === text)
+  const editQueued = (queuedId: string) => {
+    const entry = conversation.pending.find((send) => send.id === queuedId)
     if (!entry) return
-    conversation.unqueue(text)
-    setDraft(text)
+    conversation.unqueue(queuedId)
+    setDraft(entry.text)
     setDraftImages(entry.images)
     setCreateError(null)
     setAttachNotice(null)

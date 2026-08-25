@@ -11,7 +11,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PaseoClient } from '@getpaseo/client'
-import { toSendImages, type ImageAttachment } from './attachments'
+import { newAttachmentId, toSendImages, type ImageAttachment } from './attachments'
 import {
   applyTimelineItem,
   buildTurns,
@@ -26,6 +26,7 @@ export type ConversationStatus = 'loading' | 'ready' | 'error'
 
 /** A user text queued optimistically before the daemon echoes it back. */
 export interface PendingSend {
+  id: string
   text: string
   /** Staged chips riding along; encoded as base64 pairs on the outgoing message. */
   images: ImageAttachment[]
@@ -33,7 +34,7 @@ export interface PendingSend {
 
 export interface ConversationState {
   turns: Turn[]
-  /** Optimistic sends awaiting their server echo, oldest first. */
+  /** Optimistic sends awaiting their daemon echo, oldest first. */
   pending: PendingSend[]
   status: ConversationStatus
   error: string | null
@@ -48,7 +49,7 @@ export type ConversationEvent =
   | { type: 'turnFailed'; message: string }
   | { type: 'sendQueued'; text: string; images?: ImageAttachment[] }
   | { type: 'sendFailed'; error: unknown }
-  | { type: 'sendUnqueued'; text: string }
+  | { type: 'sendUnqueued'; id: string }
 
 export const initialConversation: ConversationState = {
   turns: [],
@@ -75,7 +76,9 @@ export function reduceConversation(state: ConversationState, event: Conversation
     case 'reset':
       return {
         ...initialConversation,
-        pending: event.seedText ? [{ text: event.seedText, images: event.seedImages ?? [] }] : [],
+        pending: event.seedText
+          ? [{ id: newAttachmentId(), text: event.seedText, images: event.seedImages ?? [] }]
+          : [],
       }
     case 'loaded':
       return { ...state, turns: buildTurns(event.items), status: 'ready', error: null }
@@ -95,7 +98,10 @@ export function reduceConversation(state: ConversationState, event: Conversation
     case 'turnFailed':
       return { ...state, turns: applyTimelineItem(state.turns, { type: 'error', message: event.message }) }
     case 'sendQueued':
-      return { ...state, pending: [...state.pending, { text: event.text, images: event.images ?? [] }] }
+      return {
+        ...state,
+        pending: [...state.pending, { id: newAttachmentId(), text: event.text, images: event.images ?? [] }],
+      }
     case 'sendFailed':
       return {
         ...state,
@@ -103,16 +109,16 @@ export function reduceConversation(state: ConversationState, event: Conversation
         turns: applyTimelineItem(state.turns, { type: 'error', message: errorMessage(event.error) }),
       }
     case 'sendUnqueued':
-      return { ...state, pending: popMatch(state.pending, event.text) }
+      return { ...state, pending: state.pending.filter((send) => send.id !== event.id) }
   }
 }
 
-/** Server truth plus optimistic pending sends, in order. */
+/** Daemon truth plus optimistic pending sends, in order. */
 export function visibleTurns(state: ConversationState): Turn[] {
   if (state.pending.length === 0) return state.turns
   return [
     ...state.turns,
-    ...state.pending.map((send) => ({ kind: 'user', text: send.text, queued: true }) as Turn),
+    ...state.pending.map((send) => ({ kind: 'user', text: send.text, queuedId: send.id }) as Turn),
   ]
 }
 
@@ -197,11 +203,11 @@ export function useAgentConversation(
     [client, agentId],
   )
 
-  /** Pulls a queued send back out of the queue (first text match wins). */
+  /** Pulls a queued send back out of the queue by id. */
   const unqueue = useCallback(
-    (raw: string) => {
-      if (!agentId || !raw.trim()) return
-      setState((prev) => reduceConversation(prev, { type: 'sendUnqueued', text: raw.trim() }))
+    (id: string) => {
+      if (!agentId) return
+      setState((prev) => reduceConversation(prev, { type: 'sendUnqueued', id }))
     },
     [agentId],
   )

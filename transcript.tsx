@@ -41,7 +41,15 @@ function oneLine(text: string | undefined, limit = 140): string | undefined {
   return flat.length > limit ? `${flat.slice(0, limit - 1)}…` : flat || undefined
 }
 
-function UserTurn({ text, queued, onEdit }: { text: string; queued?: boolean; onEdit?: () => void }) {
+function UserTurn({
+  text,
+  queuedId,
+  onEdit,
+}: {
+  text: string
+  queuedId?: string
+  onEdit?: (queuedId: string) => void
+}) {
   return (
     <div
       style={{
@@ -52,8 +60,8 @@ function UserTurn({ text, queued, onEdit }: { text: string; queued?: boolean; on
       }}
     >
       <div
-        testId={queued ? 'queued-send' : undefined}
-        onClick={onEdit}
+        testId={queuedId ? 'queued-send' : undefined}
+        onClick={queuedId && onEdit ? () => onEdit(queuedId) : undefined}
         style={{
           maxWidth: 540,
           minWidth: 0,
@@ -63,8 +71,8 @@ function UserTurn({ text, queued, onEdit }: { text: string; queued?: boolean; on
           paddingBottom: 8,
           paddingLeft: 12,
           paddingRight: 12,
-          cursor: onEdit ? 'pointer' : undefined,
-          hover: onEdit ? { backgroundColor: '#2A2A2A' } : undefined,
+          cursor: queuedId && onEdit ? 'pointer' : undefined,
+          hover: queuedId && onEdit ? { backgroundColor: C.overlayStrong } : undefined,
         }}
       >
         <text style={{ fontSize: 14, lineHeight: 20, color: C.text, minWidth: 0, maxWidth: '100%' }}>
@@ -552,7 +560,7 @@ export const Transcript = memo(function Transcript({
   permissions?: PendingPermission[]
   onRespond?: (request: PermissionEntry['request'], response: PermissionResponse) => void
   /** Pulls a queued (optimistic) send back into the composer for editing. */
-  onEditQueued?: (text: string) => void
+  onEditQueued?: (queuedId: string) => void
   listRef?: React.Ref<{ id: number }>
 }) {
   const cards = permissions ?? []
@@ -575,8 +583,8 @@ export const Transcript = memo(function Transcript({
           {turn.kind === 'user' && (
             <UserTurn
               text={turn.text}
-              queued={turn.queued}
-              onEdit={turn.queued && onEditQueued ? () => onEditQueued(turn.text) : undefined}
+              queuedId={turn.queuedId}
+              onEdit={onEditQueued}
             />
           )}
           {turn.kind === 'assistant' && <SafeMdxContent source={turn.source} />}
