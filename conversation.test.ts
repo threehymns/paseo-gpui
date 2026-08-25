@@ -25,7 +25,7 @@ describe('agent conversation', () => {
   test('loaded replaces turns and marks ready', () => {
     const state = run([
       { type: 'reset', seedText: 'fix the bug' },
-      { type: 'loaded', items: [user('fix the bug'), assistant('On it.')] },
+      { type: 'loaded', items: [{ item: user('fix the bug') }, { item: assistant('On it.') }] },
     ])
     expect(state.status).toBe('ready')
     expect(state.error).toBeNull()
@@ -54,7 +54,7 @@ describe('agent conversation', () => {
 
   test('the optimistic turn disappears once settled, not before', () => {
     const mid = run([
-      { type: 'loaded', items: [assistant('hi')] },
+      { type: 'loaded', items: [{ item: assistant('hi') }] },
       { type: 'sendQueued', text: 'hello' },
     ])
     expect(visibleTurns(mid).at(-1)).toEqual({ kind: 'user', text: 'hello' })
@@ -79,12 +79,23 @@ describe('agent conversation', () => {
     expect((state.turns[0] as { text?: string }).text).toBe('model overloaded')
   })
 
+  test('turnCompleted seals a trailing thinking block so its label freezes', () => {
+    let state = reduceConversation(initialConversation, { type: 'timeline', item: { type: 'reasoning', text: 'hmm' } })
+    expect(state.turns[0]?.kind).toBe('reasoning')
+    expect(state.turns[0] && 'durationMs' in state.turns[0] ? state.turns[0].durationMs : undefined).toBeUndefined()
+    state = reduceConversation(state, { type: 'turnCompleted' })
+    const thinking = state.turns[0] as { kind: string; durationMs?: number }
+    expect(thinking.kind).toBe('reasoning')
+    expect(typeof thinking.durationMs).toBe('number')
+    expect(state.turns).toHaveLength(1)
+  })
+
   test('loadFailed marks the conversation errored instead of hanging on loading', () => {
     const state = run([{ type: 'loadFailed', error: new Error('archived') }])
     expect(state.status).toBe('error')
     expect(state.error).toBe('archived')
     // A later successful load recovers it.
-    const recovered = reduceConversation(state, { type: 'loaded', items: [assistant('back')] })
+    const recovered = reduceConversation(state, { type: 'loaded', items: [{ item: assistant('back') }] })
     expect(recovered.status).toBe('ready')
     expect(recovered.error).toBeNull()
   })

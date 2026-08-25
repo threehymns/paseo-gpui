@@ -68,7 +68,7 @@ export type ProviderMode = NonNullable<ProviderEntry['modes']>[number]
 type StreamEvent = PaseoAgentStream['event']
 export type TimelineItem = Extract<StreamEvent, { type: 'timeline' }>['item']
 type ToolCallItem = Extract<TimelineItem, { type: 'tool_call' }>
-type ToolDetail = ToolCallItem['detail']
+export type ToolCallDetail = ToolCallItem['detail']
 
 // ---- permissions ------------------------------------------------------------
 
@@ -95,10 +95,21 @@ export type ToolName =
 
 export type ToolStatus = 'running' | 'ok' | 'failed'
 
+export type ReasoningTurn = {
+  kind: 'reasoning'
+  text: string
+  /** Epoch ms of the first delta; present only while the block is still open. */
+  startedAt?: number
+  /** Epoch ms of the most recent delta; present only while the block is still open. */
+  lastDeltaAt?: number
+  /** Frozen wall-clock length once thinking has ended; undefined while streaming. */
+  durationMs?: number
+}
+
 export type Turn =
   | { kind: 'user'; text: string }
   | { kind: 'assistant'; source: string; messageId?: string }
-  | { kind: 'reasoning'; text: string }
+  | ReasoningTurn
   | { kind: 'todo'; items: { text: string; completed: boolean; active: boolean }[] }
   | {
       kind: 'tool'
@@ -106,20 +117,66 @@ export type Turn =
       tool: ToolName
       title: string
       detail?: string
+      /** Structured detail from the daemon, expanded in place on activation. */
+      structured?: ToolCallDetail
       patch?: string
       status: ToolStatus
     }
   | { kind: 'error'; text: string }
 
+function splitLines(text: string): string[] {
+  if (!text) return []
+  const normalized = text.endsWith('\r\n') ? text.slice(0, -2) : text.endsWith('\n') ? text.slice(0, -1) : text
+  return normalized === '' ? [''] : normalized.split(/\r?\n/)
+}
+
+/** Synthesizes a unified git patch for an edit replacement when the daemon omitted unifiedDiff. */
+export function formatEditDiff(filePath: string, oldString: string, newString: string): string {
+  const oldLines = splitLines(oldString)
+  const newLines = splitLines(newString)
+  const oldRange = oldLines.length === 0 ? '0,0' : `1,${oldLines.length}`
+  const newRange = newLines.length === 0 ? '0,0' : `1,${newLines.length}`
+  const header = `--- a/${filePath}\n+++ b/${filePath}\n@@ -${oldRange} +${newRange} @@`
+  const deleted = oldLines.map((l) => `-${l}`)
+  const added = newLines.map((l) => `+${l}`)
+  return [header, ...deleted, ...added].join('\n')
+}
+
+export interface DiffStats {
+  additions: number
+  deletions: number
+}
+
+/** Counts additions and deletions across all hunks in a unified git patch. */
+export function diffStats(patch: string | undefined): DiffStats | undefined {
+  if (!patch) return undefined
+  let additions = 0
+  let deletions = 0
+  for (const line of patch.split('\n')) {
+    if (line.startsWith('+') && !line.startsWith('+++')) {
+      additions++
+    } else if (line.startsWith('-') && !line.startsWith('---')) {
+      deletions++
+    }
+  }
+  return additions === 0 && deletions === 0 ? undefined : { additions, deletions }
+}
+
 function toolMeta(item: ToolCallItem): Pick<Turn & { kind: 'tool' }, 'tool' | 'title' | 'detail' | 'patch'> {
-  const d: ToolDetail | undefined = item.detail
+  const d: ToolCallDetail | undefined = item.detail
   switch (d?.type) {
     case 'shell':
       return { tool: 'bash', title: 'Bash', detail: d.command }
     case 'read':
       return { tool: 'read', title: 'Read', detail: d.filePath }
-    case 'edit':
-      return { tool: 'edit', title: 'Edit', detail: d.filePath, patch: d.unifiedDiff }
+    case 'edit': {
+      const patch =
+        d.unifiedDiff ??
+        (d.oldString != null || d.newString != null
+          ? formatEditDiff(d.filePath, d.oldString ?? '', d.newString ?? '')
+          : undefined)
+      return { tool: 'edit', title: 'Edit', detail: d.filePath, patch }
+    }
     case 'write':
       return { tool: 'write', title: 'Write', detail: d.filePath }
     case 'search':
@@ -147,36 +204,180 @@ function appendTurn(turns: Turn[], turn: Turn): Turn[] {
   return [...turns, turn]
 }
 
-/** Folds one timeline item into the transcript. Streaming deltas merge into the previous turn of their kind. */
-export function applyTimelineItem(turns: Turn[], item: TimelineItem): Turn[] {
+/**
+ * Freezes the wall-clock length of a still-streaming trailing reasoning block.
+ * A reasoning block is open until any later timeline item (or turn end) proves
+ * thinking has stopped; only the trailing block can be open. The length runs
+ * from the first to the last delta — a quiet gap before the next item does not
+ * count as thinking.
+ */
+export function sealTrailingReasoning(turns: Turn[], at: number): Turn[] {
+  const last = turns[turns.length - 1]
+  if (last?.kind !== 'reasoning' || last.durationMs != null) return turns
+  const startedAt = last.startedAt ?? at
+  const endedAt = last.lastDeltaAt ?? at
+  const sealed: ReasoningTurn = { kind: 'reasoning', text: last.text, durationMs: Math.max(0, endedAt - startedAt) }
+  return [...turns.slice(0, -1), sealed]
+}
+
+/** Human-readable wall-clock length, e.g. "47s", "1m 30s", "2h 5m". */
+export function formatDuration(durationMs: number): string {
+  if (!Number.isFinite(durationMs) || durationMs < 0) return '0s'
+  const totalSeconds = durationMs / 1000
+  if (totalSeconds < 60) return `${Math.floor(totalSeconds)}s`
+  const totalMinutes = Math.floor(totalSeconds / 60)
+  if (totalMinutes < 60) {
+    const seconds = Math.floor(totalSeconds) % 60
+    return seconds === 0 ? `${totalMinutes}m` : `${totalMinutes}m ${seconds}s`
+  }
+  const hours = Math.floor(totalMinutes / 60)
+  const remMinutes = totalMinutes % 60
+  return remMinutes === 0 ? `${hours}h` : `${hours}h ${remMinutes}m`
+}
+
+/** Collapsed-row label for a reasoning block: live progress until sealed, then its frozen duration. */
+export function reasoningLabel(turn: ReasoningTurn): string {
+  return turn.durationMs == null ? 'Thinking…' : `Thought for ${formatDuration(turn.durationMs)}`
+}
+
+// ---- expanded tool detail ---------------------------------------------------
+
+/**
+ * One rendered piece of an expanded tool row: a short status/count line
+ * (`meta`) or a preformatted output/log block (`log`).
+ */
+export type ToolDetailPart =
+  | { type: 'meta'; text: string; tone?: 'ok' | 'danger' }
+  | { type: 'log'; label?: string; text: string }
+
+function plural(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`
+}
+
+function searchCountMeta(d: Extract<ToolCallDetail, { type: 'search' }>): ToolDetailPart | null {
+  if (d.toolName === 'web_search') {
+    const count = d.webResults?.length ?? d.numMatches
+    return count == null ? null : { type: 'meta', text: plural(count, 'result', 'results') }
+  }
+  if (d.numMatches != null && d.numFiles != null) {
+    return { type: 'meta', text: `${plural(d.numMatches, 'match', 'matches')} in ${plural(d.numFiles, 'file', 'files')}` }
+  }
+  if (d.numMatches != null) return { type: 'meta', text: plural(d.numMatches, 'match', 'matches') }
+  if (d.numFiles != null) return { type: 'meta', text: plural(d.numFiles, 'file', 'files') }
+  return null
+}
+
+/** Maps a tool call's structured detail to the sections shown when its row expands. Empty means not expandable. */
+export function toolDetailParts(detail: ToolCallDetail): ToolDetailPart[] {
+  const parts: ToolDetailPart[] = []
+  switch (detail.type) {
+    case 'shell': {
+      const output = detail.output?.trimEnd()
+      if (output) parts.push({ type: 'log', text: output })
+      if (detail.exitCode != null) {
+        parts.push({ type: 'meta', text: `exit ${detail.exitCode}`, tone: detail.exitCode === 0 ? 'ok' : 'danger' })
+      }
+      return parts
+    }
+    case 'search': {
+      const count = searchCountMeta(detail)
+      if (count) parts.push(count)
+      if (detail.toolName === 'web_search' && detail.webResults?.length) {
+        parts.push({
+          type: 'log',
+          label: 'results',
+          text: detail.webResults.map((r) => (r.title && r.title !== r.url ? `${r.title}\n  ${r.url}` : r.url)).join('\n'),
+        })
+      } else if (detail.filePaths?.length) {
+        parts.push({ type: 'log', label: 'paths', text: detail.filePaths.join('\n') })
+      }
+      return parts
+    }
+    case 'fetch': {
+      const statusText = [detail.code, detail.codeText].filter((v) => v != null).join(' ')
+      if (statusText) {
+        const ok = detail.code == null || (detail.code >= 200 && detail.code < 300)
+        parts.push({ type: 'meta', text: statusText, tone: ok ? 'ok' : 'danger' })
+      }
+      const result = detail.result?.trimEnd()
+      if (result) parts.push({ type: 'log', text: result })
+      return parts
+    }
+    case 'worktree_setup': {
+      for (const step of detail.commands) {
+        const exitSuffix = step.status === 'failed' && step.exitCode != null ? ` (exit ${step.exitCode})` : ''
+        const marker = step.status === 'completed' ? '✓' : step.status === 'failed' ? '✗' : '•'
+        const label = `${marker} ${step.command}${exitSuffix}`
+        if (step.status === 'completed') parts.push({ type: 'meta', text: label, tone: 'ok' })
+        else if (step.status === 'failed') parts.push({ type: 'meta', text: label, tone: 'danger' })
+        else parts.push({ type: 'meta', text: label })
+        const log = step.log.trimEnd()
+        if (log) parts.push({ type: 'log', text: log })
+      }
+      if (parts.length === 0) {
+        const log = detail.log.trimEnd()
+        if (log) parts.push({ type: 'log', text: log })
+      }
+      return parts
+    }
+    case 'sub_agent': {
+      const log = detail.log.trimEnd()
+      if (log) parts.push({ type: 'log', text: log })
+      for (const action of detail.actions ?? []) {
+        parts.push({ type: 'meta', text: action.summary ? `${action.toolName}: ${action.summary}` : action.toolName })
+      }
+      return parts
+    }
+    default:
+      return parts
+  }
+}
+
+/**
+ * Folds one timeline item into the transcript. Streaming deltas merge into the
+ * previous turn of their kind. `at` is the item's epoch-ms arrival time (live
+ * event timestamp or fetched entry timestamp); it times reasoning blocks.
+ *
+ * Appended items seal the trailing open reasoning block — anything arriving
+ * after it proves thinking has moved on. Items that replace an earlier turn
+ * in place do not.
+ */
+export function applyTimelineItem(turns: Turn[], item: TimelineItem, at: number = Date.now()): Turn[] {
   switch (item.type) {
     case 'user_message':
-      return appendTurn(turns, { kind: 'user', text: item.text })
+      return appendTurn(sealTrailingReasoning(turns, at), { kind: 'user', text: item.text })
     case 'assistant_message': {
-      const last = turns[turns.length - 1]
+      const base = sealTrailingReasoning(turns, at)
+      const last = base[base.length - 1]
       if (
         last?.kind === 'assistant' &&
         (item.messageId == null || last.messageId == null || last.messageId === item.messageId)
       ) {
         const merged: Turn = { kind: 'assistant', source: last.source + item.text, messageId: item.messageId ?? last.messageId }
-        return [...turns.slice(0, -1), merged]
+        return [...base.slice(0, -1), merged]
       }
-      return appendTurn(turns, { kind: 'assistant', source: item.text, messageId: item.messageId })
+      return appendTurn(base, { kind: 'assistant', source: item.text, messageId: item.messageId })
     }
     case 'reasoning': {
       const last = turns[turns.length - 1]
-      if (last?.kind === 'reasoning') {
-        return [...turns.slice(0, -1), { kind: 'reasoning', text: last.text + item.text }]
+      if (last?.kind === 'reasoning' && last.durationMs == null) {
+        const merged: ReasoningTurn = {
+          kind: 'reasoning',
+          text: last.text + item.text,
+          startedAt: last.startedAt ?? at,
+          lastDeltaAt: at,
+        }
+        return [...turns.slice(0, -1), merged]
       }
-      return appendTurn(turns, { kind: 'reasoning', text: item.text })
+      return appendTurn(turns, { kind: 'reasoning', text: item.text, startedAt: at, lastDeltaAt: at })
     }
     case 'tool_call': {
       const index = findLastIndex(turns, (t) => t.kind === 'tool' && t.callId === item.callId)
       const status: ToolStatus =
         item.status === 'running' ? 'running' : item.status === 'completed' ? 'ok' : 'failed'
-      const next: Turn = { kind: 'tool', callId: item.callId, ...toolMeta(item), status }
+      const next: Turn = { kind: 'tool', callId: item.callId, ...toolMeta(item), structured: item.detail, status }
       if (index >= 0) return [...turns.slice(0, index), next, ...turns.slice(index + 1)]
-      return appendTurn(turns, next)
+      return appendTurn(sealTrailingReasoning(turns, at), next)
     }
     case 'todo': {
       const items = item.items.map((task, i) => ({
@@ -184,19 +385,26 @@ export function applyTimelineItem(turns: Turn[], item: TimelineItem): Turn[] {
         completed: task.completed || task.status === 'completed',
         active: task.status ? task.status === 'in_progress' : !task.completed && i === item.items.findIndex((t) => !t.completed),
       }))
-      const last = turns[turns.length - 1]
-      if (last?.kind === 'todo') return [...turns.slice(0, -1), { kind: 'todo', items }]
-      return appendTurn(turns, { kind: 'todo', items })
+      const base = sealTrailingReasoning(turns, at)
+      const last = base[base.length - 1]
+      if (last?.kind === 'todo') return [...base.slice(0, -1), { kind: 'todo', items }]
+      return appendTurn(base, { kind: 'todo', items })
     }
     case 'error':
-      return appendTurn(turns, { kind: 'error', text: item.message })
+      return appendTurn(sealTrailingReasoning(turns, at), { kind: 'error', text: item.message })
     default:
       return turns
   }
 }
 
-export function buildTurns(items: TimelineItem[]): Turn[] {
-  return items.reduce(applyTimelineItem, [] as Turn[])
+export interface TimelineEntry {
+  item: TimelineItem
+  /** Epoch-ms arrival time used to time reasoning blocks; falls back to now. */
+  at?: number
+}
+
+export function buildTurns(entries: TimelineEntry[]): Turn[] {
+  return entries.reduce((turns, entry) => applyTimelineItem(turns, entry.item, entry.at), [] as Turn[])
 }
 
 // ---- permission cards -------------------------------------------------------
