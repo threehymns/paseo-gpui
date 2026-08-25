@@ -17,6 +17,10 @@ jobs:
       ) &&
       contains(fromJson('["OWNER","MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
     runs-on: ubuntu-latest
+    timeout-minutes: 120
+    concurrency:
+      group: opencode-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: true
     permissions:
       id-token: write
       contents: write
