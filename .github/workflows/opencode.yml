@@ -37,5 +37,9 @@ jobs:
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           KILO_API_KEY: ${{ secrets.KILO_API_KEY }}
+          # Exposed only so the agent can use the gh CLI. The action ignores it
+          # unless use_github_token is true; scope is limited to the permissions
+          # block above.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           model: kilo/stealth/ox-alpha
