@@ -107,7 +107,7 @@ export type ReasoningTurn = {
 }
 
 export type Turn =
-  | { kind: 'user'; text: string }
+  | { kind: 'user'; text: string; queued?: boolean; queuedId?: string }
   | { kind: 'assistant'; source: string; messageId?: string }
   | ReasoningTurn
   | { kind: 'todo'; items: { text: string; completed: boolean; active: boolean }[] }

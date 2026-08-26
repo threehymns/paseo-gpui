@@ -11,6 +11,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PaseoClient } from '@getpaseo/client'
+import { newAttachmentId, toSendImages, type ImageAttachment } from './attachments'
 import {
   applyTimelineItem,
   buildTurns,
@@ -23,23 +24,32 @@ import {
 
 export type ConversationStatus = 'loading' | 'ready' | 'error'
 
+/** A user text queued optimistically before the daemon echoes it back. */
+export interface PendingSend {
+  id: string
+  text: string
+  /** Staged chips riding along; encoded as base64 pairs on the outgoing message. */
+  images: ImageAttachment[]
+}
+
 export interface ConversationState {
   turns: Turn[]
-  /** Optimistic user texts awaiting their server echo, oldest first. */
-  pending: string[]
+  /** Optimistic sends awaiting their daemon echo, oldest first. */
+  pending: PendingSend[]
   status: ConversationStatus
   error: string | null
 }
 
 export type ConversationEvent =
-  | { type: 'reset'; seedText?: string }
+  | { type: 'reset'; seedText?: string; seedImages?: ImageAttachment[] }
   | { type: 'loaded'; items: TimelineEntry[] }
   | { type: 'loadFailed'; error: unknown }
   | { type: 'timeline'; item: TimelineItem; at?: number }
   | { type: 'turnCompleted'; at?: number }
   | { type: 'turnFailed'; message: string }
-  | { type: 'sendQueued'; text: string }
+  | { type: 'sendQueued'; text: string; images?: ImageAttachment[] }
   | { type: 'sendFailed'; error: unknown }
+  | { type: 'sendUnqueued'; id: string }
 
 export const initialConversation: ConversationState = {
   turns: [],
@@ -48,8 +58,8 @@ export const initialConversation: ConversationState = {
   error: null,
 }
 
-function popMatch(list: string[], text: string): string[] {
-  const index = list.indexOf(text)
+function popMatch(list: PendingSend[], text: string): PendingSend[] {
+  const index = list.findIndex((send) => send.text === text)
   if (index < 0) return list
   return [...list.slice(0, index), ...list.slice(index + 1)]
 }
@@ -64,7 +74,12 @@ function eventTime(timestamp?: string): number | undefined {
 export function reduceConversation(state: ConversationState, event: ConversationEvent): ConversationState {
   switch (event.type) {
     case 'reset':
-      return { ...initialConversation, pending: event.seedText ? [event.seedText] : [] }
+      return {
+        ...initialConversation,
+        pending: event.seedText
+          ? [{ id: newAttachmentId(), text: event.seedText, images: event.seedImages ?? [] }]
+          : [],
+      }
     case 'loaded':
       return { ...state, turns: buildTurns(event.items), status: 'ready', error: null }
     case 'loadFailed':
@@ -83,28 +98,35 @@ export function reduceConversation(state: ConversationState, event: Conversation
     case 'turnFailed':
       return { ...state, turns: applyTimelineItem(state.turns, { type: 'error', message: event.message }) }
     case 'sendQueued':
-      return { ...state, pending: [...state.pending, event.text] }
+      return {
+        ...state,
+        pending: [...state.pending, { id: newAttachmentId(), text: event.text, images: event.images ?? [] }],
+      }
     case 'sendFailed':
       return {
         ...state,
         pending: state.pending.slice(0, -1),
         turns: applyTimelineItem(state.turns, { type: 'error', message: errorMessage(event.error) }),
       }
+    case 'sendUnqueued':
+      return { ...state, pending: state.pending.filter((send) => send.id !== event.id) }
   }
 }
 
-/** Server truth plus optimistic pending sends, in order. */
+/** Daemon truth plus optimistic pending sends, in order. */
 export function visibleTurns(state: ConversationState): Turn[] {
   if (state.pending.length === 0) return state.turns
   return [
     ...state.turns,
-    ...state.pending.map((text) => ({ kind: 'user', text }) as Turn),
+    ...state.pending.map((send) => ({ kind: 'user', text: send.text, queuedId: send.id }) as Turn),
   ]
 }
 
 export interface UseAgentConversationOptions {
   /** First prompt for a freshly created agent, shown until the daemon echoes it. */
   seedText?: string | null
+  /** Chips staged with the first prompt of a freshly created agent. */
+  seedImages?: ImageAttachment[] | null
   onSeedConsumed?: () => void
 }
 
@@ -123,12 +145,14 @@ export function useAgentConversation(
     let unsub: (() => void) | undefined
 
     let seedText: string | undefined
+    let seedImages: ImageAttachment[] | undefined
     if (agentId && seededFor.current !== agentId && optionsRef.current.seedText) {
       seedText = optionsRef.current.seedText
+      seedImages = optionsRef.current.seedImages ?? undefined
       seededFor.current = agentId
       optionsRef.current.onSeedConsumed?.()
     }
-    setState((prev) => reduceConversation(prev, { type: 'reset', seedText }))
+    setState((prev) => reduceConversation(prev, { type: 'reset', seedText, seedImages }))
     if (!agentId) return
 
     void (async () => {
@@ -163,18 +187,30 @@ export function useAgentConversation(
   }, [client, agentId])
 
   const send = useCallback(
-    async (raw: string) => {
+    async (raw: string, images: ImageAttachment[] = []): Promise<boolean> => {
       const text = raw.trim()
-      if (!text || !agentId) return
-      setState((prev) => reduceConversation(prev, { type: 'sendQueued', text }))
+      if (!text || !agentId) return false
+      setState((prev) => reduceConversation(prev, { type: 'sendQueued', text, images }))
       try {
-        await client.agents.ref(agentId).send(text)
+        const payload = toSendImages(images)
+        await client.agents.ref(agentId).send(text, payload.length > 0 ? { images: payload } : undefined)
+        return true
       } catch (err) {
         setState((prev) => reduceConversation(prev, { type: 'sendFailed', error: err }))
+        return false
       }
     },
     [client, agentId],
   )
 
-  return { ...state, turns: visibleTurns(state), send }
+  /** Pulls a queued send back out of the queue by id. */
+  const unqueue = useCallback(
+    (id: string) => {
+      if (!agentId) return
+      setState((prev) => reduceConversation(prev, { type: 'sendUnqueued', id }))
+    },
+    [agentId],
+  )
+
+  return { ...state, turns: visibleTurns(state), send, unqueue }
 }
