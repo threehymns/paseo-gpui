@@ -109,7 +109,12 @@ export interface AttentionState {
   tokens: Record<string, string>
   /** Notices handed to the bridge since last drained, oldest first. */
   outbox: AttentionNotice[]
-  /** Whether the app window currently has focus. */
+  /**
+   * Whether the app window currently has focus. @gpuix ships no window-focus
+   * event yet (its focus props are per-element only), so nothing feeds this
+   * today: it stays true and the fire gate degrades to different-agent-only.
+   * When a runtime focus source lands, dispatch `windowFocusChanged` from it.
+   */
   windowFocused: boolean
   /** The agent whose conversation is on screen, if any. */
   focusedAgentId: string | null
