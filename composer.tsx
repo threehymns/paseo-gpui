@@ -32,12 +32,20 @@ export function Composer({
   onSend,
   disabledReason,
   chips,
+  canStop,
+  stopping,
+  onStop,
 }: {
   value: string
   onChange: (next: string) => void
   onSend: (text: string) => void
   disabledReason: string | null
   chips: React.ReactNode
+  /** True only while the open agent is running; shows the stop control. */
+  canStop?: boolean
+  /** True while the cancel request is in flight; clicks are held until it settles. */
+  stopping?: boolean
+  onStop?: () => void
 }) {
   const ready = value.trim().length > 0 && !disabledReason
   const send = (text: string) => {
@@ -94,6 +102,9 @@ export function Composer({
           }}
           onChange={(event) => onChange(event.value ?? '')}
           onSubmit={(event) => send(event.value ?? value)}
+          onKeyDown={(event) => {
+            if (event.key === 'escape' && canStop && !stopping) onStop?.()
+          }}
         />
         {disabledReason && (
           <text
@@ -121,6 +132,31 @@ export function Composer({
         >
           {chips}
           <div style={{ flexGrow: 1 }} />
+          {stopping && (
+            <text style={{ fontSize: 12, color: C.running, flexShrink: 0, marginRight: 4 }}>
+              Canceling agent…
+            </text>
+          )}
+          {canStop && (
+            <div
+              testId="stop"
+              onClick={stopping ? undefined : onStop}
+              style={{
+                width: 26,
+                height: 26,
+                borderRadius: 13,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: stopping ? undefined : 'pointer',
+                opacity: stopping ? 0.5 : 1,
+                backgroundColor: C.danger,
+                hover: stopping ? undefined : { opacity: 0.85 },
+              }}
+            >
+              <Icon name="square" size={11} color="#FFFFFF" />
+            </div>
+          )}
           <div
             testId="send"
             style={{
@@ -130,6 +166,7 @@ export function Composer({
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
+              marginLeft: canStop ? 6 : 0,
               cursor: ready ? 'pointer' : undefined,
               backgroundColor: ready ? C.inverse : C.overlayStrong,
               hover: ready ? { opacity: 0.9 } : undefined,

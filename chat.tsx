@@ -176,6 +176,24 @@ export function ChatApp() {
   const renameAgentRow = (id: string, name: string) =>
     runRowAction('rename', id, () => daemon.updateAgent(id, { name }))
 
+  // The composer's stop control: enabled only while the open agent runs. While
+  // the cancel request is in flight the control reflects that so double-clicks
+  // are unambiguous; directory truth (the status flip) arrives by subscription.
+  const agentRunning = activeEntry?.status === 'running'
+  const [canceling, setCanceling] = useState(false)
+  useEffect(() => setCanceling(false), [activeId])
+  const stopAgent = async () => {
+    if (!activeId || !agentRunning || canceling) return
+    setCanceling(true)
+    try {
+      await daemon.cancelAgent(activeId)
+    } catch (err) {
+      setCreateError(errorMessage(err))
+    } finally {
+      setCanceling(false)
+    }
+  }
+
   // Chip values for an active agent come from the live agent; the draft stays
   // authoritative only while no agent is selected.
   const truthOfActive = useMemo(() => (activeEntry ? liveTruth(activeEntry) : null), [activeEntry])
@@ -401,6 +419,9 @@ export function ChatApp() {
           onSend={send}
           disabledReason={disabledReason}
           chips={draftChips}
+          canStop={agentRunning}
+          stopping={canceling}
+          onStop={() => void stopAgent()}
         />
         <FooterBar
           cwd={activeEntry?.cwd ?? cwd}

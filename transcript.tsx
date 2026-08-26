@@ -200,6 +200,8 @@ function ToolRow({ turn }: { turn: Extract<Turn, { kind: 'tool' }> }) {
             <StatusDot color={C.running} size={7} />
           ) : turn.status === 'failed' ? (
             <StatusDot color={C.danger} size={7} />
+          ) : turn.status === 'canceled' ? (
+            <Icon name="square" size={8} color={C.tertiary} />
           ) : (
             <Icon name="check" size={11} color={C.ghost} />
           )}
@@ -238,6 +240,9 @@ function ToolRow({ turn }: { turn: Extract<Turn, { kind: 'tool' }> }) {
         )}
         {turn.status === 'failed' && (
           <text style={{ fontSize: 12, color: C.danger, flexShrink: 0 }}>failed</text>
+        )}
+        {turn.status === 'canceled' && (
+          <text style={{ fontSize: 12, color: C.tertiary, flexShrink: 0 }}>canceled</text>
         )}
       </div>
       {expanded && expandable && <ToolDetailBody parts={parts} patch={turn.patch} />}
@@ -375,6 +380,43 @@ function ErrorBlock({ text }: { text: string }) {
       <text style={{ fontSize: 13.5, lineHeight: 19, color: C.text, minWidth: 0, maxWidth: '100%' }}>
         {text}
       </text>
+    </div>
+  )
+}
+
+/**
+ * A canceled turn is its own outcome — stopped on purpose, not failed — so it
+ * reads neutral rather than wearing the error treatment.
+ */
+function CanceledBlock({ reason }: { reason?: string }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        gap: 9,
+        width: '100%',
+        minWidth: 0,
+        backgroundColor: C.raised,
+        borderRadius: 10,
+        borderWidth: 1,
+        borderColor: C.border,
+        padding: 12,
+      }}
+    >
+      <div style={{ width: 13, height: 13, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <Icon name="square" size={11} color={C.tertiary} />
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0 }}>
+        <text style={{ fontSize: 13.5, lineHeight: 19, color: C.secondary, minWidth: 0, maxWidth: '100%' }}>
+          Turn canceled
+        </text>
+        {reason && (
+          <text style={{ fontSize: 12.5, lineHeight: 17, color: C.tertiary, minWidth: 0, maxWidth: '100%' }}>
+            {reason}
+          </text>
+        )}
+      </div>
     </div>
   )
 }
@@ -571,6 +613,7 @@ export const Transcript = memo(function Transcript({
           {turn.kind === 'tool' && <ToolRow turn={turn} />}
           {turn.kind === 'todo' && <TodoBlock items={turn.items} />}
           {turn.kind === 'error' && <ErrorBlock text={turn.text} />}
+          {turn.kind === 'canceled' && <CanceledBlock reason={turn.reason} />}
         </TranscriptRow>
       ))}
       {cards.map(({ entry, responding }, index) => (

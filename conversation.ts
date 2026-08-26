@@ -13,6 +13,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PaseoClient } from '@getpaseo/client'
 import {
   applyTimelineItem,
+  applyTurnCanceled,
   buildTurns,
   errorMessage,
   sealTrailingReasoning,
@@ -38,6 +39,7 @@ export type ConversationEvent =
   | { type: 'timeline'; item: TimelineItem; at?: number }
   | { type: 'turnCompleted'; at?: number }
   | { type: 'turnFailed'; message: string }
+  | { type: 'turnCanceled'; reason?: string; at?: number }
   | { type: 'sendQueued'; text: string }
   | { type: 'sendFailed'; error: unknown }
 
@@ -82,6 +84,9 @@ export function reduceConversation(state: ConversationState, event: Conversation
       return { ...state, turns: sealTrailingReasoning(state.turns, event.at ?? Date.now()) }
     case 'turnFailed':
       return { ...state, turns: applyTimelineItem(state.turns, { type: 'error', message: event.message }) }
+    case 'turnCanceled':
+      // Cancellation is its own outcome, not a failure — fold it as such.
+      return { ...state, turns: applyTurnCanceled(state.turns, { at: event.at ?? Date.now(), reason: event.reason }) }
     case 'sendQueued':
       return { ...state, pending: [...state.pending, event.text] }
     case 'sendFailed':
@@ -149,6 +154,10 @@ export function useAgentConversation(
             setState((prev) => reduceConversation(prev, { type: 'turnCompleted', at: eventTime(timestamp) }))
           } else if (event.type === 'turn_failed') {
             setState((prev) => reduceConversation(prev, { type: 'turnFailed', message: event.error }))
+          } else if (event.type === 'turn_canceled') {
+            setState((prev) =>
+              reduceConversation(prev, { type: 'turnCanceled', reason: event.reason, at: eventTime(timestamp) }),
+            )
           }
         })
       } catch (err) {
