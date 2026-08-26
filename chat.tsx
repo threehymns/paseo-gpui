@@ -47,6 +47,14 @@ import { Composer, ConfigNotice, FooterBar } from './composer'
 import { useAgentConversation } from './conversation'
 import { useAgentPermissions } from './permissions'
 import { useDraftConfig } from './draft-config'
+import {
+  checkoutEnabled,
+  repoKeyOf,
+  useCheckoutStatus,
+  useDaemonFeatures,
+} from './checkout'
+import { useCheckoutActions } from './checkout-actions'
+import { CheckoutPanel } from './checkout-panel'
 import { liveTruth, useLiveAgentConfig, type DaemonTruth, type ProviderNotice } from './live-config'
 
 // ---- daemon hooks ----------------------------------------------------------
@@ -172,6 +180,16 @@ export function ChatApp() {
   const turns = conversation.turns
   const permissions = useAgentPermissions(client, daemon, activeId)
   const activeEntry = agents.find((entry) => entry.id === activeId) ?? null
+
+  // Checkout status spine: daemon pushes fill the store; the feature flag
+  // hides the whole panel when the daemon has no checkout subsystem.
+  const features = useDaemonFeatures(daemon)
+  const checkoutOn = checkoutEnabled(features)
+  const checkout = useCheckoutStatus(daemon, activeEntry?.cwd ?? null)
+  const repoActions = useCheckoutActions()
+  const activeStatus = activeEntry ? (checkout.entries[activeEntry.cwd]?.status ?? null) : null
+  const activeRepoKey = activeStatus ? repoKeyOf(activeStatus) : (activeEntry?.cwd ?? null)
+  const activeQueue = activeRepoKey ? repoActions.state.repos[activeRepoKey] : undefined
 
   // An agent that vanished from the directory (deleted) or was archived can no
   // longer host a conversation — Paseo's own client redirects away in both cases.
@@ -458,6 +476,21 @@ export function ChatApp() {
           title={title}
           entry={activeEntry}
         />
+        {activeEntry && checkoutOn && (
+          <CheckoutPanel
+            entry={checkout.entries[activeEntry.cwd]}
+            actions={activeQueue}
+            onRefresh={() => {
+              if (!activeEntry || !activeRepoKey || activeQueue?.running) return
+              void repoActions.run(
+                activeRepoKey,
+                'refresh',
+                'Refreshed',
+                () => daemon.checkoutRefresh(activeEntry.cwd),
+              )
+            }}
+          />
+        )}
         {status === 'error' ? (
           <CenterMessage
             title={`Cannot reach ${daemonHost()}`}

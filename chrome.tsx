@@ -55,6 +55,7 @@ import iconSend from './assets/icons/arrow-up.svg' with { type: 'file' }
 import iconCheck from './assets/icons/check.svg' with { type: 'file' }
 import iconImage from './assets/icons/image.svg' with { type: 'file' }
 import iconX from './assets/icons/x.svg' with { type: 'file' }
+import iconRotateCcw from './assets/icons/rotate-ccw.svg' with { type: 'file' }
 
 const ICONS = {
   compose: realAssetPath(iconCompose),
@@ -81,6 +82,7 @@ const ICONS = {
   check: realAssetPath(iconCheck),
   image: realAssetPath(iconImage),
   x: realAssetPath(iconX),
+  rotateCcw: realAssetPath(iconRotateCcw),
 } as const
 
 export type IconName = keyof typeof ICONS
