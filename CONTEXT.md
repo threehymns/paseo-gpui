@@ -14,11 +14,9 @@ A running (or finished) Paseo agent working in a workspace directory. One agent
 owns one conversation timeline.
 
 **Agent directory**:
-The list of known agents, kept fresh by subscription updates, arranged in the
-sidebar by status bucket (Needs input, Failed, Ready to review, Working,
-Done) or by project, chosen in the sidebar's view menu. Archived agents stay
-hidden behind the view menu's Show section and read dimmed when revealed;
-archiving is one-way.
+The known agents, kept fresh by subscription updates. The sidebar stops
+listing them directly: it renders collapsible project groups, one row per
+workspace, and opening a workspace shows that workspace's conversation.
 _Avoid_: session list, conversation list
 
 **Timeline item**:
@@ -71,4 +69,9 @@ to send follow-up prompts to the active one.
 
 **Workspace**:
 A directory an agent can run in, listed by the daemon. A **worktree** is a git
-worktree variant of one.
+worktree variant of one. Workspace descriptors are first-class app state: a
+store fed by a single subscribed `workspaces.list({ subscribe })` call, written
+only by the daemon's update stream (upserts, removes, emptied and removed
+projects). Opening a workspace shows its most recently active agent's
+timeline; a workspace with no agents falls back to the composer's new-task
+state seeded to that workspace's directory.
