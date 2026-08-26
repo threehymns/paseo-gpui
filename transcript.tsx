@@ -7,11 +7,14 @@ import React, { memo, useState } from 'react'
 import { Icon, StatusDot, type IconName } from './chrome'
 import { SafeMdxContent } from './mdx'
 import {
+  compactionLabel,
   diffStats,
+  formatTurnUsage,
   permissionDisplay,
   permissionKindLabel,
   reasoningLabel,
   toolDetailParts,
+  type CompactionTurn,
   type PermissionKind,
   type PermissionResponse,
   type ReasoningTurn,
@@ -310,6 +313,38 @@ function ReasoningRow({ turn }: { turn: ReasoningTurn }) {
   )
 }
 
+/**
+ * Compaction divider: a rule–label–rule separator explaining apparent memory
+ * loss. Deliberately quiet — no card, no wash, ghost-toned like Paseo's own
+ * marker (spinner while compacting, scissors once done).
+ */
+function CompactionRow({ turn }: { turn: CompactionTurn }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 10,
+        width: '100%',
+        minWidth: 0,
+        padding: 6,
+      }}
+    >
+      <div style={{ flexGrow: 1, height: 1, backgroundColor: C.border }} />
+      <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+        {turn.status === 'loading' ? (
+          <StatusDot color={C.running} size={7} />
+        ) : (
+          <Icon name="scissors" size={12} color={C.secondary} />
+        )}
+        <text style={{ fontSize: 12.5, color: C.tertiary }}>{compactionLabel(turn)}</text>
+      </div>
+      <div style={{ flexGrow: 1, height: 1, backgroundColor: C.border }} />
+    </div>
+  )
+}
+
 function TodoBlock({ items }: { items: { text: string; completed: boolean; active: boolean }[] }) {
   return (
     <div
@@ -566,9 +601,19 @@ export const Transcript = memo(function Transcript({
           last={index === rowCount - 1}
         >
           {turn.kind === 'user' && <UserTurn text={turn.text} />}
-          {turn.kind === 'assistant' && <SafeMdxContent source={turn.source} />}
+          {turn.kind === 'assistant' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 }}>
+              <SafeMdxContent source={turn.source} />
+              {turn.usage && (
+                <text style={{ fontSize: 11.5, lineHeight: 16, color: C.ghost }}>
+                  {formatTurnUsage(turn.usage)}
+                </text>
+              )}
+            </div>
+          )}
           {turn.kind === 'reasoning' && <ReasoningRow turn={turn} />}
           {turn.kind === 'tool' && <ToolRow turn={turn} />}
+          {turn.kind === 'compaction' && <CompactionRow turn={turn} />}
           {turn.kind === 'todo' && <TodoBlock items={turn.items} />}
           {turn.kind === 'error' && <ErrorBlock text={turn.text} />}
         </TranscriptRow>

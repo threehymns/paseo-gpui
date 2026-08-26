@@ -106,10 +106,36 @@ export type ReasoningTurn = {
   durationMs?: number
 }
 
+/** What a compaction divider shows, mirroring the daemon's compaction item. */
+export type CompactionTurn = {
+  kind: 'compaction'
+  status: 'loading' | 'completed'
+  trigger?: 'auto' | 'manual'
+  preTokens?: number
+}
+
+/** Usage for one finished turn, shown as a lightweight footer line. */
+export interface TurnUsage {
+  totalTokens: number
+  costUsd?: number
+}
+
+/**
+ * Usage as the daemon reports it on `usage_updated` / `turn_completed`.
+ * Token fields are additive (provider accounting varies; we sum what is given).
+ */
+export interface AgentUsage {
+  inputTokens?: number
+  cachedInputTokens?: number
+  outputTokens?: number
+  totalCostUsd?: number
+}
+
 export type Turn =
   | { kind: 'user'; text: string }
-  | { kind: 'assistant'; source: string; messageId?: string }
+  | { kind: 'assistant'; source: string; messageId?: string; usage?: TurnUsage }
   | ReasoningTurn
+  | CompactionTurn
   | { kind: 'todo'; items: { text: string; completed: boolean; active: boolean }[] }
   | {
       kind: 'tool'
@@ -240,6 +266,57 @@ export function reasoningLabel(turn: ReasoningTurn): string {
   return turn.durationMs == null ? 'Thinking…' : `Thought for ${formatDuration(turn.durationMs)}`
 }
 
+/**
+ * Divider label for a compaction turn, mirroring Paseo's own marker
+ * (message-compaction-label.ts): loading beats everything, then trigger,
+ * then the pre-compaction token count.
+ */
+export function compactionLabel(turn: CompactionTurn): string {
+  if (turn.status === 'loading') return 'Compacting...'
+  if (turn.trigger === 'auto') return 'Context automatically compacted'
+  if (turn.trigger === 'manual') return 'Context manually compacted'
+  if (turn.preTokens) return `Context compacted (${Math.round(turn.preTokens / 1000)}K tokens)`
+  return 'Context compacted'
+}
+
+/** Folds raw daemon usage into a footer summary; undefined when there is nothing to show. */
+export function summarizeUsage(usage: AgentUsage): TurnUsage | undefined {
+  const totalTokens = (usage.inputTokens ?? 0) + (usage.cachedInputTokens ?? 0) + (usage.outputTokens ?? 0)
+  if (totalTokens <= 0 && usage.totalCostUsd == null) return undefined
+  return { totalTokens, ...(usage.totalCostUsd != null ? { costUsd: usage.totalCostUsd } : {}) }
+}
+
+/**
+ * Attaches a finished-turn usage summary to the transcript's most recent
+ * assistant turn. Usage describes the model's whole turn including its tool
+ * loops, so later non-assistant rows do not redirect it; without an assistant
+ * turn there is nothing to attach to.
+ */
+export function attachTurnUsage(turns: Turn[], usage: AgentUsage): Turn[] {
+  const summary = summarizeUsage(usage)
+  if (!summary) return turns
+  const index = findLastIndex(turns, (t) => t.kind === 'assistant')
+  if (index < 0) return turns
+  const last = turns[index] as Turn & { kind: 'assistant' }
+  return [...turns.slice(0, index), { ...last, usage: summary }, ...turns.slice(index + 1)]
+}
+
+/** Compact token count in Paseo's own meter style, e.g. "900", "12k", "3m". */
+function formatTokenCount(tokens: number): string {
+  if (tokens >= 1_000_000) return `${Math.round(tokens / 1_000_000)}m`
+  if (tokens >= 1000) return `${Math.round(tokens / 1000)}k`
+  return `${Math.round(tokens)}`
+}
+
+/** Footer line for a finished turn's usage, e.g. "12k tokens · $0.0415". */
+export function formatTurnUsage(usage: TurnUsage): string {
+  const cost =
+    usage.costUsd != null
+      ? ` · $${usage.costUsd < 0.01 ? usage.costUsd.toFixed(4) : usage.costUsd.toFixed(2)}`
+      : ''
+  return `${formatTokenCount(usage.totalTokens)} tokens${cost}`
+}
+
 // ---- expanded tool detail ---------------------------------------------------
 
 /**
@@ -334,6 +411,17 @@ export function toolDetailParts(detail: ToolCallDetail): ToolDetailPart[] {
 }
 
 /**
+ * Folds a snapshot-style item (todo, compaction): the newest item carries the
+ * state, so an adjacent turn of the same kind is replaced in place instead of
+ * stacking rows.
+ */
+function foldSnapshot(base: Turn[], kind: 'todo' | 'compaction', next: Turn): Turn[] {
+  const last = base[base.length - 1]
+  if (last?.kind === kind) return [...base.slice(0, -1), next]
+  return appendTurn(base, next)
+}
+
+/**
  * Folds one timeline item into the transcript. Streaming deltas merge into the
  * previous turn of their kind. `at` is the item's epoch-ms arrival time (live
  * event timestamp or fetched entry timestamp); it times reasoning blocks.
@@ -353,7 +441,12 @@ export function applyTimelineItem(turns: Turn[], item: TimelineItem, at: number 
         last?.kind === 'assistant' &&
         (item.messageId == null || last.messageId == null || last.messageId === item.messageId)
       ) {
-        const merged: Turn = { kind: 'assistant', source: last.source + item.text, messageId: item.messageId ?? last.messageId }
+        const merged: Turn = {
+          kind: 'assistant',
+          source: last.source + item.text,
+          messageId: item.messageId ?? last.messageId,
+          usage: last.usage,
+        }
         return [...base.slice(0, -1), merged]
       }
       return appendTurn(base, { kind: 'assistant', source: item.text, messageId: item.messageId })
@@ -385,11 +478,15 @@ export function applyTimelineItem(turns: Turn[], item: TimelineItem, at: number 
         completed: task.completed || task.status === 'completed',
         active: task.status ? task.status === 'in_progress' : !task.completed && i === item.items.findIndex((t) => !t.completed),
       }))
-      const base = sealTrailingReasoning(turns, at)
-      const last = base[base.length - 1]
-      if (last?.kind === 'todo') return [...base.slice(0, -1), { kind: 'todo', items }]
-      return appendTurn(base, { kind: 'todo', items })
+      return foldSnapshot(sealTrailingReasoning(turns, at), 'todo', { kind: 'todo', items })
     }
+    case 'compaction':
+      return foldSnapshot(sealTrailingReasoning(turns, at), 'compaction', {
+        kind: 'compaction',
+        status: item.status,
+        trigger: item.trigger,
+        preTokens: item.preTokens,
+      })
     case 'error':
       return appendTurn(sealTrailingReasoning(turns, at), { kind: 'error', text: item.message })
     default:

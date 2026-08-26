@@ -126,4 +126,73 @@ describe('agent conversation', () => {
     })
     expect(state.turns).toHaveLength(1)
   })
+
+  test('compaction items fold into a single divider turn, replacing prior state', () => {
+    let state = run([
+      { type: 'loaded', items: [{ item: assistant('Working on it.') }] },
+      { type: 'timeline', item: { type: 'compaction', status: 'loading' } as never },
+      { type: 'timeline', item: { type: 'compaction', status: 'completed', trigger: 'auto' } as never },
+    ])
+    const dividers = state.turns.filter((turn) => turn.kind === 'compaction')
+    expect(dividers).toHaveLength(1)
+    expect(dividers[0]).toEqual({ kind: 'compaction', status: 'completed', trigger: 'auto' })
+    // The assistant turn before it is untouched.
+    expect(state.turns[0]!.kind).toBe('assistant')
+  })
+
+  test('usage_updated lands on the newest assistant turn as a footer summary', () => {
+    let state = run([
+      {
+        type: 'loaded',
+        items: [
+          { item: { type: 'assistant_message', text: 'first', messageId: 'm1' } },
+          { item: { type: 'assistant_message', text: 'second', messageId: 'm2' } },
+        ],
+      },
+      { type: 'usageUpdated', usage: { inputTokens: 100, outputTokens: 20, totalCostUsd: 0.01 } },
+    ])
+    expect(state.turns).toHaveLength(2)
+    expect((state.turns[1] as { usage?: unknown }).usage).toEqual({ totalTokens: 120, costUsd: 0.01 })
+    expect((state.turns[0] as { usage?: unknown }).usage).toBeUndefined()
+  })
+
+  test('turnCompleted attaches its usage and still seals trailing thinking', () => {
+    let state = reduceConversation(initialConversation, { type: 'timeline', item: { type: 'reasoning', text: 'hmm' } })
+    state = reduceConversation(state, {
+      type: 'turnCompleted',
+      usage: { outputTokens: 7 },
+    })
+    const thinking = state.turns[0] as { kind: string; durationMs?: number }
+    expect(thinking.kind).toBe('reasoning')
+    expect(typeof thinking.durationMs).toBe('number')
+    // No assistant turn to attach to; nothing invented.
+    expect(state.turns).toHaveLength(1)
+  })
+
+  test('turnCompleted usage attaches after an assistant turn followed by tool rows', () => {
+    let state = run([
+      { type: 'timeline', item: assistant('running checks') },
+      {
+        type: 'timeline',
+        item: {
+          type: 'tool_call',
+          callId: 'c1',
+          name: 'bash',
+          detail: { type: 'shell', command: 'npm test' },
+          status: 'completed',
+          error: null,
+        } as never,
+      },
+      { type: 'turnCompleted', usage: { inputTokens: 10, cachedInputTokens: 5, outputTokens: 2 } },
+    ])
+    expect((state.turns[0] as { usage?: unknown }).usage).toEqual({ totalTokens: 17 })
+  })
+
+  test('usage events without any token or cost data change nothing', () => {
+    const state = run([
+      { type: 'timeline', item: assistant('hello') },
+      { type: 'usageUpdated', usage: {} },
+    ])
+    expect((state.turns[0] as { usage?: unknown }).usage).toBeUndefined()
+  })
 })

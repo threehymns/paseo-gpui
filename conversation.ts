@@ -13,9 +13,11 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PaseoClient } from '@getpaseo/client'
 import {
   applyTimelineItem,
+  attachTurnUsage,
   buildTurns,
   errorMessage,
   sealTrailingReasoning,
+  type AgentUsage,
   type TimelineEntry,
   type TimelineItem,
   type Turn,
@@ -36,7 +38,10 @@ export type ConversationEvent =
   | { type: 'loaded'; items: TimelineEntry[] }
   | { type: 'loadFailed'; error: unknown }
   | { type: 'timeline'; item: TimelineItem; at?: number }
-  | { type: 'turnCompleted'; at?: number }
+  | { type: 'turnCompleted'; usage?: AgentUsage; at?: number }
+  // The daemon's agent_stream relay does not forward `usage_updated` yet;
+  // this seam keeps mid-turn usage folding ready for when it does.
+  | { type: 'usageUpdated'; usage: AgentUsage }
   | { type: 'turnFailed'; message: string }
   | { type: 'sendQueued'; text: string }
   | { type: 'sendFailed'; error: unknown }
@@ -77,9 +82,17 @@ export function reduceConversation(state: ConversationState, event: Conversation
       }
       return next
     }
-    case 'turnCompleted':
-      // Ends any still-open trailing thinking block with nothing after it.
-      return { ...state, turns: sealTrailingReasoning(state.turns, event.at ?? Date.now()) }
+    case 'turnCompleted': {
+      // Ends any still-open trailing thinking block with nothing after it, and
+      // files the turn's final usage onto its assistant turn.
+      let turns = sealTrailingReasoning(state.turns, event.at ?? Date.now())
+      if (event.usage) turns = attachTurnUsage(turns, event.usage)
+      return { ...state, turns }
+    }
+    case 'usageUpdated':
+      // Mid-turn usage updates land on the newest assistant turn; the turn's
+      // own completion overwrites it with the settled numbers.
+      return { ...state, turns: attachTurnUsage(state.turns, event.usage) }
     case 'turnFailed':
       return { ...state, turns: applyTimelineItem(state.turns, { type: 'error', message: event.message }) }
     case 'sendQueued':
@@ -146,7 +159,11 @@ export function useAgentConversation(
           if (event.type === 'timeline') {
             setState((prev) => reduceConversation(prev, { type: 'timeline', item: event.item, at: eventTime(timestamp) }))
           } else if (event.type === 'turn_completed') {
-            setState((prev) => reduceConversation(prev, { type: 'turnCompleted', at: eventTime(timestamp) }))
+            // Settled per-turn usage rides on turn completion; the daemon's
+            // agent_stream relay does not forward mid-turn usage_updated.
+            setState((prev) =>
+              reduceConversation(prev, { type: 'turnCompleted', usage: event.usage, at: eventTime(timestamp) }),
+            )
           } else if (event.type === 'turn_failed') {
             setState((prev) => reduceConversation(prev, { type: 'turnFailed', message: event.error }))
           }
