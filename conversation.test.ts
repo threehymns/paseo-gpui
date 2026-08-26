@@ -6,14 +6,31 @@ import {
   type ConversationEvent,
   type ConversationState,
 } from './conversation'
-import type { TimelineItem } from './paseo'
+import type { TimelineEntry, TimelineItem } from './paseo'
 
 const user = (text: string): TimelineItem => ({ type: 'user_message', text })
-const assistant = (text: string): TimelineItem => ({ type: 'assistant_message', text })
+const assistant = (text: string, messageId?: string): TimelineItem =>
+  messageId ? { type: 'assistant_message', text, messageId } : { type: 'assistant_message', text }
+const reasoning = (text: string): TimelineItem => ({ type: 'reasoning', text })
 
 function run(events: ConversationEvent[]): ConversationState {
   return events.reduce(reduceConversation, initialConversation)
 }
+
+const at = (item: TimelineItem, ms: number): TimelineEntry => ({ item, at: ms })
+
+type CursorOpts = { hasOlder?: boolean; oldestCursor?: { epoch: string; seq: number } | null }
+
+const page = (items: TimelineEntry[], opts: CursorOpts = {}) => ({
+  items,
+  hasOlder: opts.hasOlder ?? false,
+  oldestCursor: opts.oldestCursor ?? null,
+})
+
+const loadedPage = (items: TimelineEntry[], opts: CursorOpts = {}): ConversationEvent => ({
+  type: 'loaded',
+  page: page(items, opts),
+})
 
 describe('agent conversation', () => {
   test('reset seeds the pending queue for a freshly created agent', () => {
@@ -25,7 +42,7 @@ describe('agent conversation', () => {
   test('loaded replaces turns and marks ready', () => {
     const state = run([
       { type: 'reset', seedText: 'fix the bug' },
-      { type: 'loaded', items: [{ item: user('fix the bug') }, { item: assistant('On it.') }] },
+      loadedPage([{ item: user('fix the bug') }, { item: assistant('On it.') }]),
     ])
     expect(state.status).toBe('ready')
     expect(state.error).toBeNull()
@@ -54,7 +71,7 @@ describe('agent conversation', () => {
 
   test('the optimistic turn disappears once settled, not before', () => {
     const mid = run([
-      { type: 'loaded', items: [{ item: assistant('hi') }] },
+      loadedPage([{ item: assistant('hi') }]),
       { type: 'sendQueued', text: 'hello' },
     ])
     expect(visibleTurns(mid).at(-1)).toEqual({ kind: 'user', text: 'hello' })
@@ -65,7 +82,7 @@ describe('agent conversation', () => {
 
   test('sendFailed drops the queued send and surfaces an error turn', () => {
     const state = run([
-      { type: 'loaded', items: [] },
+      loadedPage([]),
       { type: 'sendQueued', text: 'hello' },
       { type: 'sendFailed', error: new Error('daemon went away') },
     ])
@@ -95,7 +112,7 @@ describe('agent conversation', () => {
     expect(state.status).toBe('error')
     expect(state.error).toBe('archived')
     // A later successful load recovers it.
-    const recovered = reduceConversation(state, { type: 'loaded', items: [{ item: assistant('back') }] })
+    const recovered = reduceConversation(state, loadedPage([{ item: assistant('back') }]))
     expect(recovered.status).toBe('ready')
     expect(recovered.error).toBeNull()
   })
@@ -125,5 +142,156 @@ describe('agent conversation', () => {
       } as never,
     })
     expect(state.turns).toHaveLength(1)
+  })
+})
+
+describe('history paging', () => {
+  const cursor = (seq: number) => ({ epoch: 'e1', seq })
+
+  const appendPage = (items: TimelineEntry[], opts: CursorOpts = {}): ConversationEvent => ({
+    type: 'historyAppended',
+    page: page(items, opts),
+  })
+
+  test('an appended page lands before existing turns in original order', () => {
+    const state = run([
+      loadedPage([at(user('later question'), 200)], { hasOlder: true, oldestCursor: cursor(10) }),
+      appendPage([at(user('earlier question'), 90), at(assistant('earlier answer'), 100)]),
+    ])
+    expect(state.turns.map((turn) => turn.kind)).toEqual(['user', 'assistant', 'user'])
+    expect(state.turns[0]).toEqual({ kind: 'user', text: 'earlier question' })
+    expect((state.turns[1] as { source: string }).source).toBe('earlier answer')
+    expect(state.turns[2]).toEqual({ kind: 'user', text: 'later question' })
+  })
+
+  test('appended pages accumulate in order until history is exhausted', () => {
+    let state = run([
+      loadedPage([at(user('p3'), 300)], { hasOlder: true, oldestCursor: cursor(30) }),
+    ])
+    state = reduceConversation(state, appendPage([at(user('p2'), 200)], { hasOlder: true, oldestCursor: cursor(20) }))
+    expect(state.hasOlder).toBe(true)
+    expect(state.oldestCursor).toEqual(cursor(20))
+    state = reduceConversation(state, appendPage([at(user('p1'), 100)], { hasOlder: false, oldestCursor: cursor(10) }))
+    const texts = state.turns.map((turn) => (turn.kind === 'user' ? turn.text : ''))
+    expect(texts).toEqual(['p1', 'p2', 'p3'])
+    // Exhausted: the flag flips off and the stored cursor is the oldest page's.
+    expect(state.hasOlder).toBe(false)
+    expect(state.oldestCursor).toEqual(cursor(10))
+  })
+
+  test('a page without a cursor stops paging instead of wedging on a dead cursor', () => {
+    let state = run([loadedPage([at(user('q'), 200)], { hasOlder: true, oldestCursor: cursor(10) })])
+    // The daemon claimed more history but handed back no way to reach it.
+    state = reduceConversation(state, appendPage([at(user('old'), 100)], { hasOlder: true, oldestCursor: null }))
+    expect(state.hasOlder).toBe(false)
+    expect(state.oldestCursor).toEqual(cursor(10))
+  })
+
+  test('an empty page ends paging instead of looping on the same cursor', () => {
+    let state = run([loadedPage([at(user('q'), 200)], { hasOlder: true, oldestCursor: cursor(10) })])
+    state = reduceConversation(
+      state,
+      appendPage([], { hasOlder: true, oldestCursor: cursor(5) }),
+    )
+    expect(state.hasOlder).toBe(false)
+    expect(state.oldestCursor).toEqual(cursor(5))
+  })
+
+  test('streaming merges survive across a paged load', () => {
+    let state = run([loadedPage([at(user('q'), 200)], { hasOlder: true, oldestCursor: cursor(10) })])
+    state = reduceConversation(state, { type: 'timeline', item: assistant('Hel'), at: 210 })
+    state = reduceConversation(state, { type: 'timeline', item: assistant('lo there'), at: 220 })
+    state = reduceConversation(state, appendPage([at(user('older q'), 80), at(assistant('older '), 90)]))
+    expect(state.turns.map((turn) => turn.kind)).toEqual(['user', 'assistant', 'user', 'assistant'])
+    expect((state.turns[3] as { source: string }).source).toBe('Hello there')
+    // The streamed deltas were captured, so a later prepend still sees them.
+    state = reduceConversation(state, appendPage([at(user('oldest'), 50)]))
+    expect((state.turns[4] as { source: string }).source).toBe('Hello there')
+  })
+
+  test('a page ending mid-message continues into the matching assistant turn', () => {
+    const state = run([
+      loadedPage([at(assistant('world', 'm1'), 200)]),
+      appendPage([at(user('q'), 90), at(assistant('hello ', 'm1'), 100)]),
+    ])
+    expect(state.turns).toHaveLength(2)
+    expect(state.turns[0]).toEqual({ kind: 'user', text: 'q' })
+    expect((state.turns[1] as { source: string }).source).toBe('hello world')
+  })
+
+  test('reasoning continuing across the boundary stays one open block timed from its start', () => {
+    let state = run([
+      loadedPage([at(reasoning('definitely'), 500)], { hasOlder: true, oldestCursor: cursor(10) }),
+    ])
+    state = reduceConversation(state, { type: 'timeline', item: reasoning(' maybe'), at: 600 })
+    state = reduceConversation(state, appendPage([at(reasoning('hmm '), 400)]))
+    expect(state.turns).toHaveLength(1)
+    const thinking = state.turns[0] as { kind: string; text: string; startedAt?: number; durationMs?: number }
+    expect(thinking.text).toBe('hmm definitely maybe')
+    expect(thinking.startedAt).toBe(400)
+    expect(thinking.durationMs).toBeUndefined()
+  })
+
+  test('tool lifecycle spanning the boundary folds to one replaced turn', () => {
+    const running = (status: 'running' | 'completed'): TimelineItem =>
+      ({
+        type: 'tool_call',
+        callId: 'c1',
+        name: 'bash',
+        detail: { type: 'shell', command: 'npm test' },
+        status,
+        error: null,
+      }) as never
+    const state = run([
+      loadedPage([at(running('completed'), 200)]),
+      appendPage([at(user('run tests'), 90), at(running('running'), 100)]),
+    ])
+    expect(state.turns).toHaveLength(2)
+    const tool = state.turns[1] as { kind: string; status: string }
+    expect(tool.status).toBe('ok')
+  })
+
+  test('loadingHistory toggles while a page is in flight and clears on failure', () => {
+    let state = run([loadedPage([at(user('q'), 1)], { hasOlder: true, oldestCursor: cursor(5) })])
+    state = reduceConversation(state, { type: 'historyStarted' })
+    expect(state.loadingHistory).toBe(true)
+    state = reduceConversation(state, { type: 'historyFailed' })
+    expect(state.loadingHistory).toBe(false)
+    expect(state.status).toBe('ready')
+    state = reduceConversation(state, { type: 'historyStarted' })
+    state = reduceConversation(
+      state,
+      appendPage([at(user('old'), 0)], { hasOlder: false, oldestCursor: cursor(1) }),
+    )
+    expect(state.loadingHistory).toBe(false)
+    expect(state.hasOlder).toBe(false)
+  })
+
+  test('a fresh load replaces paged history with daemon truth', () => {
+    let state = run([loadedPage([at(user('q'), 200)])])
+    state = reduceConversation(state, appendPage([at(user('old'), 100)], { hasOlder: true, oldestCursor: cursor(5) }))
+    expect(state.hasOlder).toBe(true)
+    state = reduceConversation(state, loadedPage([at(user('fresh'), 300)]))
+    expect(state.entries.map((entry) => entry.item)).toEqual([user('fresh')])
+    expect(state.hasOlder).toBe(false)
+    expect(state.oldestCursor).toBeNull()
+    expect(state.loadingHistory).toBe(false)
+  })
+
+  test('a load claiming older history without a cursor cannot page', () => {
+    const state = run([
+      loadedPage([at(user('q'), 200)], { hasOlder: true, oldestCursor: null }),
+    ])
+    expect(state.hasOlder).toBe(false)
+    expect(state.oldestCursor).toBeNull()
+  })
+
+  test('pending sends stay optimistic across a paged load', () => {
+    let state = run([loadedPage([at(assistant('hi'), 100)])])
+    state = reduceConversation(state, { type: 'sendQueued', text: 'hello' })
+    state = reduceConversation(state, appendPage([at(user('early'), 50)], { hasOlder: true }))
+    const visible = visibleTurns(state)
+    expect(visible.at(-1)).toEqual({ kind: 'user', text: 'hello' })
+    expect(visible.filter((turn) => turn.kind === 'user')).toHaveLength(2)
   })
 })

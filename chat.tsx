@@ -223,14 +223,17 @@ export function ChatApp() {
   const visibleTurns = turns
 
   const listRef = useRef<{ id: number } | null>(null)
-  const skipScroll = useRef(true)
+  // Follow the tail only when the tail itself changed: history pages prepend
+  // above the viewport, and scrolling to the bottom would yank the reader away
+  // from the rows they just opened.
+  const tailSignature = useRef<string | null>(null)
   const { renderer } = useGpuix()
 
   useEffect(() => {
-    if (skipScroll.current) {
-      skipScroll.current = false
-      return
-    }
+    const tail = JSON.stringify(visibleTurns.at(-1) ?? null)
+    const unchanged = tail === tailSignature.current
+    tailSignature.current = tail
+    if (unchanged) return
     const id = listRef.current?.id
     if (id == null || !renderer?.scrollToItem) return
     renderer.scrollToItem(id, visibleTurns.length - 1)
@@ -280,6 +283,17 @@ export function ChatApp() {
   const onModelChange = editingLive ? live.setModel : setDraftModel
   const onThinkingChange = editingLive ? live.setThinking : setDraftThinking
   const onModeChange = editingLive ? live.setMode : setDraftMode
+
+  // Older-history availability for the transcript's top edge: quiet while more
+  // pages exist unrequested, a spinner while fetching, a marker once exhausted.
+  const olderPages =
+    conversation.status === 'ready' && visibleTurns.length > 0
+      ? conversation.loadingHistory
+        ? ('loading' as const)
+        : conversation.hasOlder
+          ? ('more' as const)
+          : ('end' as const)
+      : undefined
 
   const draftChips = (
     <>
@@ -382,6 +396,8 @@ export function ChatApp() {
             permissions={permissions.cards}
             onRespond={permissions.respond}
             listRef={listRef}
+            olderPages={olderPages}
+            onLoadOlder={conversation.loadHistory}
           />
         )}
         {createError && (
