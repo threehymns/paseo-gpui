@@ -185,7 +185,7 @@ export function ChatApp() {
   // hides the whole panel when the daemon has no checkout subsystem.
   const features = useDaemonFeatures(daemon)
   const checkoutOn = checkoutEnabled(features)
-  const checkout = useCheckoutStatus(daemon, activeEntry?.cwd ?? null)
+  const { state: checkout, retry: retryStatusFetch } = useCheckoutStatus(daemon, activeEntry?.cwd ?? null)
   const repoActions = useCheckoutActions()
   const activeStatus = activeEntry ? (checkout.entries[activeEntry.cwd]?.status ?? null) : null
   const activeRepoKey = activeStatus ? repoKeyOf(activeStatus) : (activeEntry?.cwd ?? null)
@@ -482,6 +482,12 @@ export function ChatApp() {
             actions={activeQueue}
             onRefresh={() => {
               if (!activeEntry || !activeRepoKey || activeQueue?.running) return
+              // A failed lookup holds no repository truth yet: re-run the
+              // status fetch instead of mutating through the queue.
+              if (!checkout.entries[activeEntry.cwd]?.status) {
+                retryStatusFetch(activeEntry.cwd)
+                return
+              }
               void repoActions.run(
                 activeRepoKey,
                 'refresh',

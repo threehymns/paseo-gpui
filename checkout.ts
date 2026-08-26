@@ -145,6 +145,16 @@ export interface CheckoutEntry {
   status: RepoStatus | null
 }
 
+/**
+ * Whether the panel offers its refresh affordance: a known git repo has
+ * something to refresh, and a failed lookup deserves a retry — without one,
+ * a failed first fetch would strand the workspace until restart, since no
+ * other trigger ever reaches it.
+ */
+export function canRefresh(entry: CheckoutEntry | undefined): boolean {
+  return entry?.status?.isGit === true || entry?.phase === 'failed'
+}
+
 export interface CheckoutState {
   /** Folded status per workspace directory; absent means never queried. */
   entries: Record<string, CheckoutEntry>
@@ -226,7 +236,10 @@ export function useDaemonFeatures(daemon: DaemonClient): DaemonFeatures | null {
 
 // ---- live hook ---------------------------------------------------------------
 
-export function useCheckoutStatus(daemon: DaemonClient, cwd: string | null): CheckoutState {
+export function useCheckoutStatus(
+  daemon: DaemonClient,
+  cwd: string | null,
+): { state: CheckoutState; retry: (target: string) => void } {
   const [state, setState] = useState<CheckoutState>(initialCheckout)
   const stateRef = useRef(state)
   stateRef.current = state
@@ -282,5 +295,10 @@ export function useCheckoutStatus(daemon: DaemonClient, cwd: string | null): Che
     fetchOne(cwd)
   }, [cwd, state.entries, fetchOne])
 
-  return state
+  // A failed lookup with no retained truth has no other trigger — the panel
+  // hides its queue button and the first-look effect skips known entries — so
+  // the retry affordance re-runs the fetch directly.
+  const retry = useCallback((target: string) => fetchOne(target), [fetchOne])
+
+  return { state, retry }
 }

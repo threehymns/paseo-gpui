@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   branchLabel,
+  canRefresh,
   checkoutEnabled,
   CHECKOUT_FEATURE_FLAG,
   createStatusFreshness,
@@ -9,6 +10,7 @@ import {
   initialCheckout,
   reduceCheckout,
   repoKeyOf,
+  type CheckoutEntry,
   type CheckoutEvent,
   type CheckoutState,
   type CheckoutStatusPayload,
@@ -219,6 +221,31 @@ describe('repository keying', () => {
     expect(repoKeyOf(foldCheckoutStatus(cleanBranch()))).toBe('/repo')
     expect(repoKeyOf(foldCheckoutStatus(nonGit()))).toBe('/tmp/scratch')
     expect(repoKeyOf(foldCheckoutStatus(cleanBranch({ repoRoot: null })))).toBe('/repo')
+  })
+})
+
+describe('refresh affordance', () => {
+  const entry = (overrides: Partial<CheckoutEntry>): CheckoutEntry => ({
+    phase: 'ready',
+    status: foldCheckoutStatus(cleanBranch()),
+    ...overrides,
+  })
+
+  test('a known git repo offers refresh', () => {
+    expect(canRefresh(entry({}))).toBe(true)
+  })
+
+  test('unknown, loading, and non-git workspaces offer nothing to refresh', () => {
+    expect(canRefresh(undefined)).toBe(false)
+    expect(canRefresh(entry({ status: null, phase: 'loading' }))).toBe(false)
+    expect(canRefresh(entry({ status: foldCheckoutStatus(nonGit()) }))).toBe(false)
+  })
+
+  test('a failed lookup offers a retry even with no retained truth', () => {
+    // Without this, a failed initial fetch strands the panel until restart:
+    // no button (no status) and the first-look effect skips existing entries.
+    expect(canRefresh(entry({ phase: 'failed', status: null }))).toBe(true)
+    expect(canRefresh(entry({ phase: 'failed' }))).toBe(true)
   })
 })
 

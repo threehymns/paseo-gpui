@@ -9,7 +9,7 @@
 
 import React from 'react'
 import { Icon, IconButton, StatusDot } from './chrome'
-import { branchLabel, formatAheadBehind, type CheckoutEntry, type RepoStatus } from './checkout'
+import { branchLabel, canRefresh, formatAheadBehind, type CheckoutEntry, type RepoStatus } from './checkout'
 import type { RepoActionQueue } from './checkout-actions'
 import { C } from './theme'
 
@@ -65,7 +65,7 @@ export function CheckoutPanel({
           </text>
         </div>
       )}
-      {entry?.status?.isGit && (
+      {canRefresh(entry) && (
         <IconButton
           icon="rotateCcw"
           size={12}
