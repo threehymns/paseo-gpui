@@ -23,6 +23,7 @@ import {
   displayName,
   errorMessage,
   findModel,
+  isAgentRunning,
   isArchived,
   sortAgents,
   type AgentEntry,
@@ -48,6 +49,7 @@ import { useAgentConversation } from './conversation'
 import { useAgentPermissions } from './permissions'
 import { useDraftConfig } from './draft-config'
 import { liveTruth, useLiveAgentConfig, type DaemonTruth, type ProviderNotice } from './live-config'
+import { resolveSendIntent, type SendGesture } from './send-intent'
 
 // ---- daemon hooks ----------------------------------------------------------
 
@@ -262,18 +264,57 @@ export function ChatApp() {
     renderer.scrollToItem(id, visibleTurns.length - 1)
   }, [renderer, visibleTurns.length])
 
-  const send = async (raw: string) => {
-    const text = raw.trim()
-    if (!text || status !== 'connected') return
-    const stagedImages = draftImages
-    const outgoing = toSendImages(stagedImages)
-    // Chips clear immediately; a failed send restores them next to the text.
+  /** Clears the composer after the text (and chips) have found a home. */
+  const clearDraft = () => {
     setDraft('')
     setDraftImages([])
     setCreateError(null)
     setAttachNotice(null)
+  }
+
+  /**
+   * Stops the agent's active turn first, then delivers the text as a fresh
+   * message; the interrupted turn shows its stopped state via the timeline.
+   */
+  const interruptAndDeliver = async (text: string, stagedImages: ImageAttachment[]) => {
+    if (!activeId) return
+    try {
+      await daemon.cancelAgent(activeId)
+    } catch {
+      // Already between turns — delivering is still what was asked for.
+    }
+    const ok = await conversation.send(text, stagedImages)
+    if (!ok) restoreDraft(text, stagedImages)
+  }
+
+  /**
+   * The composer's send gesture, resolved against the active turn: Enter steers
+   * a running agent, Cmd/Ctrl+Enter parks the draft above the composer,
+   * Alt+Enter interrupts first — and idle agents behave exactly as before.
+   */
+  const submitDraft = async (gesture: SendGesture, raw: string) => {
+    const text = raw.trim()
+    if (!text || status !== 'connected') return
+    const intent = activeEntry ? resolveSendIntent(isAgentRunning(activeEntry), gesture) : { kind: 'send' as const }
+    const stagedImages = draftImages
+
+    if (intent.kind === 'queue') {
+      conversation.park(text, stagedImages)
+      clearDraft()
+      return
+    }
+    if (intent.kind === 'interrupt') {
+      clearDraft()
+      void interruptAndDeliver(text, stagedImages)
+      return
+    }
+
+    const outgoing = toSendImages(stagedImages)
+    clearDraft()
     if (activeId) {
-      void conversation.send(text, stagedImages).then((ok) => {
+      // Steer rides the active turn; the hook degrades to plain delivery
+      // itself when the daemon cannot apply it.
+      void conversation.send(text, stagedImages, intent.kind === 'steer' ? 'steer' : undefined).then((ok) => {
         // A failed send restores the exact previous chips next to the text.
         if (!ok) restoreDraft(text, stagedImages)
       })
@@ -497,7 +538,12 @@ export function ChatApp() {
             setDraft(next)
             if (createError) setCreateError(null)
           }}
-          onSend={send}
+          onSend={(text) => void submitDraft('send', text)}
+          onQueue={(text) => void submitDraft('queue', text)}
+          onInterrupt={(text) => void submitDraft('interrupt', text)}
+          parked={conversation.parked}
+          onEditParked={editQueued}
+          onSendParkedNow={(id) => void conversation.release(id)}
           disabledReason={disabledReason}
           chips={draftChips}
           attachments={draftImages}

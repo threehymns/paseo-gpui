@@ -14,6 +14,9 @@ const assistant = (text: string): TimelineItem => ({ type: 'assistant_message', 
 
 const chip = (id: string): ImageAttachment => ({ id, name: `${id}.png`, mimeType: 'image/png', data: 'aGk=' })
 
+let idCounter = 0
+const newId = () => `id-${++idCounter}`
+
 function run(events: ConversationEvent[]): ConversationState {
   return events.reduce(reduceConversation, initialConversation)
 }
@@ -47,8 +50,8 @@ describe('agent conversation', () => {
 
   test('a matching daemon echo settles the pending head — FIFO, one per echo', () => {
     const state = run([
-      { type: 'sendQueued', text: 'do it' },
-      { type: 'sendQueued', text: 'do it' },
+      { type: 'sendQueued', id: newId(), text: 'do it' },
+      { type: 'sendQueued', id: newId(), text: 'do it' },
       { type: 'timeline', item: user('do it') },
       { type: 'timeline', item: user('do it') },
     ])
@@ -59,7 +62,7 @@ describe('agent conversation', () => {
 
   test('an unmatched echo leaves pending alone (no text-matching false positives)', () => {
     const state = run([
-      { type: 'sendQueued', text: 'do it' },
+      { type: 'sendQueued', id: newId(), text: 'do it' },
       { type: 'timeline', item: user('something else entirely') },
     ])
     expect(state.pending.map((send) => send.text)).toEqual(['do it'])
@@ -68,7 +71,7 @@ describe('agent conversation', () => {
   test('the optimistic turn disappears once settled, not before', () => {
     const mid = run([
       { type: 'loaded', items: [{ item: assistant('hi') }] },
-      { type: 'sendQueued', text: 'hello' },
+      { type: 'sendQueued', id: newId(), text: 'hello' },
     ])
     expect(visibleTurns(mid).at(-1)).toEqual({ kind: 'user', text: 'hello', queuedId: mid.pending[0]!.id })
     const settled = reduceConversation(mid, { type: 'timeline', item: user('hello') })
@@ -78,8 +81,8 @@ describe('agent conversation', () => {
 
   test('queued sends carry their attachments until the echo settles them', () => {
     let state = run([
-      { type: 'sendQueued', text: 'read this', images: [chip('a'), chip('b')] },
-      { type: 'sendQueued', text: 'and this' },
+      { type: 'sendQueued', id: newId(), text: 'read this', images: [chip('a'), chip('b')] },
+      { type: 'sendQueued', id: newId(), text: 'and this' },
     ])
     expect(state.pending.map((send) => [send.text, send.images])).toEqual([
       ['read this', [chip('a'), chip('b')]],
@@ -92,8 +95,8 @@ describe('agent conversation', () => {
 
   test('unqueue pulls a queued send back out by id, however many share its text', () => {
     const mid = run([
-      { type: 'sendQueued', text: 'same text' },
-      { type: 'sendQueued', text: 'same text', images: [chip('a')] },
+      { type: 'sendQueued', id: newId(), text: 'same text' },
+      { type: 'sendQueued', id: newId(), text: 'same text', images: [chip('a')] },
     ])
     const target = mid.pending[0]!
     const edited = reduceConversation(mid, { type: 'sendUnqueued', id: target.id })
@@ -103,14 +106,93 @@ describe('agent conversation', () => {
   })
 
   test('sendFailed drops the queued send and surfaces an error turn', () => {
+    const queuedId = newId()
     const state = run([
       { type: 'loaded', items: [] },
-      { type: 'sendQueued', text: 'hello' },
-      { type: 'sendFailed', error: new Error('daemon went away') },
+      { type: 'sendQueued', id: queuedId, text: 'hello' },
+      { type: 'sendFailed', error: new Error('daemon went away'), id: queuedId },
     ])
     expect(state.pending).toEqual([])
     expect(state.turns.at(-1)!.kind).toBe('error')
     expect((state.turns.at(-1) as { text: string }).text).toContain('daemon went away')
+  })
+
+  test('parking queues the text unsent; it stays out of the transcript', () => {
+    const state = run([
+      { type: 'loaded', items: [{ item: assistant('working…') }] },
+      { type: 'sendParked', id: 'p1', text: 'hold this' },
+    ])
+    expect(state.pending).toEqual([{ id: 'p1', text: 'hold this', images: [], sent: false }])
+    // Not yet handed to the daemon, so no optimistic transcript row either.
+    expect(visibleTurns(state)).toHaveLength(1)
+  })
+
+  test('parking keeps staged chips riding along', () => {
+    const state = run([{ type: 'sendParked', id: 'p1', text: 'look', images: [chip('a')] }])
+    expect(state.pending[0]!.images).toEqual([chip('a')])
+  })
+
+  test('an echo settles the first in-flight match, never a parked send sharing its text', () => {
+    const state = run([
+      { type: 'sendParked', id: 'p1', text: 'do it' },
+      { type: 'sendQueued', id: 'q1', text: 'do it' },
+      { type: 'timeline', item: user('do it') },
+    ])
+    // The parked twin survives; only the handed-off copy settled.
+    expect(state.pending.map((send) => send.id)).toEqual(['p1'])
+  })
+
+  test('settlement stays FIFO among in-flight sends even with parked ones between them', () => {
+    let state = run([
+      { type: 'sendQueued', id: 'q1', text: 'first' },
+      { type: 'sendParked', id: 'p1', text: 'parked between' },
+      { type: 'sendQueued', id: 'q2', text: 'second' },
+      { type: 'timeline', item: user('first') },
+    ])
+    expect(state.pending.map((send) => send.id)).toEqual(['p1', 'q2'])
+    state = reduceConversation(state, { type: 'timeline', item: user('second') })
+    expect(state.pending.map((send) => send.id)).toEqual(['p1'])
+  })
+
+  test('releasing a parked send hands it to the daemon as an in-flight transcript row', () => {
+    const state = run([
+      { type: 'loaded', items: [{ item: assistant('working…') }] },
+      { type: 'sendParked', id: 'p1', text: 'hold this' },
+      { type: 'sendReleased', id: 'p1' },
+    ])
+    expect(state.pending).toEqual([{ id: 'p1', text: 'hold this', images: [], sent: true }])
+    expect(visibleTurns(state).at(-1)).toEqual({ kind: 'user', text: 'hold this', queuedId: 'p1' })
+  })
+
+  test('releasing keeps its place among in-flight sends and settles FIFO from there', () => {
+    let state = run([
+      { type: 'sendQueued', id: 'q1', text: 'first' },
+      { type: 'sendParked', id: 'p1', text: 'parked' },
+      { type: 'sendReleased', id: 'p1' },
+      { type: 'timeline', item: user('first') },
+      { type: 'timeline', item: user('parked') },
+    ])
+    expect(state.pending).toEqual([])
+  })
+
+  test('edit-pullback works on a parked send too', () => {
+    const state = run([
+      { type: 'sendParked', id: 'p1', text: 'draft idea' },
+      { type: 'sendUnqueued', id: 'p1' },
+    ])
+    expect(state.pending).toEqual([])
+    expect(visibleTurns(state)).toHaveLength(0)
+  })
+
+  test('a failed release drops only its own send; parked siblings survive', () => {
+    const state = run([
+      { type: 'sendParked', id: 'p1', text: 'still parked' },
+      { type: 'sendParked', id: 'p2', text: 'fired too soon' },
+      { type: 'sendReleased', id: 'p2' },
+      { type: 'sendFailed', error: new Error('daemon went away'), id: 'p2' },
+    ])
+    expect(state.pending.map((send) => send.id)).toEqual(['p1'])
+    expect(state.turns.at(-1)!.kind).toBe('error')
   })
 
   test('turnFailed becomes an error turn in the transcript', () => {

@@ -8,6 +8,7 @@ import { OptionPicker } from './pickers'
 import { basename } from './paseo'
 import type { ImageAttachment, PastePayload } from './attachments'
 import type { ProviderNotice } from './live-config'
+import { classifyEnter, type KeyModifiers } from './send-intent'
 import { C, CHAT_THEME, CONTENT_MAX_WIDTH } from './theme'
 
 const NOTICE_COLORS: Record<ProviderNotice['type'], string> = {
@@ -117,6 +118,88 @@ function RoundButton({
   )
 }
 
+/** One parked send above the composer: click it to edit back into the input, or fire it now. */
+function ParkedSendRow({
+  id,
+  text,
+  onEdit,
+  onSendNow,
+}: {
+  id: string
+  text: string
+  onEdit?: (id: string) => void
+  onSendNow?: (id: string) => void
+}) {
+  return (
+    <div
+      testId={`parked-${id}`}
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+        minWidth: 0,
+        paddingLeft: 10,
+        paddingRight: 10,
+        paddingTop: 5,
+        paddingBottom: 5,
+        borderRadius: 8,
+        backgroundColor: C.item,
+      }}
+    >
+      <div
+        onClick={onEdit ? () => onEdit(id) : undefined}
+        style={{
+          display: 'flex',
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: 8,
+          minWidth: 0,
+          flexGrow: 1,
+          borderRadius: 6,
+          paddingTop: 2,
+          paddingBottom: 2,
+          cursor: onEdit ? 'pointer' : undefined,
+          hover: onEdit ? { backgroundColor: C.overlayStrong } : undefined,
+        }}
+      >
+        <Icon name="pencil" size={11} color={C.ghost} />
+        <text
+          style={{
+            fontSize: 12.5,
+            lineHeight: 17,
+            color: C.secondary,
+            whiteSpace: 'nowrap',
+            textOverflow: 'ellipsis',
+            minWidth: 0,
+          }}
+        >
+          {text}
+        </text>
+      </div>
+      <div
+        testId={`send-now-${id}`}
+        onClick={onSendNow ? () => onSendNow(id) : undefined}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          height: 20,
+          paddingLeft: 9,
+          paddingRight: 9,
+          borderRadius: 6,
+          backgroundColor: C.overlayStrong,
+          flexShrink: 0,
+          cursor: onSendNow ? 'pointer' : undefined,
+          hover: onSendNow ? { backgroundColor: C.inverse } : undefined,
+        }}
+      >
+        <text style={{ fontSize: 11.5, fontWeight: 500, color: C.secondary, flexShrink: 0 }}>Send now</text>
+      </div>
+    </div>
+  )
+}
+
 export function Composer({
   value,
   onChange,
@@ -128,6 +211,11 @@ export function Composer({
   onAttach,
   onPastePayload,
   attachNotice,
+  onQueue,
+  onInterrupt,
+  parked = [],
+  onEditParked,
+  onSendParkedNow,
 }: {
   value: string
   onChange: (next: string) => void
@@ -145,6 +233,16 @@ export function Composer({
    */
   onPastePayload?: (payload: PastePayload) => void
   attachNotice?: { text: string; tone: 'warn' | 'danger' } | null
+  /** Cmd/Ctrl+Enter while running: parks the draft as a pending send above the input. */
+  onQueue?: (text: string) => void
+  /** Alt+Enter while running: stops the active turn first, then delivers fresh. */
+  onInterrupt?: (text: string) => void
+  /** Parked sends awaiting release, oldest first. */
+  parked?: readonly { id: string; text: string }[]
+  /** Pulls a parked send back into the composer for editing. */
+  onEditParked?: (id: string) => void
+  /** Fires a parked send immediately. */
+  onSendParkedNow?: (id: string) => void
 }) {
   const ready = value.trim().length > 0 && !disabledReason
   const send = (text: string) => {
@@ -152,6 +250,7 @@ export function Composer({
     if (!next || disabledReason) return
     onSend(next)
   }
+  const gestureText = (event: { value?: string }) => event.value ?? value
   return (
     <div
       style={{
@@ -180,6 +279,16 @@ export function Composer({
           paddingBottom: 10,
         }}
       >
+        {parked.length > 0 && (
+          <div
+            testId="parked-sends"
+            style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 8, paddingLeft: 10, paddingRight: 10 }}
+          >
+            {parked.map((entry) => (
+              <ParkedSendRow key={entry.id} id={entry.id} text={entry.text} onEdit={onEditParked} onSendNow={onSendParkedNow} />
+            ))}
+          </div>
+        )}
         {attachments.length > 0 && (
           <div
             testId="attachment-chips"
@@ -219,7 +328,20 @@ export function Composer({
             paddingRight: 10,
           }}
           onChange={(event) => onChange(event.value ?? '')}
-          onSubmit={(event) => send(event.value ?? value)}
+          onKeyDown={(event) => {
+            // Modified Enters carry queue/interrupt intents; plain Enter stays
+            // with the editor's submit path below.
+            if (event.key?.toLowerCase() !== 'enter') return
+            const gesture = classifyEnter(event.modifiers as KeyModifiers)
+            if (gesture === 'queue' && onQueue && !disabledReason) onQueue(gestureText(event).trim())
+            else if (gesture === 'interrupt' && onInterrupt && !disabledReason) onInterrupt(gestureText(event).trim())
+          }}
+          onSubmit={(event) => {
+            // Guard against the native editor submitting on a modified Enter;
+            // those keystrokes are owned by onKeyDown's gestures.
+            if (classifyEnter(event.modifiers as KeyModifiers) !== 'send') return
+            send(gestureText(event))
+          }}
         />
         {attachNotice && (
           <text

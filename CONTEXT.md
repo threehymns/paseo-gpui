@@ -48,8 +48,19 @@ echoed by the daemon.
 
 **Pending send**:
 A user text queued optimistically before the daemon echoes it back. Echoes
-settle the queue head that matches, first-in-first-out.
+settle the queue head that matches, first-in-first-out. A send is **parked**
+while it sits above the composer without having been handed to the daemon; it
+can be edited back into the input or fired with "Send now".
 _Avoid_: seed, echo buffer
+
+**Send intent**:
+What the composer's send gesture means for the selected agent — a pure
+decision over (agent running?, gesture, configured behavior). Enter **steers**
+a running agent: the text rides its active turn rather than starting a fresh
+one. An **interrupt** gesture stops the active turn first, then delivers the
+text as a new message. Cmd/Ctrl+Enter parks the text instead. Idle or
+disconnected agents behave as if every gesture were a plain send.
+_Avoid_: mode, strategy
 
 **Conversation**:
 Everything seen for one selected agent: its transcript plus connection state
