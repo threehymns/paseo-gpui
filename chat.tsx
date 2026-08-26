@@ -302,7 +302,8 @@ export function ChatApp() {
    * Receives clipboard contents once a runtime bridge offers them: raster image
    * files become chips, everything else falls through as normal text. Bound via
    * the composer's onPastePayload contract until @gpuix exposes paste events;
-   * the composer's paste watchdog covers the interim with an inline notice.
+   * note its editor consumes Ctrl+V natively, so failed image pastes never
+   * even reach JS as keystrokes.
    */
   const offerPaste = (payload: PastePayload) => {
     const { appendText, plan } = planPaste(payload)
@@ -467,7 +468,6 @@ export function ChatApp() {
           onRemoveAttachment={(id) => setDraftImages((prev) => removeAttachment(prev, id))}
           onAttach={() => void pickAttachments()}
           onPastePayload={offerPaste}
-          onPasteBlocked={() => setAttachNotice({ text: 'Pasting images needs a newer app runtime.', tone: 'warn' })}
           attachNotice={attachNotice}
         />
         <FooterBar
