@@ -43,7 +43,7 @@ import { C, CONTENT_MAX_WIDTH, SIDEBAR_WIDTH } from './theme'
 import { Sidebar, Header, CenterMessage, agentStatusColor, daemonHost, type RowActionRef, type RowActionVerb } from './chrome'
 import { Transcript } from './transcript'
 import { ModelPicker, OptionPicker, modeOptions, thinkingOptions } from './pickers'
-import { Composer, ConfigNotice, FooterBar } from './composer'
+import { Composer, ConfigNotice, FooterBar, TracksRow } from './composer'
 import { useAgentConversation } from './conversation'
 import { useAgentPermissions } from './permissions'
 import { useDraftConfig } from './draft-config'
@@ -201,6 +201,14 @@ export function ChatApp() {
   const deleteAgentRow = (id: string) => runRowAction('delete', id, () => daemon.deleteAgent(id))
   const renameAgentRow = (id: string, name: string) =>
     runRowAction('rename', id, () => daemon.updateAgent(id, { name }))
+  /** Archives a finished subagent's child agent from the tracks row. */
+  const archiveSubagent = async (id: string) => {
+    try {
+      await daemon.archiveAgent(id)
+    } catch (err) {
+      setCreateError(errorMessage(err))
+    }
+  }
 
   // Chip values for an active agent come from the live agent; the draft stays
   // authoritative only while no agent is selected.
@@ -491,6 +499,11 @@ export function ChatApp() {
           </div>
         )}
         {editingLive && live.notice && <ConfigNotice notice={live.notice} />}
+        <TracksRow
+          turns={turns}
+          onOpenAgent={setActiveId}
+          onArchiveAgent={archiveSubagent}
+        />
         <Composer
           value={draft}
           onChange={(next) => {

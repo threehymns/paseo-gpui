@@ -84,6 +84,17 @@ _Avoid_: settings, preferences
 The draft input area with its config chips, used both to create an agent and
 to send follow-up prompts to the active one.
 
+**Tracks row**:
+A compact row above the composer surfacing live work as pills, each folded
+from the transcript's turns. The **Tasks pill** summarizes the latest todo
+snapshot (completed of total, plus the in-progress item). The **Subagents
+pill** counts subagent calls by state and offers detach-to-view for a running
+one and archive-finished for completed ones. The **DiffStat pill** shows the
+adds/deletes accumulated across edit turns and opens the Changes surface —
+rendered only while that surface exists, hidden otherwise. A pill with
+nothing to say is never rendered.
+_Avoid_: status bar, toolbar
+
 **Workspace**:
 A directory an agent can run in, listed by the daemon. A **worktree** is a git
 worktree variant of one.
