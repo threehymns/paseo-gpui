@@ -17,6 +17,7 @@ import type { PaseoAgentConfig, PaseoClient } from '@getpaseo/client'
 import type { DaemonClient } from '@getpaseo/client/internal/daemon-client'
 import {
   DAEMON_URL,
+  applyAgentPage,
   applyAgentUpdate,
   basename,
   createDaemonClient,
@@ -24,7 +25,6 @@ import {
   errorMessage,
   findModel,
   isArchived,
-  sortAgents,
   type AgentEntry,
   type ConnStatus,
   type ProviderEntry,
@@ -88,7 +88,10 @@ function useDaemon(): DaemonView {
       const filter = { includeArchived: true }
       await client.agents.list({ scope: 'active', filter, sort, subscribe: {} })
       const page = await client.agents.list({ scope: 'active', filter, sort })
-      if (!disposed) setAgents(sortAgents(page.entries.map((entry) => entry.agent)))
+      // Merge, never replace: subscription updates may have advanced entries
+      // while the page was in flight, and a wholesale swap would replay their
+      // older snapshots over fresher truth.
+      if (!disposed) setAgents((prev) => applyAgentPage(prev, page.entries.map((entry) => entry.agent)))
 
       const snapshot =
         (await client.providers.waitForReady({ timeoutMs: 30_000 }).catch(() => null)) ??
