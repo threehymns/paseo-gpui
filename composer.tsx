@@ -2,11 +2,16 @@
  * The composer: draft textarea with chips, plus the workspace footer bar.
  */
 
-import React, { useMemo } from 'react'
+import React, { useEffect, useMemo, useRef } from 'react'
 import { Icon, IconButton, StatusDot, type IconName } from './chrome'
 import { OptionPicker } from './pickers'
 import { basename } from './paseo'
-import type { ImageAttachment, PastePayload } from './attachments'
+import {
+  isPasteAccelerator,
+  PASTE_ECHO_WINDOW_MS,
+  type ImageAttachment,
+  type PastePayload,
+} from './attachments'
 import type { ProviderNotice } from './live-config'
 import { C, CHAT_THEME, CONTENT_MAX_WIDTH } from './theme'
 
@@ -144,9 +149,28 @@ export function Composer({
    * a runtime bridge offers them; raster images become chips, text falls through.
    */
   onPastePayload?: (payload: PastePayload) => void
+  /**
+   * Called when a paste keystroke got no editor echo: the clipboard held
+   * something (an image) the native editor cannot insert, so the UI must say
+   * so instead of staying silent.
+   */
+  onPasteBlocked?: () => void
   attachNotice?: { text: string; tone: 'warn' | 'danger' } | null
 }) {
   const ready = value.trim().length > 0 && !disabledReason
+
+  // The native editor echoes text pastes as a change event; an image on the
+  // clipboard produces silence. Arm a short watchdog on the paste accelerator
+  // and report a blocked paste only if no echo lands.
+  const pasteWatchRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const disarmPasteWatch = () => {
+    if (pasteWatchRef.current !== null) {
+      clearTimeout(pasteWatchRef.current)
+      pasteWatchRef.current = null
+    }
+  }
+  useEffect(() => disarmPasteWatch, [])
+
   const send = (text: string) => {
     const next = text.trim()
     if (!next || disabledReason) return
@@ -218,7 +242,18 @@ export function Composer({
             paddingLeft: 10,
             paddingRight: 10,
           }}
-          onChange={(event) => onChange(event.value ?? '')}
+          onChange={(event) => {
+            disarmPasteWatch()
+            onChange(event.value ?? '')
+          }}
+          onKeyDown={(event) => {
+            if (!isPasteAccelerator(event)) return
+            disarmPasteWatch()
+            pasteWatchRef.current = setTimeout(() => {
+              pasteWatchRef.current = null
+              onPasteBlocked?.()
+            }, PASTE_ECHO_WINDOW_MS)
+          }}
           onSubmit={(event) => send(event.value ?? value)}
         />
         {attachNotice && (

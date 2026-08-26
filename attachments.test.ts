@@ -1,11 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 import {
   MAX_ATTACHMENT_BYTES,
+  PASTE_ECHO_WINDOW_MS,
   RASTER_IMAGE_EXTENSIONS,
   addAttachment,
   getFileExtension,
   getRasterImageMimeTypeFromPath,
   imagePickerDialogOptions,
+  isPasteAccelerator,
   planAttachments,
   planPaste,
   removeAttachment,
@@ -76,6 +78,27 @@ describe('paste classification', () => {
     })
     expect(out.appendText).toBeNull()
     expect(out.plan!.notice).toContain('notes.pdf')
+  })
+})
+
+describe('paste accelerator matching', () => {
+  test('matches Cmd+V on macOS and Ctrl+V elsewhere, ignoring extra modifiers', () => {
+    expect(isPasteAccelerator({ key: 'v', modifiers: { cmd: true } })).toBe(true)
+    expect(isPasteAccelerator({ key: 'v', modifiers: { ctrl: true } })).toBe(true)
+    expect(isPasteAccelerator({ key: 'V', modifiers: { cmd: true, shift: true } })).toBe(true)
+  })
+
+  test('plain typing, other shortcuts, and modifierless keys are not pastes', () => {
+    expect(isPasteAccelerator({ key: 'v' })).toBe(false)
+    expect(isPasteAccelerator({ key: 'v', modifiers: {} })).toBe(false)
+    expect(isPasteAccelerator({ key: 'c', modifiers: { cmd: true } })).toBe(false)
+    expect(isPasteAccelerator({ modifiers: { cmd: true } })).toBe(false)
+    expect(isPasteAccelerator({})).toBe(false)
+  })
+
+  test('the echo watchdog window is short enough to feel instant', () => {
+    expect(PASTE_ECHO_WINDOW_MS).toBeGreaterThan(0)
+    expect(PASTE_ECHO_WINDOW_MS).toBeLessThanOrEqual(250)
   })
 })
 

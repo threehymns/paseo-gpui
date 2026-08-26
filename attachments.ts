@@ -102,6 +102,22 @@ export function planPaste(payload: PastePayload): PastePlan {
   return { appendText: null, plan: planAttachments(payload.files) }
 }
 
+// ---- paste accelerator -----------------------------------------------------
+
+/** How long the editor has to echo a paste as a change before it counts as blocked. */
+export const PASTE_ECHO_WINDOW_MS = 150
+
+/**
+ * Whether a key event is the paste accelerator: Cmd+V on macOS, Ctrl+V
+ * elsewhere. Extra modifiers (e.g. shift) are ignored.
+ */
+export function isPasteAccelerator(event: {
+  key?: string | null
+  modifiers?: { cmd?: boolean | null; ctrl?: boolean | null; shift?: boolean | null } | null
+}): boolean {
+  return event.key?.toLowerCase() === 'v' && Boolean(event.modifiers?.cmd || event.modifiers?.ctrl)
+}
+
 // ---- size validation -------------------------------------------------------
 
 export function tooLargeNotice(name: string): string {

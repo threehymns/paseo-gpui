@@ -301,7 +301,8 @@ export function ChatApp() {
   /**
    * Receives clipboard contents once a runtime bridge offers them: raster image
    * files become chips, everything else falls through as normal text. Bound via
-   * the composer's onPastePayload contract until @gpuix exposes paste events.
+   * the composer's onPastePayload contract until @gpuix exposes paste events;
+   * the composer's paste watchdog covers the interim with an inline notice.
    */
   const offerPaste = (payload: PastePayload) => {
     const { appendText, plan } = planPaste(payload)
@@ -313,7 +314,7 @@ export function ChatApp() {
     if (disabledReason) return
     const picked = await openImagePicker()
     if (picked === null) {
-      setAttachNotice({ text: 'Picking files needs a native dialog; paste an image instead.', tone: 'warn' })
+      setAttachNotice({ text: 'Picking files needs a native dialog; attaching images is not supported yet.', tone: 'warn' })
       return
     }
     if (picked.length > 0) offerImages(picked)
@@ -466,6 +467,7 @@ export function ChatApp() {
           onRemoveAttachment={(id) => setDraftImages((prev) => removeAttachment(prev, id))}
           onAttach={() => void pickAttachments()}
           onPastePayload={offerPaste}
+          onPasteBlocked={() => setAttachNotice({ text: 'Pasting images needs a newer app runtime.', tone: 'warn' })}
           attachNotice={attachNotice}
         />
         <FooterBar
