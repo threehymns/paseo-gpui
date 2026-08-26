@@ -69,6 +69,8 @@ type StreamEvent = PaseoAgentStream['event']
 export type TimelineItem = Extract<StreamEvent, { type: 'timeline' }>['item']
 type ToolCallItem = Extract<TimelineItem, { type: 'tool_call' }>
 export type ToolCallDetail = ToolCallItem['detail']
+/** Token/cost accounting the daemon streams for one agent's session. */
+export type AgentUsage = NonNullable<AgentEntry['lastUsage']>
 
 // ---- permissions ------------------------------------------------------------
 

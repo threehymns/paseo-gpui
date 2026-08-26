@@ -6,8 +6,10 @@ import React, { useMemo } from 'react'
 import { Icon, IconButton, StatusDot, type IconName } from './chrome'
 import { OptionPicker } from './pickers'
 import { basename } from './paseo'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@gpuix/react'
 import type { ImageAttachment, PastePayload } from './attachments'
 import type { ProviderNotice } from './live-config'
+import { type ContextMeter, type MeterTone } from './usage'
 import { C, CHAT_THEME, CONTENT_MAX_WIDTH } from './theme'
 
 const NOTICE_COLORS: Record<ProviderNotice['type'], string> = {
@@ -117,6 +119,62 @@ function RoundButton({
   )
 }
 
+const METER_COLORS: Record<MeterTone, string> = {
+  neutral: C.secondary,
+  amber: C.warn,
+  red: C.danger,
+}
+
+/**
+ * A ring gauge as an inline SVG string for the native `svg` element: a faint
+ * track plus an arc starting at 12 o'clock covering `fraction` of the circle
+ * (the r=15.9155 trick makes the circumference exactly 100).
+ */
+function meterRingSvg(fraction: number, color: string): string {
+  const arc = Math.max(0, Math.min(1, fraction)) * 100
+  return [
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 36">',
+    `<circle cx="18" cy="18" r="15.9155" fill="none" stroke="${C.overlayStrong}" stroke-width="4"/>`,
+    `<circle cx="18" cy="18" r="15.9155" fill="none" stroke="${color}" stroke-width="4"`,
+    'stroke-linecap="round" stroke-dasharray="' + arc + ' ' + (100 - arc) + '" transform="rotate(-90 18 18)"/>',
+    '</svg>',
+  ].join(' ')
+}
+
+/** The context-window meter ring with its hover breakdown. */
+function UsageRing({ meter }: { meter: ContextMeter }) {
+  const color = METER_COLORS[meter.tone]
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <div testId="context-meter" style={{ display: 'flex', cursor: 'default' }}>
+          <svg src={meterRingSvg(meter.fraction, color)} style={{ width: 16, height: 16 }} />
+        </div>
+      </TooltipTrigger>
+      <TooltipContent side="top" sideOffset={6}>
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 2,
+            padding: 8,
+            backgroundColor: C.raised,
+            borderWidth: 1,
+            borderColor: C.borderStrong,
+            borderRadius: 10,
+          }}
+        >
+          {meter.lines.map((line) => (
+            <text key={line} style={{ fontSize: 12, lineHeight: 16, color: C.secondary, whiteSpace: 'nowrap' }}>
+              {line}
+            </text>
+          ))}
+        </div>
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
 export function Composer({
   value,
   onChange,
@@ -128,6 +186,7 @@ export function Composer({
   onAttach,
   onPastePayload,
   attachNotice,
+  usageMeter = null,
 }: {
   value: string
   onChange: (next: string) => void
@@ -145,6 +204,8 @@ export function Composer({
    */
   onPastePayload?: (payload: PastePayload) => void
   attachNotice?: { text: string; tone: 'warn' | 'danger' } | null
+  /** Context-window meter ring; hidden entirely when there is no usage data. */
+  usageMeter?: ContextMeter | null
 }) {
   const ready = value.trim().length > 0 && !disabledReason
   const send = (text: string) => {
@@ -261,6 +322,7 @@ export function Composer({
         >
           {chips}
           <div style={{ flexGrow: 1 }} />
+          {usageMeter && <UsageRing meter={usageMeter} />}
           <RoundButton
             testId="attach"
             icon="image"

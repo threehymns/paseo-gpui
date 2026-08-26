@@ -47,6 +47,7 @@ import { Composer, ConfigNotice, FooterBar } from './composer'
 import { useAgentConversation } from './conversation'
 import { useAgentPermissions } from './permissions'
 import { useDraftConfig } from './draft-config'
+import { contextMeter } from './usage'
 import { liveTruth, useLiveAgentConfig, type DaemonTruth, type ProviderNotice } from './live-config'
 
 // ---- daemon hooks ----------------------------------------------------------
@@ -220,6 +221,20 @@ export function ChatApp() {
   const { entry: providerOfModel, model: modelDef } = useMemo(
     () => findModel(providers, modelValue),
     [providers, modelValue],
+  )
+
+  // The meter reads the live stream's usage, falling back to the directory
+  // snapshot until the first event lands; the window size falls back to the
+  // selected model's catalog value when usage omits it.
+  const sessionUsage = conversation.usage ?? activeEntry?.lastUsage ?? null
+  const usageMeter = useMemo(
+    () =>
+      contextMeter({
+        usedTokens: sessionUsage?.contextWindowUsedTokens,
+        maxTokens: sessionUsage?.contextWindowMaxTokens ?? modelDef?.contextWindowMaxTokens ?? null,
+        costUsd: sessionUsage?.totalCostUsd,
+      }),
+    [sessionUsage, modelDef],
   )
 
   useEffect(() => {
@@ -505,6 +520,7 @@ export function ChatApp() {
           onAttach={() => void pickAttachments()}
           onPastePayload={offerPaste}
           attachNotice={attachNotice}
+          usageMeter={usageMeter}
         />
         <FooterBar
           cwd={activeEntry?.cwd ?? cwd}
