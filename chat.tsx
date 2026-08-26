@@ -25,6 +25,10 @@ import {
   findModel,
   isArchived,
   sortAgents,
+  statusBucket,
+  STATUS_BUCKET_LABELS,
+  visibleAgents,
+  modelChoices,
   type AgentEntry,
   type ConnStatus,
   type ProviderEntry,
@@ -48,6 +52,10 @@ import { useAgentConversation } from './conversation'
 import { useAgentPermissions } from './permissions'
 import { useDraftConfig } from './draft-config'
 import { liveTruth, useLiveAgentConfig, type DaemonTruth, type ProviderNotice } from './live-config'
+import { ActionRegistry } from './actions'
+import { isPaletteToggle } from './palette'
+import { CommandPaletteView, useContributeActions } from './palette-view'
+import { dispatchWindowEvent, useWindowEvent } from './global-events'
 
 // ---- daemon hooks ----------------------------------------------------------
 
@@ -156,6 +164,15 @@ export function ChatApp() {
   const [pendingSeed, setPendingSeed] = useState<{ agentId: string; text: string; images: ImageAttachment[] } | null>(
     null,
   )
+
+  // The command palette and its catalog. ⌘K/Ctrl+K toggles; the palette's own
+  // handlers exist only while it is mounted.
+  const registry = useState(() => new ActionRegistry())[0]
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const closePalette = () => setPaletteOpen(false)
+  useWindowEvent((event) => {
+    if (event.eventType === 'keyDown' && isPaletteToggle(event)) setPaletteOpen((open) => !open)
+  })
 
   const { config: draftConfig, setModel: setDraftModel, setThinking: setDraftThinking, setMode: setDraftMode } =
     useDraftConfig(providers)
@@ -379,6 +396,119 @@ export function ChatApp() {
   const onThinkingChange = editingLive ? live.setThinking : setDraftThinking
   const onModeChange = editingLive ? live.setMode : setDraftMode
 
+  // Palette contributions: static commands, then live mirrors of the agent
+  // directory, workspace list, and provider catalog. Each batch retires when
+  // its inputs change, so the registry never goes stale.
+  useContributeActions(
+    registry,
+    () => [
+      {
+        id: 'app.new-task',
+        title: 'New Task',
+        section: 'actions',
+        keywords: 'compose new agent',
+        run: () => {
+          setActiveId(null)
+          setCreateError(null)
+          setPaletteOpen(false)
+        },
+      },
+      {
+        id: 'app.toggle-sidebar',
+        title: 'Toggle Sidebar',
+        section: 'actions',
+        run: () => setCollapsed((prev) => !prev),
+      },
+    ],
+    [],
+  )
+  useContributeActions(
+    registry,
+    () =>
+      visibleAgents(agents, false).map((entry) => ({
+        id: `agent.${entry.id}`,
+        title: displayName(entry),
+        section: 'agents' as const,
+        hint: basename(entry.cwd),
+        keywords: STATUS_BUCKET_LABELS[statusBucket(entry)],
+        checked: entry.id === activeId,
+        run: () => {
+          setActiveId(entry.id)
+          setCreateError(null)
+          setPaletteOpen(false)
+        },
+      })),
+    [agents, activeId],
+  )
+  useContributeActions(
+    registry,
+    () => {
+      // The workspace footer locks while an agent owns the conversation.
+      if (activeEntry) return []
+      return [...new Set([process.cwd(), ...cwdOptions])].map((dir) => ({
+        id: `workspace.${dir}`,
+        title: basename(dir),
+        section: 'workspaces' as const,
+        hint: dir,
+        checked: dir === cwd,
+        run: () => {
+          setCwd(dir)
+          setPaletteOpen(false)
+        },
+      }))
+    },
+    [activeEntry, cwdOptions, cwd],
+  )
+  useContributeActions(
+    registry,
+    () =>
+      modelChoices(chipProviders).map((choice) => ({
+        id: `model.${choice.value}`,
+        title: choice.label,
+        section: 'model' as const,
+        hint: choice.providerLabel,
+        keywords: `${choice.modelId} ${choice.providerLabel}`,
+        checked: choice.value === modelValue,
+        run: () => {
+          onModelChange(choice.value)
+          setPaletteOpen(false)
+        },
+      })),
+    [chipProviders, modelValue],
+  )
+  useContributeActions(
+    registry,
+    () =>
+      thinkingOptions(modelDef).map((option) => ({
+        id: `thinking.${option.id}`,
+        title: option.label,
+        section: 'thinking' as const,
+        hint: option.description,
+        checked: option.id === thinkingId,
+        run: () => {
+          onThinkingChange(option.id)
+          setPaletteOpen(false)
+        },
+      })),
+    [modelDef, thinkingId],
+  )
+  useContributeActions(
+    registry,
+    () =>
+      modeOptions(providerOfModel?.modes).map((option) => ({
+        id: `mode.${option.id}`,
+        title: option.label,
+        section: 'mode' as const,
+        hint: option.description,
+        checked: option.id === modeId,
+        run: () => {
+          onModeChange(option.id)
+          setPaletteOpen(false)
+        },
+      })),
+    [providerOfModel, modeId],
+  )
+
   const draftChips = (
     <>
       <ModelPicker providers={chipProviders} value={modelValue} onChange={onModelChange} />
@@ -407,6 +537,7 @@ export function ChatApp() {
       style={{
         display: 'flex',
         flexDirection: 'row',
+        position: 'relative',
         width: '100%',
         height: '100%',
         fontFamily: '.SystemUIFont',
@@ -523,6 +654,7 @@ export function ChatApp() {
                   : C.danger
           }
         />
+        {paletteOpen && <CommandPaletteView registry={registry} onClose={closePalette} />}
       </div>
     </div>
   )
@@ -542,5 +674,6 @@ if (isEntryPoint) {
     windowBackground: 'blurred',
     trafficLightX: 16,
     trafficLightY: 17,
+    onEvent: dispatchWindowEvent,
   })
 }

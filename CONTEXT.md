@@ -72,3 +72,18 @@ to send follow-up prompts to the active one.
 **Workspace**:
 A directory an agent can run in, listed by the daemon. A **worktree** is a git
 worktree variant of one.
+
+**Action registry**:
+The shared catalog of runnable actions (id, title, section, run, enabled):
+static commands plus live contributions mirroring the agent directory,
+workspace list, and provider catalog. Contributions register in batches and
+retire through their disposer when their inputs change. The command palette
+consumes it today; keybindings and settings rebinding reuse the same catalog.
+_Avoid_: command list, menu items
+
+**Command palette**:
+The ⌘K/Ctrl+K overlay over the action registry, searched across fixed
+sections (Actions, Workspaces, Agents, Model, Reasoning, Access). Typing
+fuzzy-filters and ranks within each section; arrows wrap; Enter runs;
+Esc or clicking outside closes. Its handlers exist only while it is mounted.
+_Avoid_: spotlight, quick open
