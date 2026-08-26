@@ -101,6 +101,41 @@ export function repoKeyOf(status: RepoStatus): string {
   return status.repoRoot ?? status.cwd
 }
 
+// ---- response freshness -------------------------------------------------------
+
+/**
+ * Orders racing writes for one workspace's status. Fetches overlap — an
+ * invalidation refetch can start while an earlier lookup is still in flight —
+ * and daemon pushes land between them, so a response applies only while it is
+ * still the freshest snapshot for its workspace; anything newer that left home
+ * or arrived first retires it.
+ */
+export interface StatusFreshness {
+  /** Records a fetch leaving; returns the token its response will be judged by. */
+  issue(cwd: string): number
+  /** A push arrived: every snapshot issued before it is obsolete. */
+  recordPush(cwd: string): void
+  /** Whether a response may still apply: nothing fresher has left or landed first. */
+  canApply(cwd: string, token: number): boolean
+}
+
+export function createStatusFreshness(): StatusFreshness {
+  const generation: Record<string, number> = {}
+  const generationOf = (cwd: string) => generation[cwd] ?? 0
+  return {
+    issue(cwd) {
+      generation[cwd] = generationOf(cwd) + 1
+      return generation[cwd]
+    },
+    recordPush(cwd) {
+      generation[cwd] = generationOf(cwd) + 1
+    },
+    canApply(cwd, token) {
+      return generationOf(cwd) === token
+    },
+  }
+}
+
 // ---- store ------------------------------------------------------------------
 
 export type CheckoutPhase = 'loading' | 'ready' | 'failed'
@@ -196,16 +231,22 @@ export function useCheckoutStatus(daemon: DaemonClient, cwd: string | null): Che
   const stateRef = useRef(state)
   stateRef.current = state
   const disposedRef = useRef(false)
+  const freshness = useRef(createStatusFreshness())
 
   const fetchOne = useCallback(
     (target: string) => {
+      // A response applies only while nothing fresher left home or landed
+      // first — a superseded snapshot never overwrites newer daemon truth.
+      const token = freshness.current.issue(target)
       void daemon
         .getCheckoutStatus(target)
         .then((payload) => {
-          if (!disposedRef.current) setState((prev) => reduceCheckout(prev, { type: 'statusArrived', payload }))
+          if (disposedRef.current || !freshness.current.canApply(target, token)) return
+          setState((prev) => reduceCheckout(prev, { type: 'statusArrived', payload }))
         })
         .catch(() => {
-          if (!disposedRef.current) setState((prev) => reduceCheckout(prev, { type: 'fetchFailed', cwd: target }))
+          if (disposedRef.current || !freshness.current.canApply(target, token)) return
+          setState((prev) => reduceCheckout(prev, { type: 'fetchFailed', cwd: target }))
         })
     },
     [daemon],
@@ -218,6 +259,7 @@ export function useCheckoutStatus(daemon: DaemonClient, cwd: string | null): Che
 
     // Pushes are the only writer on the happy path; each carries a full fold.
     const unsubPush = daemon.on('checkout_status_update', (message) => {
+      freshness.current.recordPush(message.payload.cwd)
       setState((prev) => reduceCheckout(prev, { type: 'statusArrived', payload: message.payload }))
     })
 

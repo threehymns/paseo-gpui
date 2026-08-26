@@ -3,6 +3,7 @@ import {
   branchLabel,
   checkoutEnabled,
   CHECKOUT_FEATURE_FLAG,
+  createStatusFreshness,
   foldCheckoutStatus,
   formatAheadBehind,
   initialCheckout,
@@ -174,6 +175,42 @@ describe('status store', () => {
       { type: 'reset' },
     ])
     expect(state.entries).toEqual({})
+  })
+})
+
+describe('response freshness', () => {
+  test('a response applies while it is still the freshest thing in flight', () => {
+    const freshness = createStatusFreshness()
+    const token = freshness.issue('/repo')
+    expect(freshness.canApply('/repo', token)).toBe(true)
+  })
+
+  test('a newer fetch makes an older response obsolete, whichever lands first', () => {
+    const freshness = createStatusFreshness()
+    const stale = freshness.issue('/repo')
+    const fresh = freshness.issue('/repo')
+    // The older request resolving last must not overwrite fresh truth.
+    expect(freshness.canApply('/repo', stale)).toBe(false)
+    expect(freshness.canApply('/repo', fresh)).toBe(true)
+  })
+
+  test('a push arriving after a fetch left makes that snapshot obsolete', () => {
+    const freshness = createStatusFreshness()
+    const token = freshness.issue('/repo')
+    freshness.recordPush('/repo')
+    expect(freshness.canApply('/repo', token)).toBe(false)
+    // A fetch issued after the push is judged against the newer generation.
+    const next = freshness.issue('/repo')
+    expect(freshness.canApply('/repo', next)).toBe(true)
+  })
+
+  test('workspaces are judged independently', () => {
+    const freshness = createStatusFreshness()
+    const a = freshness.issue('/repo-a')
+    const b = freshness.issue('/repo-b')
+    freshness.recordPush('/repo-a')
+    expect(freshness.canApply('/repo-a', a)).toBe(false)
+    expect(freshness.canApply('/repo-b', b)).toBe(true)
   })
 })
 
