@@ -4,6 +4,7 @@
  */
 
 import React, { memo, useEffect, useState } from 'react'
+import type { EventPayload } from '@gpuix/native'
 import { Icon, StatusDot, type IconName } from './chrome'
 import { SafeMdxContent } from './mdx'
 import {
@@ -641,12 +642,102 @@ export interface PendingPermission {
   responding: boolean
 }
 
+/** One stop on the prompt outline rail: a user turn's row index and prompt. */
+interface RailStop {
+  index: number
+  text: string
+}
+
+/**
+ * Ticks along the right edge, one per user turn. Hovering previews the prompt;
+ * clicking jumps to that row. The rail itself never blocks the transcript —
+ * only its ticks take hits.
+ */
+function OutlineRail({ stops, onJump }: { stops: RailStop[]; onJump: (index: number) => void }) {
+  const [hovered, setHovered] = useState<number | null>(null)
+  return (
+    <div
+      testId="outline-rail"
+      style={{
+        position: 'absolute',
+        top: 16,
+        bottom: 16,
+        right: 5,
+        width: 14,
+        display: 'flex',
+        flexDirection: 'column',
+        justifyContent: 'space-evenly',
+        alignItems: 'center',
+        pointerEvents: 'none',
+      }}
+    >
+      {stops.map((stop, position) => (
+        <div
+          key={stop.index}
+          testId="rail-tick"
+          onMouseEnter={() => setHovered(position)}
+          onMouseLeave={() => setHovered(null)}
+          onClick={() => onJump(stop.index)}
+          style={{
+            width: 8,
+            height: 3,
+            borderRadius: 2,
+            backgroundColor: hovered === position ? C.accent : C.borderStrong,
+            cursor: 'pointer',
+            pointerEvents: 'auto',
+            position: 'relative',
+            hover: { backgroundColor: C.accent },
+          }}
+        >
+          {hovered === position && (
+            <div
+              testId="rail-preview"
+              style={{
+                position: 'absolute',
+                top: -9,
+                right: 20,
+                width: 264,
+                backgroundColor: C.raised,
+                borderWidth: 1,
+                borderColor: C.borderStrong,
+                borderRadius: 8,
+                paddingTop: 7,
+                paddingBottom: 7,
+                paddingLeft: 10,
+                paddingRight: 10,
+                pointerEvents: 'auto',
+              }}
+            >
+              <text
+                style={{
+                  fontSize: 12,
+                  lineHeight: 17,
+                  color: C.secondary,
+                  minWidth: 0,
+                  maxWidth: '100%',
+                  lineClamp: 6,
+                }}
+              >
+                {stop.text}
+              </text>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export const Transcript = memo(function Transcript({
   turns,
   permissions,
   onRespond,
   onEditQueued,
   listRef,
+  detached,
+  onScroll,
+  onJumpToBottom,
+  onJumpToTurn,
 }: {
   turns: Turn[]
   permissions?: PendingPermission[]
@@ -654,52 +745,92 @@ export const Transcript = memo(function Transcript({
   /** Pulls a queued (optimistic) send back into the composer for editing. */
   onEditQueued?: (queuedId: string) => void
   listRef?: React.Ref<{ id: number }>
+  /** True while auto-follow is detached: incoming turns don't move the view. */
+  detached?: boolean
+  onScroll?: (event: EventPayload) => void
+  /** Jump-to-bottom click while detached; also re-attaches following. */
+  onJumpToBottom?: () => void
+  /** Outline-rail click: scroll the given row into view. */
+  onJumpToTurn?: (index: number) => void
 }) {
   const cards = permissions ?? []
   const rowCount = turns.length + cards.length
+  // One tick per user turn, positioned by row index so a click lands exactly.
+  const railStops: RailStop[] = []
+  turns.forEach((turn, index) => {
+    if (turn.kind === 'user') railStops.push({ index, text: turn.text })
+  })
   return (
-    <virtual-list
-      ref={listRef}
-      overdraw={240}
-      estimatedItemHeight={220}
-      style={{ flexGrow: 1, minHeight: 0, width: '100%' }}
-    >
-      {/* Tool rows key by call id so a row's local expansion state follows its
-          turn through replace-in-place streaming updates and later insertions. */}
-      {turns.map((turn, index) => (
-        <TranscriptRow
-          key={turn.kind === 'tool' ? `tool:${turn.callId}` : `t${index}`}
-          first={index === 0}
-          last={index === rowCount - 1}
+    <div style={{ position: 'relative', flexGrow: 1, minHeight: 0, width: '100%' }}>
+      <virtual-list
+        ref={listRef}
+        overdraw={240}
+        estimatedItemHeight={220}
+        style={{ width: '100%', height: '100%' }}
+        onScroll={onScroll}
+      >
+        {/* Tool rows key by call id so a row's local expansion state follows its
+            turn through replace-in-place streaming updates and later insertions. */}
+        {turns.map((turn, index) => (
+          <TranscriptRow
+            key={turn.kind === 'tool' ? `tool:${turn.callId}` : `t${index}`}
+            first={index === 0}
+            last={index === rowCount - 1}
+          >
+            {turn.kind === 'user' && (
+              <UserTurn
+                text={turn.text}
+                queuedId={turn.queuedId}
+                onEdit={onEditQueued}
+              />
+            )}
+            {turn.kind === 'assistant' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, width: '100%', minWidth: 0 }}>
+                <SafeMdxContent source={turn.source} />
+                <AssistantFooter turn={turn} />
+              </div>
+            )}
+            {turn.kind === 'reasoning' && <ReasoningRow turn={turn} />}
+            {turn.kind === 'tool' && <ToolRow turn={turn} />}
+            {turn.kind === 'todo' && <TodoBlock items={turn.items} />}
+            {turn.kind === 'error' && <ErrorBlock text={turn.text} />}
+          </TranscriptRow>
+        ))}
+        {cards.map(({ entry, responding }, index) => (
+          <TranscriptRow
+            key={`p${entry.agentId}:${entry.requestId}`}
+            first={turns.length === 0 && index === 0}
+            last={index === rowCount - 1}
+          >
+            <PermissionCard entry={entry} responding={responding} onRespond={onRespond} />
+          </TranscriptRow>
+        ))}
+      </virtual-list>
+      {detached && rowCount > 0 && (
+        <div
+          testId="scroll-to-bottom"
+          onClick={onJumpToBottom}
+          style={{
+            position: 'absolute',
+            right: 16,
+            bottom: 18,
+            width: 30,
+            height: 30,
+            borderRadius: 15,
+            backgroundColor: C.raised,
+            borderWidth: 1,
+            borderColor: C.borderStrong,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            cursor: 'pointer',
+            hover: { backgroundColor: C.overlayStrong },
+          }}
         >
-          {turn.kind === 'user' && (
-            <UserTurn
-              text={turn.text}
-              queuedId={turn.queuedId}
-              onEdit={onEditQueued}
-            />
-          )}
-          {turn.kind === 'assistant' && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, width: '100%', minWidth: 0 }}>
-              <SafeMdxContent source={turn.source} />
-              <AssistantFooter turn={turn} />
-            </div>
-          )}
-          {turn.kind === 'reasoning' && <ReasoningRow turn={turn} />}
-          {turn.kind === 'tool' && <ToolRow turn={turn} />}
-          {turn.kind === 'todo' && <TodoBlock items={turn.items} />}
-          {turn.kind === 'error' && <ErrorBlock text={turn.text} />}
-        </TranscriptRow>
-      ))}
-      {cards.map(({ entry, responding }, index) => (
-        <TranscriptRow
-          key={`p${entry.agentId}:${entry.requestId}`}
-          first={turns.length === 0 && index === 0}
-          last={index === rowCount - 1}
-        >
-          <PermissionCard entry={entry} responding={responding} onRespond={onRespond} />
-        </TranscriptRow>
-      ))}
-    </virtual-list>
+          <Icon name="chevronDown" size={14} color={C.secondary} />
+        </div>
+      )}
+      {railStops.length > 0 && <OutlineRail stops={railStops} onJump={onJumpToTurn ?? (() => {})} />}
+    </div>
   )
 })
