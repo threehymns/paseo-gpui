@@ -45,6 +45,7 @@ import { Transcript } from './transcript'
 import { ModelPicker, OptionPicker, modeOptions, thinkingOptions } from './pickers'
 import { Composer, ConfigNotice, FooterBar } from './composer'
 import { useAgentConversation } from './conversation'
+import { toMentionEntries, type MentionSource } from './mentions'
 import { useAgentPermissions } from './permissions'
 import { useDraftConfig } from './draft-config'
 import { liveTruth, useLiveAgentConfig, type DaemonTruth, type ProviderNotice } from './live-config'
@@ -379,6 +380,27 @@ export function ChatApp() {
   const onThinkingChange = editingLive ? live.setThinking : setDraftThinking
   const onModeChange = editingLive ? live.setMode : setDraftMode
 
+  // `@` completion lists the selected agent's workspace, or the chosen one for
+  // a new task. Daemon errors degrade to no suggestions inside the hook.
+  const mentionCwd = activeEntry?.cwd ?? cwd
+  const mentionSource = useMemo<MentionSource>(
+    () => ({
+      cwd: mentionCwd,
+      fetch: async (query) => {
+        const payload = await daemon.getDirectorySuggestions({
+          query,
+          cwd: mentionCwd,
+          limit: 24,
+          includeFiles: true,
+          includeDirectories: true,
+          matchMode: 'fuzzy',
+        })
+        return toMentionEntries(payload, mentionCwd)
+      },
+    }),
+    [daemon, mentionCwd],
+  )
+
   const draftChips = (
     <>
       <ModelPicker providers={chipProviders} value={modelValue} onChange={onModelChange} />
@@ -505,6 +527,7 @@ export function ChatApp() {
           onAttach={() => void pickAttachments()}
           onPastePayload={offerPaste}
           attachNotice={attachNotice}
+          mentionSource={mentionSource}
         />
         <FooterBar
           cwd={activeEntry?.cwd ?? cwd}

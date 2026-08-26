@@ -6,6 +6,7 @@ import React, { useMemo } from 'react'
 import { Icon, IconButton, StatusDot, type IconName } from './chrome'
 import { OptionPicker } from './pickers'
 import { basename } from './paseo'
+import { useMentionCompletions, type MentionEntry, type MentionSource } from './mentions'
 import type { ImageAttachment, PastePayload } from './attachments'
 import type { ProviderNotice } from './live-config'
 import { C, CHAT_THEME, CONTENT_MAX_WIDTH } from './theme'
@@ -117,6 +118,96 @@ function RoundButton({
   )
 }
 
+/** Last path segment; directories keep their trailing slash as a kind cue. */
+function mentionRowLabel(entry: MentionEntry): string {
+  const name = basename(entry.path)
+  return entry.kind === 'directory' ? `${name}/` : name
+}
+
+/** Directory containing the entry, '' at the workspace root. */
+function mentionRowHint(path: string): string {
+  const cut = path.lastIndexOf('/')
+  return cut < 0 ? '' : path.slice(0, cut)
+}
+
+/** Suggestion rows floating above the draft input while a mention is live. */
+function MentionList({
+  completions,
+  onPick,
+}: {
+  completions: ReturnType<typeof useMentionCompletions>
+  onPick: (entry: MentionEntry) => void
+}) {
+  return (
+    <div
+      testId="mention-list"
+      style={{
+        position: 'absolute',
+        bottom: '100%',
+        left: 0,
+        right: 0,
+        marginBottom: 6,
+        display: 'flex',
+        flexDirection: 'column',
+        paddingTop: 4,
+        paddingBottom: 4,
+        paddingLeft: 4,
+        paddingRight: 4,
+        backgroundColor: C.raised,
+        borderWidth: 1,
+        borderColor: C.borderStrong,
+        borderRadius: 12,
+      }}
+    >
+      {completions.entries.map((entry, index) => {
+        const highlighted = index === completions.highlight
+        const hint = mentionRowHint(entry.path)
+        return (
+          <div
+            key={entry.path}
+            testId={`mention-option-${index}`}
+            onClick={() => onPick(entry)}
+            style={{
+              display: 'flex',
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 8,
+              paddingTop: 5,
+              paddingBottom: 5,
+              paddingLeft: 8,
+              paddingRight: 8,
+              borderRadius: 7,
+              cursor: 'pointer',
+              backgroundColor: highlighted ? '#404040' : C.raised,
+              hover: { backgroundColor: '#404040' },
+            }}
+          >
+            <Icon
+              name={entry.kind === 'directory' ? 'folder' : 'file'}
+              size={13}
+              color={entry.kind === 'directory' ? C.accent : C.tertiary}
+            />
+            <text
+              style={{
+                fontSize: 12.5,
+                fontWeight: highlighted ? 600 : 500,
+                color: C.text,
+                whiteSpace: 'nowrap',
+                textOverflow: 'ellipsis',
+                minWidth: 0,
+                flexGrow: 1,
+              }}
+            >
+              {mentionRowLabel(entry)}
+            </text>
+            {hint && <text style={{ fontSize: 11, color: C.ghost, flexShrink: 0 }}>{hint}</text>}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 export function Composer({
   value,
   onChange,
@@ -128,6 +219,7 @@ export function Composer({
   onAttach,
   onPastePayload,
   attachNotice,
+  mentionSource,
 }: {
   value: string
   onChange: (next: string) => void
@@ -145,12 +237,19 @@ export function Composer({
    */
   onPastePayload?: (payload: PastePayload) => void
   attachNotice?: { text: string; tone: 'warn' | 'danger' } | null
+  /** Workspace listing that feeds `@` completion; null or absent disables it. */
+  mentionSource?: MentionSource | null
 }) {
   const ready = value.trim().length > 0 && !disabledReason
   const send = (text: string) => {
     const next = text.trim()
     if (!next || disabledReason) return
     onSend(next)
+  }
+  const completions = useMentionCompletions(mentionSource ?? null, value)
+  const pick = (entry: MentionEntry) => {
+    const next = completions.draftFor(entry)
+    if (next != null) onChange(next)
   }
   return (
     <div
@@ -172,6 +271,7 @@ export function Composer({
           width: '100%',
           maxWidth: CONTENT_MAX_WIDTH,
           overflow: 'visible',
+          position: 'relative',
           backgroundColor: C.composer,
           borderRadius: 13,
           borderWidth: 1,
@@ -180,6 +280,7 @@ export function Composer({
           paddingBottom: 10,
         }}
       >
+        {completions.open && <MentionList completions={completions} onPick={pick} />}
         {attachments.length > 0 && (
           <div
             testId="attachment-chips"
@@ -219,7 +320,22 @@ export function Composer({
             paddingRight: 10,
           }}
           onChange={(event) => onChange(event.value ?? '')}
-          onSubmit={(event) => send(event.value ?? value)}
+          onKeyDown={(event) => {
+            if (!completions.open) return
+            if (event.key === 'down') completions.moveHighlight(1)
+            else if (event.key === 'up') completions.moveHighlight(-1)
+            else if (event.key === 'escape') completions.dismiss()
+          }}
+          onSubmit={(event) => {
+            const highlighted = completions.entries[completions.highlight]
+            // Enter completes the live mention instead of sending; normal
+            // typing and submits are untouched while the list is closed.
+            if (completions.open && highlighted) {
+              pick(highlighted)
+              return
+            }
+            send(event.value ?? value)
+          }}
         />
         {attachNotice && (
           <text
