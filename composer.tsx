@@ -132,6 +132,7 @@ export function Composer({
   onRemoveAttachment,
   onAttach,
   onPastePayload,
+  onPasteBlocked,
   attachNotice,
 }: {
   value: string
