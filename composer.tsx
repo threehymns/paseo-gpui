@@ -127,7 +127,7 @@ export function Composer({
   onRemoveAttachment,
   onAttach,
   onPastePayload,
-  attachNotice,
+  transientNotice,
 }: {
   value: string
   onChange: (next: string) => void
@@ -144,7 +144,7 @@ export function Composer({
    * a runtime bridge offers them; raster images become chips, text falls through.
    */
   onPastePayload?: (payload: PastePayload) => void
-  attachNotice?: { text: string; tone: 'warn' | 'danger' } | null
+  transientNotice?: { text: string; tone: 'warn' | 'danger' } | null
 }) {
   const ready = value.trim().length > 0 && !disabledReason
   const send = (text: string) => {
@@ -221,18 +221,18 @@ export function Composer({
           onChange={(event) => onChange(event.value ?? '')}
           onSubmit={(event) => send(event.value ?? value)}
         />
-        {attachNotice && (
+        {transientNotice && (
           <text
-            testId="attach-notice"
+            testId="composer-notice"
             style={{
               fontSize: 12,
-              color: attachNotice.tone === 'danger' ? C.danger : C.warn,
+              color: transientNotice.tone === 'danger' ? C.danger : C.warn,
               paddingLeft: 10,
               paddingRight: 10,
               paddingTop: 6,
             }}
           >
-            {attachNotice.text}
+            {transientNotice.text}
           </text>
         )}
         {disabledReason && (

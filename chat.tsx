@@ -46,6 +46,7 @@ import { ModelPicker, OptionPicker, modeOptions, thinkingOptions } from './picke
 import { Composer, ConfigNotice, FooterBar } from './composer'
 import { useAgentConversation } from './conversation'
 import { useAgentPermissions } from './permissions'
+import { nativeOpenFileBridge, requestOpenFile } from './open-file'
 import { useDraftConfig } from './draft-config'
 import { liveTruth, useLiveAgentConfig, type DaemonTruth, type ProviderNotice } from './live-config'
 
@@ -151,7 +152,7 @@ export function ChatApp() {
   const [collapsed, setCollapsed] = useState(false)
   const [draft, setDraft] = useState('')
   const [draftImages, setDraftImages] = useState<ImageAttachment[]>([])
-  const [attachNotice, setAttachNotice] = useState<{ text: string; tone: 'warn' | 'danger' } | null>(null)
+  const [transientNotice, setTransientNotice] = useState<{ text: string; tone: 'warn' | 'danger' } | null>(null)
   const [createError, setCreateError] = useState<string | null>(null)
   const [pendingSeed, setPendingSeed] = useState<{ agentId: string; text: string; images: ImageAttachment[] } | null>(
     null,
@@ -271,7 +272,7 @@ export function ChatApp() {
     setDraft('')
     setDraftImages([])
     setCreateError(null)
-    setAttachNotice(null)
+    setTransientNotice(null)
     if (activeId) {
       void conversation.send(text, stagedImages).then((ok) => {
         // A failed send restores the exact previous chips next to the text.
@@ -311,16 +312,31 @@ export function ChatApp() {
 
   // Brief inline notices dismiss themselves.
   useEffect(() => {
-    if (!attachNotice) return
-    const timer = setTimeout(() => setAttachNotice(null), 4_000)
+    if (!transientNotice) return
+    const timer = setTimeout(() => setTransientNotice(null), 4_000)
     return () => clearTimeout(timer)
-  }, [attachNotice])
+  }, [transientNotice])
+
+  /**
+   * Routes transcript open-file requests through the shared seam. With no
+   * native bridge yet the request degrades to a visible notice instead of
+   * dying silently; a bridge failure names its error the same way.
+   */
+  const openFile = (absolutePath: string) => {
+    void requestOpenFile(nativeOpenFileBridge(), absolutePath).then((outcome) => {
+      if (outcome.status === 'opened') return
+      setTransientNotice({
+        text: outcome.status === 'unavailable' ? outcome.notice : outcome.message,
+        tone: outcome.status === 'unavailable' ? 'warn' : 'danger',
+      })
+    })
+  }
 
   /** Stages an attach plan's chips and surfaces its inline notice, if any. */
   const applyPlan = (plan: AttachmentPlan) => {
     if (plan.images.length > 0) setDraftImages((prev) => [...prev, ...plan.images])
     if (plan.notice) {
-      setAttachNotice({ text: plan.notice, tone: plan.images.length === 0 ? 'danger' : 'warn' })
+      setTransientNotice({ text: plan.notice, tone: plan.images.length === 0 ? 'danger' : 'warn' })
     }
   }
 
@@ -347,7 +363,7 @@ export function ChatApp() {
     if (disabledReason) return
     const picked = await openImagePicker()
     if (picked === null) {
-      setAttachNotice({ text: 'Picking files needs a native dialog; attaching images is not supported yet.', tone: 'warn' })
+      setTransientNotice({ text: 'Picking files needs a native dialog; attaching images is not supported yet.', tone: 'warn' })
       return
     }
     if (picked.length > 0) offerImages(picked)
@@ -361,7 +377,7 @@ export function ChatApp() {
     setDraft(entry.text)
     setDraftImages(entry.images)
     setCreateError(null)
-    setAttachNotice(null)
+    setTransientNotice(null)
   }
 
   const title = activeId ? (activeEntry ? displayName(activeEntry) : 'Agent') : 'New Task'
@@ -480,6 +496,8 @@ export function ChatApp() {
             permissions={permissions.cards}
             onRespond={permissions.respond}
             onEditQueued={editQueued}
+            workspaceRoot={activeEntry?.cwd}
+            onOpenFile={openFile}
             listRef={listRef}
           />
         )}
@@ -504,7 +522,7 @@ export function ChatApp() {
           onRemoveAttachment={(id) => setDraftImages((prev) => removeAttachment(prev, id))}
           onAttach={() => void pickAttachments()}
           onPastePayload={offerPaste}
-          attachNotice={attachNotice}
+          transientNotice={transientNotice}
         />
         <FooterBar
           cwd={activeEntry?.cwd ?? cwd}

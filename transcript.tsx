@@ -4,8 +4,9 @@
  */
 
 import React, { memo, useState } from 'react'
-import { Icon, StatusDot, type IconName } from './chrome'
+import { Icon, IconButton, StatusDot, type IconName } from './chrome'
 import { SafeMdxContent } from './mdx'
+import { resolveWorkspaceFile } from './open-file'
 import {
   diffStats,
   permissionDisplay,
@@ -15,6 +16,7 @@ import {
   type PermissionKind,
   type PermissionResponse,
   type ReasoningTurn,
+  type ToolCallDetail,
   type ToolDetailPart,
   type ToolName,
   type Turn,
@@ -39,6 +41,13 @@ function oneLine(text: string | undefined, limit = 140): string | undefined {
   if (!text) return undefined
   const flat = text.replace(/\s+/g, ' ').trim()
   return flat.length > limit ? `${flat.slice(0, limit - 1)}…` : flat || undefined
+}
+
+/** The workspace path a tool call operated on, for tools that touch one file. */
+function toolFilePath(detail: ToolCallDetail): string | undefined {
+  return detail.type === 'read' || detail.type === 'edit' || detail.type === 'write'
+    ? detail.filePath
+    : undefined
 }
 
 function UserTurn({
@@ -173,7 +182,15 @@ function ToolDetailBody({ parts, patch }: { parts: ToolDetailPart[]; patch?: str
   )
 }
 
-function ToolRow({ turn }: { turn: Extract<Turn, { kind: 'tool' }> }) {
+function ToolRow({
+  turn,
+  workspaceRoot,
+  onOpenFile,
+}: {
+  turn: Extract<Turn, { kind: 'tool' }>
+  workspaceRoot?: string
+  onOpenFile?: (absolutePath: string) => void
+}) {
   const icon = TOOL_ICONS[turn.tool]
   const detail = oneLine(turn.detail)
   // Expansion is component-local on purpose: replace-in-place updates to the
@@ -183,31 +200,27 @@ function ToolRow({ turn }: { turn: Extract<Turn, { kind: 'tool' }> }) {
   const parts = turn.structured ? toolDetailParts(turn.structured) : []
   const stats = turn.patch ? diffStats(turn.patch) : undefined
   const expandable = parts.length > 0 || Boolean(turn.patch)
-  return (
+  const openable =
+    workspaceRoot && onOpenFile && turn.structured
+      ? resolveWorkspaceFile(workspaceRoot, toolFilePath(turn.structured) ?? '')
+      : null
+  const header = (
     <div
       style={{
         display: 'flex',
-        flexDirection: 'column',
+        flexDirection: 'row',
+        alignItems: 'center',
         gap: 8,
-        width: '100%',
         minWidth: 0,
+        flexGrow: 1,
+        borderRadius: 6,
+        ...(expandable
+          ? { cursor: 'pointer' as const, hover: { backgroundColor: C.overlay } }
+          : {}),
       }}
+      onClick={expandable ? () => setExpanded((value) => !value) : undefined}
     >
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'row',
-          alignItems: 'center',
-          gap: 8,
-          minWidth: 0,
-          borderRadius: 6,
-          ...(expandable
-            ? { cursor: 'pointer' as const, hover: { backgroundColor: C.overlay } }
-            : {}),
-        }}
-        onClick={expandable ? () => setExpanded((value) => !value) : undefined}
-      >
-        <div style={{ width: 16, height: 16, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ width: 16, height: 16, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           {turn.status === 'running' ? (
             <StatusDot color={C.running} size={7} />
           ) : turn.status === 'failed' ? (
@@ -250,6 +263,30 @@ function ToolRow({ turn }: { turn: Extract<Turn, { kind: 'tool' }> }) {
         )}
         {turn.status === 'failed' && (
           <text style={{ fontSize: 12, color: C.danger, flexShrink: 0 }}>failed</text>
+        )}
+      </div>
+  )
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+        width: '100%',
+        minWidth: 0,
+      }}
+    >
+      <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8, width: '100%', minWidth: 0 }}>
+        {header}
+        {/* Sits outside the expandable header so opening a file never toggles
+            the row; unresolvable paths get no button, not a dead one. */}
+        {openable?.kind === 'file' && (
+          <IconButton
+            icon="folder"
+            size={12}
+            testId={`open-file:${turn.callId}`}
+            onClick={() => onOpenFile!(openable.absolutePath)}
+          />
         )}
       </div>
       {expanded && expandable && <ToolDetailBody parts={parts} patch={turn.patch} />}
@@ -554,6 +591,8 @@ export const Transcript = memo(function Transcript({
   permissions,
   onRespond,
   onEditQueued,
+  onOpenFile,
+  workspaceRoot,
   listRef,
 }: {
   turns: Turn[]
@@ -561,6 +600,10 @@ export const Transcript = memo(function Transcript({
   onRespond?: (request: PermissionEntry['request'], response: PermissionResponse) => void
   /** Pulls a queued (optimistic) send back into the composer for editing. */
   onEditQueued?: (queuedId: string) => void
+  /** Opens a transcript-referenced file; supplied alongside `workspaceRoot`. */
+  onOpenFile?: (absolutePath: string) => void
+  /** Root that markdown code spans and tool paths resolve against. */
+  workspaceRoot?: string
   listRef?: React.Ref<{ id: number }>
 }) {
   const cards = permissions ?? []
@@ -587,9 +630,13 @@ export const Transcript = memo(function Transcript({
               onEdit={onEditQueued}
             />
           )}
-          {turn.kind === 'assistant' && <SafeMdxContent source={turn.source} />}
+          {turn.kind === 'assistant' && (
+            <SafeMdxContent source={turn.source} workspaceRoot={workspaceRoot} onOpenFile={onOpenFile} />
+          )}
           {turn.kind === 'reasoning' && <ReasoningRow turn={turn} />}
-          {turn.kind === 'tool' && <ToolRow turn={turn} />}
+          {turn.kind === 'tool' && (
+            <ToolRow turn={turn} workspaceRoot={workspaceRoot} onOpenFile={onOpenFile} />
+          )}
           {turn.kind === 'todo' && <TodoBlock items={turn.items} />}
           {turn.kind === 'error' && <ErrorBlock text={turn.text} />}
         </TranscriptRow>
