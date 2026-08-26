@@ -306,6 +306,24 @@ describe('preview bodies', () => {
     )
   })
 
+  test('intraword underscores are identifiers, not emphasis', () => {
+    expect(previewText('edited my_project_id today')).toBe('edited my_project_id today')
+    expect(previewText('a__b__c stays whole')).toBe('a__b__c stays whole')
+  })
+
+  test('underscore emphasis still strips at word boundaries', () => {
+    expect(previewText('_soft_ and __firm__')).toBe('soft and firm')
+    expect(previewText('path (_relative_) here')).toBe('path (relative) here')
+  })
+
+  test('asterisk emphasis strips anywhere, as CommonMark allows', () => {
+    expect(previewText('run a*b*c')).toBe('run abc')
+  })
+
+  test('strikethrough keeps its content', () => {
+    expect(previewText('~~abandoned~~ done')).toBe('abandoned done')
+  })
+
   test('links keep their label and drop the target', () => {
     expect(previewText('See [the docs](https://example.com/a) for details.')).toBe(
       'See the docs for details.',

@@ -50,9 +50,14 @@ export function previewText(markdown: string): string {
     .replace(/^\s{0,3}>\s?/gm, ' ')
     .replace(/^\s*([-+*]|\d+[.)])\s+/gm, ' ')
     .replace(/^\s{0,3}(?:[-*_]\s*){3,}$/gm, ' ')
-    .replace(/(\*\*|__)(.*?)\1/g, '$2')
-    .replace(/~~(.*?)~~/g, '$2')
-    .replace(/(\*|_)(.*?)\1/g, '$2')
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    // Underscore emphasis follows CommonMark's intraword rule: snake_case
+    // identifiers keep their underscores; only boundary-delimited _spans_
+    // strip.
+    .replace(/(?<!\w)__([^_]+?)__(?!\w)/g, '$1')
+    .replace(/~~(.*?)~~/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/(?<!\w)_([^_]+?)_(?!\w)/g, '$1')
     .replace(/`([^`]*)`/g, '$1')
     .replace(/\|/g, ' ')
     .replace(/\s+/g, ' ')
