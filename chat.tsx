@@ -176,21 +176,24 @@ export function ChatApp() {
   const renameAgentRow = (id: string, name: string) =>
     runRowAction('rename', id, () => daemon.updateAgent(id, { name }))
 
-  // The composer's stop control: enabled only while the open agent runs. While
-  // the cancel request is in flight the control reflects that so double-clicks
-  // are unambiguous; directory truth (the status flip) arrives by subscription.
+  // The composer's stop control: enabled only while the open agent runs. From
+  // click until the cancellation is confirmed — the agent leaving running via
+  // the directory subscription — the control reflects that so double-clicks are
+  // unambiguous.
   const agentRunning = activeEntry?.status === 'running'
-  const [canceling, setCanceling] = useState(false)
-  useEffect(() => setCanceling(false), [activeId])
+  const [stopping, setStopping] = useState(false)
+  useEffect(() => setStopping(false), [activeId])
+  useEffect(() => {
+    if (!agentRunning) setStopping(false)
+  }, [agentRunning])
   const stopAgent = async () => {
-    if (!activeId || !agentRunning || canceling) return
-    setCanceling(true)
+    if (!activeId || !agentRunning || stopping) return
+    setStopping(true)
     try {
       await daemon.cancelAgent(activeId)
     } catch (err) {
+      setStopping(false)
       setCreateError(errorMessage(err))
-    } finally {
-      setCanceling(false)
     }
   }
 
@@ -420,7 +423,7 @@ export function ChatApp() {
           disabledReason={disabledReason}
           chips={draftChips}
           canStop={agentRunning}
-          stopping={canceling}
+          stopping={stopping}
           onStop={() => void stopAgent()}
         />
         <FooterBar

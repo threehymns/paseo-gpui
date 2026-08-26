@@ -132,9 +132,16 @@ export function Composer({
         >
           {chips}
           <div style={{ flexGrow: 1 }} />
-          {stopping && (
-            <text style={{ fontSize: 12, color: C.running, flexShrink: 0, marginRight: 4 }}>
-              Canceling agent…
+          {canStop && (
+            <text
+              style={{
+                fontSize: 12,
+                color: stopping ? C.running : C.tertiary,
+                flexShrink: 0,
+                marginRight: 6,
+              }}
+            >
+              {stopping ? 'Canceling agent…' : 'Stop agent'}
             </text>
           )}
           {canStop && (
@@ -154,7 +161,11 @@ export function Composer({
                 hover: stopping ? undefined : { opacity: 0.85 },
               }}
             >
-              <Icon name="square" size={11} color="#FFFFFF" />
+              {stopping ? (
+                <StatusDot color="#FFFFFF" size={8} />
+              ) : (
+                <Icon name="square" size={11} color="#FFFFFF" />
+              )}
             </div>
           )}
           <div
