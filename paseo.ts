@@ -108,7 +108,15 @@ export type ReasoningTurn = {
 
 export type Turn =
   | { kind: 'user'; text: string; queued?: boolean; queuedId?: string }
-  | { kind: 'assistant'; source: string; messageId?: string }
+  | {
+      kind: 'assistant'
+      source: string
+      messageId?: string
+      /** Epoch ms of the first delta; present once any text has streamed in. */
+      startedAt?: number
+      /** Epoch ms proving the turn finished; absent while still working. */
+      endedAt?: number
+    }
   | ReasoningTurn
   | { kind: 'todo'; items: { text: string; completed: boolean; active: boolean }[] }
   | {
@@ -220,6 +228,22 @@ export function sealTrailingReasoning(turns: Turn[], at: number): Turn[] {
   return [...turns.slice(0, -1), sealed]
 }
 
+/**
+ * Freezes a still-working trailing assistant turn the same way: any later
+ * timeline item proves the turn finished, so its end is stamped at that item's
+ * arrival — not at whenever sealing happens to run.
+ */
+export function sealTrailingAssistant(turns: Turn[], at: number): Turn[] {
+  const last = turns[turns.length - 1]
+  if (last?.kind !== 'assistant' || last.endedAt != null || last.startedAt == null) return turns
+  return [...turns.slice(0, -1), { ...last, endedAt: at }]
+}
+
+/** Both trailing-tail seals; the tail is reasoning or assistant, never both. */
+export function sealTrailingTurns(turns: Turn[], at: number): Turn[] {
+  return sealTrailingAssistant(sealTrailingReasoning(turns, at), at)
+}
+
 /** Human-readable wall-clock length, e.g. "47s", "1m 30s", "2h 5m". */
 export function formatDuration(durationMs: number): string {
   if (!Number.isFinite(durationMs) || durationMs < 0) return '0s'
@@ -238,6 +262,30 @@ export function formatDuration(durationMs: number): string {
 /** Collapsed-row label for a reasoning block: live progress until sealed, then its frozen duration. */
 export function reasoningLabel(turn: ReasoningTurn): string {
   return turn.durationMs == null ? 'Thinking…' : `Thought for ${formatDuration(turn.durationMs)}`
+}
+
+export type AssistantTurn = Extract<Turn, { kind: 'assistant' }>
+
+/**
+ * Footer label for an assistant turn. While it works, the elapsed time so far
+ * (`now` minus its start); once finished, "Worked for {duration}". Undefined —
+ * no footer at all — when the turn never recorded a start.
+ */
+export function workedForLabel(turn: AssistantTurn, now: number): string | undefined {
+  if (turn.startedAt == null) return undefined
+  if (turn.endedAt == null) return formatDuration(Math.max(0, now - turn.startedAt))
+  return `Worked for ${formatDuration(turn.endedAt - turn.startedAt)}`
+}
+
+/** Absolute clock time a finished turn completed; the hover swap for "Worked for". */
+export function completionTimestamp(endedAt: number): string {
+  return new Date(endedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}
+
+/** The markdown-rich content a copy button takes from a turn, if it produced any. */
+export function copyableText(turn: Turn): string | undefined {
+  const source = turn.kind === 'assistant' ? turn.source.trim() : undefined
+  return source || undefined
 }
 
 // ---- expanded tool detail ---------------------------------------------------
@@ -345,18 +393,30 @@ export function toolDetailParts(detail: ToolCallDetail): ToolDetailPart[] {
 export function applyTimelineItem(turns: Turn[], item: TimelineItem, at: number = Date.now()): Turn[] {
   switch (item.type) {
     case 'user_message':
-      return appendTurn(sealTrailingReasoning(turns, at), { kind: 'user', text: item.text })
+      return appendTurn(sealTrailingTurns(turns, at), { kind: 'user', text: item.text })
     case 'assistant_message': {
-      const base = sealTrailingReasoning(turns, at)
-      const last = base[base.length - 1]
+      // Merge before sealing: a follow-up delta continues the turn, it does not
+      // end it — and a finished turn never absorbs later text.
+      const last = turns[turns.length - 1]
       if (
         last?.kind === 'assistant' &&
+        last.endedAt == null &&
         (item.messageId == null || last.messageId == null || last.messageId === item.messageId)
       ) {
-        const merged: Turn = { kind: 'assistant', source: last.source + item.text, messageId: item.messageId ?? last.messageId }
-        return [...base.slice(0, -1), merged]
+        const merged: Turn = {
+          kind: 'assistant',
+          source: last.source + item.text,
+          messageId: item.messageId ?? last.messageId,
+          startedAt: last.startedAt ?? at,
+        }
+        return [...turns.slice(0, -1), merged]
       }
-      return appendTurn(base, { kind: 'assistant', source: item.text, messageId: item.messageId })
+      return appendTurn(sealTrailingTurns(turns, at), {
+        kind: 'assistant',
+        source: item.text,
+        messageId: item.messageId,
+        startedAt: at,
+      })
     }
     case 'reasoning': {
       const last = turns[turns.length - 1]
@@ -377,7 +437,7 @@ export function applyTimelineItem(turns: Turn[], item: TimelineItem, at: number 
         item.status === 'running' ? 'running' : item.status === 'completed' ? 'ok' : 'failed'
       const next: Turn = { kind: 'tool', callId: item.callId, ...toolMeta(item), structured: item.detail, status }
       if (index >= 0) return [...turns.slice(0, index), next, ...turns.slice(index + 1)]
-      return appendTurn(sealTrailingReasoning(turns, at), next)
+      return appendTurn(sealTrailingTurns(turns, at), next)
     }
     case 'todo': {
       const items = item.items.map((task, i) => ({
@@ -385,13 +445,13 @@ export function applyTimelineItem(turns: Turn[], item: TimelineItem, at: number 
         completed: task.completed || task.status === 'completed',
         active: task.status ? task.status === 'in_progress' : !task.completed && i === item.items.findIndex((t) => !t.completed),
       }))
-      const base = sealTrailingReasoning(turns, at)
+      const base = sealTrailingTurns(turns, at)
       const last = base[base.length - 1]
       if (last?.kind === 'todo') return [...base.slice(0, -1), { kind: 'todo', items }]
       return appendTurn(base, { kind: 'todo', items })
     }
     case 'error':
-      return appendTurn(sealTrailingReasoning(turns, at), { kind: 'error', text: item.message })
+      return appendTurn(sealTrailingTurns(turns, at), { kind: 'error', text: item.message })
     default:
       return turns
   }
@@ -404,7 +464,11 @@ export interface TimelineEntry {
 }
 
 export function buildTurns(entries: TimelineEntry[]): Turn[] {
-  return entries.reduce((turns, entry) => applyTimelineItem(turns, entry.item, entry.at), [] as Turn[])
+  const folded = entries.reduce((turns, entry) => applyTimelineItem(turns, entry.item, entry.at), [] as Turn[])
+  // A fetched timeline has no completion markers: the tail finished whenever
+  // the last entry arrived. Sealing there keeps reloads from faking a live clock.
+  const lastAt = entries[entries.length - 1]?.at
+  return lastAt == null ? folded : sealTrailingTurns(folded, lastAt)
 }
 
 // ---- permission cards -------------------------------------------------------

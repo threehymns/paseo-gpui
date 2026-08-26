@@ -3,15 +3,19 @@
  * pending permission cards appended after the conversation.
  */
 
-import React, { memo, useState } from 'react'
+import React, { memo, useEffect, useState } from 'react'
 import { Icon, StatusDot, type IconName } from './chrome'
 import { SafeMdxContent } from './mdx'
 import {
+  completionTimestamp,
+  copyableText,
   diffStats,
   permissionDisplay,
   permissionKindLabel,
   reasoningLabel,
   toolDetailParts,
+  workedForLabel,
+  type AssistantTurn,
   type PermissionKind,
   type PermissionResponse,
   type ReasoningTurn,
@@ -322,6 +326,94 @@ function ReasoningRow({ turn }: { turn: ReasoningTurn }) {
   )
 }
 
+/**
+ * The footer line under an assistant turn: elapsed time ticking each second
+ * while it works, "Worked for {duration}" once finished — swapping to the
+ * completion clock time on hover — and a copy affordance for its markdown,
+ * flashing ✓ on success. Absent entirely when the turn has neither timing nor
+ * anything copyable.
+ */
+function AssistantFooter({ turn }: { turn: AssistantTurn }) {
+  const working = turn.startedAt != null && turn.endedAt == null
+  // Component-local like ToolRow's expansion: replace-in-place streaming swaps
+  // the turn value but keeps this instance, so the ticker and flash survive.
+  const [, setTick] = useState(0)
+  const [hovered, setHovered] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const copyText = copyableText(turn)
+
+  useEffect(() => {
+    if (!working) return
+    const id = setInterval(() => setTick((value) => value + 1), 1_000)
+    return () => clearInterval(id)
+  }, [working])
+
+  useEffect(() => {
+    if (!copied) return
+    const timer = setTimeout(() => setCopied(false), 1_200)
+    return () => clearTimeout(timer)
+  }, [copied])
+
+  if (turn.startedAt == null && !copyText) return null
+
+  const copy = () => {
+    if (!copyText || copied) return
+    const clipboard = (navigator as { clipboard?: { writeText?: (text: string) => Promise<void> } }).clipboard
+    if (!clipboard?.writeText) return
+    clipboard.writeText(copyText).then(() => setCopied(true)).catch(() => {})
+  }
+
+  const finished = !working && turn.endedAt != null
+  const label = workedForLabel(turn, Date.now())
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 10,
+        marginTop: 2,
+        minWidth: 0,
+        height: 18,
+      }}
+    >
+      {label && (
+        <text
+          onMouseEnter={finished ? () => setHovered(true) : undefined}
+          onMouseLeave={finished ? () => setHovered(false) : undefined}
+          style={{ fontSize: 11.5, color: C.ghost, flexShrink: 0, userSelect: 'none' }}
+        >
+          {finished && hovered ? completionTimestamp(turn.endedAt!) : label}
+        </text>
+      )}
+      {copyText && (
+        <div
+          testId="copy-turn"
+          onClick={copy}
+          style={{
+            display: 'flex',
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 4,
+            flexShrink: 0,
+            cursor: 'pointer',
+            borderRadius: 5,
+            paddingLeft: 4,
+            paddingRight: 4,
+            paddingTop: 1,
+            paddingBottom: 1,
+            hover: copied ? undefined : { backgroundColor: C.overlay },
+          }}
+        >
+          <text style={{ fontSize: 11.5, color: copied ? C.ok : C.ghost, userSelect: 'none' }}>
+            {copied ? '✓ Copied' : 'Copy'}
+          </text>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function TodoBlock({ items }: { items: { text: string; completed: boolean; active: boolean }[] }) {
   return (
     <div
@@ -587,7 +679,12 @@ export const Transcript = memo(function Transcript({
               onEdit={onEditQueued}
             />
           )}
-          {turn.kind === 'assistant' && <SafeMdxContent source={turn.source} />}
+          {turn.kind === 'assistant' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, width: '100%', minWidth: 0 }}>
+              <SafeMdxContent source={turn.source} />
+              <AssistantFooter turn={turn} />
+            </div>
+          )}
           {turn.kind === 'reasoning' && <ReasoningRow turn={turn} />}
           {turn.kind === 'tool' && <ToolRow turn={turn} />}
           {turn.kind === 'todo' && <TodoBlock items={turn.items} />}

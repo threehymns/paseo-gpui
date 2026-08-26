@@ -35,6 +35,13 @@ expansion shows its patch as a diff. A reasoning turn stays collapsed until
 opened: while deltas stream it reads "Thinking…", and once anything proves
 thinking has stopped (the next appended item or the turn's end) its length is
 sealed from the delta timestamps and the row reads "Thought for <duration>".
+An assistant turn carries its own span: it starts at its first delta, and once
+anything proves it finished (the next appended item or turn completion) it is
+sealed at that moment — never at whenever sealing happens to run. Its footer
+ticks elapsed time each second while working, reads "Worked for <duration>"
+when done (swapping to the completion clock time on hover), and offers copying
+its markdown with a brief ✓ flash; turns with nothing copyable show no copy
+affordance.
 _Avoid_: message, item
 
 **Sealed**:

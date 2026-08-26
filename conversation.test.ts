@@ -129,6 +129,19 @@ describe('agent conversation', () => {
     expect(state.turns).toHaveLength(1)
   })
 
+  test('turnCompleted finishes a working assistant turn at the completion time', () => {
+    let state = reduceConversation(
+      initialConversation,
+      { type: 'timeline', item: { type: 'assistant_message', text: 'hi' }, at: 1_000 },
+    )
+    state = reduceConversation(state, { type: 'timeline', item: { type: 'assistant_message', text: ' there' }, at: 2_500 })
+    state = reduceConversation(state, { type: 'turnCompleted', at: 9_000 })
+    const said = state.turns[0] as { kind: string; startedAt?: number; endedAt?: number }
+    expect(said.kind).toBe('assistant')
+    expect(said.startedAt).toBe(1_000)
+    expect(said.endedAt).toBe(9_000)
+  })
+
   test('loadFailed marks the conversation errored instead of hanging on loading', () => {
     const state = run([{ type: 'loadFailed', error: new Error('archived') }])
     expect(state.status).toBe('error')
