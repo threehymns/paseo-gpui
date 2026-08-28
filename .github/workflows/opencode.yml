@@ -42,4 +42,4 @@ jobs:
           # block above.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          model: kilo/stealth/ox-alpha
+          model: kilo/minimax/minimax-m3:free
