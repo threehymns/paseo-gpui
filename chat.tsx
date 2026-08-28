@@ -227,8 +227,8 @@ export function ChatApp() {
     setViewing(null)
   }, [activeId])
   const subagentRows = useMemo(
-    () => selectTrackRows(subagents.state, agents, activeId),
-    [subagents.state, agents, activeId],
+    () => selectTrackRows(subagents.state, agents, activeId, subagents.enabled),
+    [subagents.state, subagents.enabled, agents, activeId],
   )
   const viewingRow = viewing
     ? subagentRows.find((row) => row.kind === viewing.kind && row.id === viewing.id) ?? null
@@ -251,8 +251,8 @@ export function ChatApp() {
   const detachSubagentRow = (id: string) => runRowAction('detach', id, () => daemon.detachAgent(id))
   // Both halves of the detach gate read the latest server_info snapshot; the
   // hook re-renders us on each server_info event so the read stays current.
-  const serverFeatures = daemon.getLastServerInfoMessage()?.features
-  const detachEnabled = providerSubagentsEnabled(serverFeatures) && serverFeatures?.agentDetach === true
+  const daemonFeatures = daemon.getLastServerInfoMessage()?.features
+  const detachEnabled = providerSubagentsEnabled(daemonFeatures) && daemonFeatures?.agentDetach === true
 
   // Chip values for an active agent come from the live agent; the draft stays
   // authoritative only while no agent is selected.

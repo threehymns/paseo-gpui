@@ -380,12 +380,15 @@ export function selectTrackRows(
   state: SubagentsState,
   agents: AgentEntry[],
   parentAgentId: string | null,
+  providerEnabled: boolean,
 ): SubagentRow[] {
   if (!parentAgentId) return []
   const managed = managedChildren(agents, parentAgentId).map(managedRow)
-  const provider = Object.entries(state.descriptors)
-    .filter(([key]) => key.startsWith(`${parentAgentId}\0`))
-    .map(([, descriptor]) => providerRow(descriptor))
+  const provider = providerEnabled
+    ? Object.entries(state.descriptors)
+        .filter(([key]) => key.startsWith(`${parentAgentId}\0`))
+        .map(([, descriptor]) => providerRow(descriptor))
+    : []
   return mergeRows(managed, provider)
 }
 

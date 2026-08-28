@@ -312,7 +312,7 @@ function SubagentRowItem({
 }
 
 /**
- * The read-only banner shown while a sub-agent's transcript occupies the main
+ * The read-only banner shown while a subagent's transcript occupies the main
  * area. It names what you are reading and is the way back to the parent.
  */
 export function SubagentViewerBar({
