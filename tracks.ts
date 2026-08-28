@@ -2,11 +2,14 @@
  * Tracks row derivations: compact summaries of live work, folded from the
  * transcript turns the transcript layer already owns.
  *
+ * The subagents pill is deliberately absent here — it reads the subagent
+ * store's `selectTrackRows` projection instead, never transcript turns.
+ *
  * Each function is pure over `Turn[]` and returns null when there is nothing
  * to show — a hidden pill, never a dead one.
  */
 
-import { diffStats, type DiffStats, type ToolStatus, type Turn } from './paseo'
+import { diffStats, type DiffStats, type Turn } from './paseo'
 
 /** Summary of the latest todo snapshot on the timeline. */
 export interface TasksTrack {
@@ -32,35 +35,6 @@ export function tasksTrack(turns: Turn[]): TasksTrack | null {
     completed: todo.items.filter((item) => item.completed).length,
     total: todo.items.length,
     ...(active ? { active: active.text } : {}),
-  }
-}
-
-/** One subagent dispatched on the timeline, identified by its tool call. */
-export interface SubagentRun {
-  callId: string
-  /** Child agent id once the daemon reports it; required to view or archive. */
-  childSessionId?: string
-  status: ToolStatus
-}
-
-/** Subagent calls bucketed by state; both lists keep dispatch order. */
-export interface SubagentsTrack {
-  running: SubagentRun[]
-  finished: SubagentRun[]
-}
-
-export function subagentsTrack(turns: Turn[]): SubagentsTrack | null {
-  const runs: SubagentRun[] = []
-  for (const turn of turns) {
-    if (turn.kind !== 'tool' || turn.tool !== 'subagent') continue
-    const child =
-      turn.structured?.type === 'sub_agent' ? turn.structured.childSessionId : undefined
-    runs.push({ callId: turn.callId, ...(child ? { childSessionId: child } : {}), status: turn.status })
-  }
-  if (runs.length === 0) return null
-  return {
-    running: runs.filter((run) => run.status === 'running'),
-    finished: runs.filter((run) => run.status !== 'running'),
   }
 }
 

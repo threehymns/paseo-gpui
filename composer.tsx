@@ -2,12 +2,12 @@
  * The composer: draft textarea with chips, plus the workspace footer bar.
  */
 
-import React, { useMemo, useState } from 'react'
+import React, { useMemo } from 'react'
 import { Icon, IconButton, StatusDot, type IconName } from './chrome'
 import { OptionPicker } from './pickers'
 import { basename } from './paseo'
 import type { Turn } from './paseo'
-import { changesTrack, subagentsTrack, tasksTrack } from './tracks'
+import { changesTrack, tasksTrack } from './tracks'
 import type { ImageAttachment, PastePayload } from './attachments'
 import type { ProviderNotice } from './live-config'
 import { C, CHAT_THEME, CONTENT_MAX_WIDTH } from './theme'
@@ -31,7 +31,7 @@ export function ConfigNotice({ notice }: { notice: ProviderNotice }) {
 
 // ---- tracks row -------------------------------------------------------------
 
-function Pill({
+export function Pill({
   testId,
   onClick,
   children,
@@ -64,7 +64,7 @@ function Pill({
 }
 
 /** A compact in-pill icon action; `busy` suspends it while its daemon call is in flight. */
-function PillAction({
+export function PillAction({
   testId,
   icon,
   busy,
@@ -97,53 +97,27 @@ function PillAction({
 }
 
 /**
- * The tracks row above the composer: live work at a glance as pills derived
- * from the transcript's folded turns — latest todo snapshot (Tasks), subagent
- * counts with detach/archive actions (Subagents), and accumulated edit totals
- * (DiffStat). The DiffStat pill renders only while a Changes surface exists
- * (`onOpenChanges`); the whole row disappears when nothing has to say.
+ * The tracks row above the composer: live work at a glance. The Tasks and
+ * DiffStat pills fold from the transcript's turns; the Subagents pill arrives
+ * as a slot reading the subagent store instead. The DiffStat pill renders only
+ * while a Changes surface exists (`onOpenChanges`); the whole row disappears
+ * when nothing has to say.
  */
 export function TracksRow({
   turns,
-  onOpenAgent,
-  onArchiveAgent,
+  subagents,
   onOpenChanges,
 }: {
   turns: Turn[]
-  /** Detach-to-view: opens an agent id (a running subagent's child session). */
-  onOpenAgent?: (agentId: string) => void
-  /** Archives a finished subagent's child agent. */
-  onArchiveAgent?: (agentId: string) => Promise<unknown>
+  /** The Subagents pill element, rendered between Tasks and DiffStat. */
+  subagents?: React.ReactNode
   /** Present only while a Changes surface exists to open. */
   onOpenChanges?: () => void
 }) {
   const tasks = tasksTrack(turns)
-  const subagents = subagentsTrack(turns)
   const changes = changesTrack(turns)
 
-  // Archive finished subagents one by one; directory truth rides the subscription.
-  const [archiving, setArchiving] = useState(false)
-  const archivable = (subagents?.finished ?? []).filter((run) => run.childSessionId != null)
-  const detachable = (subagents?.running ?? []).find((run) => run.childSessionId != null)
-
-  if (!tasks && !subagents && !(changes && onOpenChanges)) return null
-
-  const archiveFinished = async () => {
-    if (!onArchiveAgent || archiving || archivable.length === 0) return
-    setArchiving(true)
-    try {
-      for (const run of archivable) await onArchiveAgent(run.childSessionId!)
-    } finally {
-      setArchiving(false)
-    }
-  }
-
-  const subagentLabel = [
-    subagents && subagents.running.length > 0 ? `${subagents.running.length} running` : null,
-    subagents && subagents.finished.length > 0 ? `${subagents.finished.length} done` : null,
-  ]
-    .filter(Boolean)
-    .join(' · ') || null
+  if (!tasks && !(changes && onOpenChanges) && !subagents) return null
 
   return (
     <div style={{ display: 'flex', flexDirection: 'row', justifyContent: 'center', paddingBottom: 4 }}>
@@ -183,29 +157,7 @@ export function TracksRow({
             )}
           </Pill>
         )}
-        {subagents && subagentLabel && (
-          <Pill testId="tracks-subagents">
-            <Icon name="sparkle" size={12} color={subagents.running.length > 0 ? C.running : C.tertiary} />
-            <text style={{ fontSize: 12, fontWeight: 500, color: C.secondary, whiteSpace: 'nowrap', flexShrink: 0 }}>
-              {subagentLabel}
-            </text>
-            {detachable && onOpenAgent && (
-              <PillAction
-                testId="tracks-subagent-detach"
-                icon="panelRight"
-                onClick={() => onOpenAgent(detachable.childSessionId!)}
-              />
-            )}
-            {archivable.length > 0 && onArchiveAgent && (
-              <PillAction
-                testId="tracks-subagent-archive"
-                icon="archive"
-                busy={archiving}
-                onClick={() => void archiveFinished()}
-              />
-            )}
-          </Pill>
-        )}
+        {subagents}
         {changes && onOpenChanges && (
           <Pill testId="tracks-diffstat" onClick={onOpenChanges}>
             <Icon name="gitBranch" size={12} color={C.tertiary} />

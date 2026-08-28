@@ -1,31 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import { applyTimelineItem, buildTurns, type TimelineEntry, type TimelineItem } from './paseo'
-import { changesTrack, subagentsTrack, tasksTrack } from './tracks'
+import { changesTrack, tasksTrack } from './tracks'
 
 const timed = (item: TimelineItem, at?: number): TimelineEntry => ({ item, at })
 
 const todo = (items: { text: string; completed?: boolean; status?: string }[]): TimelineItem =>
   ({ type: 'todo', items }) as never
-
-const subagentCall = (over: {
-  callId?: string
-  status?: 'running' | 'completed' | 'failed'
-  childSessionId?: string
-}): TimelineItem =>
-  ({
-    type: 'tool_call',
-    callId: over.callId ?? 'sa1',
-    name: 'launch_subagent',
-    detail: {
-      type: 'sub_agent',
-      subAgentType: 'explore',
-      description: 'find callers',
-      ...(over.childSessionId ? { childSessionId: over.childSessionId } : {}),
-      log: '',
-    },
-    status: over.status ?? 'running',
-    error: null,
-  }) as never
 
 // ---- tasks pill ------------------------------------------------------------
 
@@ -64,54 +44,6 @@ describe('tasksTrack', () => {
 
   test('is null for an empty latest snapshot', () => {
     expect(tasksTrack(buildTurns([timed(todo([]))]))).toBeNull()
-  })
-})
-
-// ---- subagents pill ---------------------------------------------------------
-
-describe('subagentsTrack', () => {
-  test('buckets subagent calls into running and finished by status', () => {
-    const turns = buildTurns([
-      timed({ type: 'user_message', text: 'go' }),
-      timed(subagentCall({ callId: 'sa1', childSessionId: 'child-1' })),
-      timed(subagentCall({ callId: 'sa2', status: 'completed', childSessionId: 'child-2' })),
-      timed(subagentCall({ callId: 'sa3', status: 'completed' })),
-    ])
-    const track = subagentsTrack(turns)
-    expect(track?.running.map((run) => run.callId)).toEqual(['sa1'])
-    expect(track?.finished.map((run) => run.callId)).toEqual(['sa2', 'sa3'])
-  })
-
-  test('a completed update moves the call from running to finished, keeping its child id', () => {
-    let turns = buildTurns([timed(subagentCall({ callId: 'sa1', childSessionId: 'child-1' }))])
-    turns = buildTurns([
-      timed({ type: 'user_message', text: 'go' }),
-      timed(subagentCall({ callId: 'sa1', status: 'running', childSessionId: 'child-1' })),
-    ])
-    turns = applyTimelineItem(
-      turns,
-      subagentCall({ callId: 'sa1', status: 'completed', childSessionId: 'child-1' }),
-    )
-    const track = subagentsTrack(turns)
-    expect(track?.running).toHaveLength(0)
-    expect(track?.finished).toEqual([
-      { callId: 'sa1', childSessionId: 'child-1', status: 'ok' },
-    ])
-  })
-
-  test('is null when no subagents were dispatched', () => {
-    const turns = buildTurns([
-      timed({ type: 'user_message', text: 'hi' }),
-      timed({
-        type: 'tool_call',
-        callId: 'c1',
-        name: 'bash',
-        detail: { type: 'shell', command: 'ls' },
-        status: 'completed',
-        error: null,
-      } as never),
-    ])
-    expect(subagentsTrack(turns)).toBeNull()
   })
 })
 
