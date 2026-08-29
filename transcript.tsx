@@ -3,7 +3,8 @@
  * pending permission cards appended after the conversation.
  */
 
-import React, { memo, useEffect, useState } from 'react'
+import React, { memo, useCallback, useMemo, useRef, useState } from 'react'
+import { useGpuix } from '@gpuix/react'
 import type { EventPayload } from '@gpuix/native'
 import { Icon, StatusDot, type IconName } from './chrome'
 import { SafeMdxContent } from './mdx'
@@ -642,6 +643,87 @@ export interface PendingPermission {
   responding: boolean
 }
 
+/** How far above the top still counts as "at the top" for history paging. */
+const NEAR_TOP_PX = 64
+
+type ScrollOffsetReader = { getScrollOffset?: (elementId: number) => Array<number> | null }
+
+/** True when the list sits within NEAR_TOP_PX of its very top (offsets run negative going down). */
+function nearTop(renderer: ScrollOffsetReader | null | undefined, listId: number | undefined): boolean {
+  if (listId == null || !renderer?.getScrollOffset) return false
+  const offset = renderer.getScrollOffset(listId)
+  return offset != null && offset[1]! >= -NEAR_TOP_PX
+}
+
+/**
+ * Row keys that survive the two ways rows move: streaming mutates the tail in
+ * place, and history pages prepend whole stretches above everything. Each
+ * render anchors on the first turn's identity; when it moved down by k, every
+ * previous key moves down with it and only the k inserted rows are fresh.
+ * Unanchored renders (agent switch through a non-empty state) reassign all.
+ */
+function useRowKeys(turns: Turn[]): string[] {
+  const cache = useRef<{ anchor: string | null; keys: string[]; spare: number }>({
+    anchor: null,
+    keys: [],
+    spare: 0,
+  })
+  return useMemo(() => {
+    const c = cache.current
+    const keys = new Array<string>(turns.length)
+    let anchorAt = -1
+    if (c.anchor != null && turns.length > 0) {
+      const limit = Math.min(turns.length, 256)
+      for (let i = 0; i < limit; i++) {
+        if (JSON.stringify(turns[i]) === c.anchor) {
+          anchorAt = i
+          break
+        }
+      }
+    }
+    // No anchor but the same count means the visible stretch mutated in place
+    // (streaming merges rewrite the tail); carry the keys positionally rather
+    // than churning every row per delta.
+    if (anchorAt < 0 && turns.length === c.keys.length) anchorAt = 0
+    for (let i = 0; i < turns.length; i++) {
+      const prev = anchorAt >= 0 ? i - anchorAt : -1
+      keys[i] = prev >= 0 && prev < c.keys.length ? c.keys[prev]! : `r${c.spare++}`
+    }
+    cache.current = {
+      anchor: turns.length > 0 ? JSON.stringify(turns[0]) : null,
+      keys,
+      spare: c.spare,
+    }
+    return keys
+  }, [turns])
+}
+
+/** Fixed-height slot above the turns so paging affordances never insert or remove a row. */
+function HistoryHead({ state }: { state: 'more' | 'loading' | 'end' }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        height: 28,
+        flexShrink: 0,
+        width: '100%',
+      }}
+    >
+      {state === 'loading' ? (
+        <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 7 }}>
+          <StatusDot color={C.running} size={7} />
+          <text style={{ fontSize: 12, color: C.tertiary }}>Fetching earlier history…</text>
+        </div>
+      ) : state === 'end' ? (
+        <text style={{ fontSize: 11.5, color: C.ghost }}>Start of conversation</text>
+      ) : null}
+    </div>
+  )
+}
+
 /** One stop on the prompt outline rail: a user turn's row index and prompt. */
 interface RailStop {
   index: number
@@ -734,8 +816,10 @@ export const Transcript = memo(function Transcript({
   onRespond,
   onEditQueued,
   listRef,
+  olderPages,
+  onLoadOlder,
   detached,
-  onScroll,
+  onScroll: onScrollForward,
   onJumpToBottom,
   onJumpToTurn,
 }: {
@@ -744,7 +828,10 @@ export const Transcript = memo(function Transcript({
   onRespond?: (request: PermissionEntry['request'], response: PermissionResponse) => void
   /** Pulls a queued (optimistic) send back into the composer for editing. */
   onEditQueued?: (queuedId: string) => void
-  listRef?: React.Ref<{ id: number }>
+  listRef?: React.RefObject<{ id: number } | null>
+  /** Availability of history older than what this transcript holds. */
+  olderPages?: 'more' | 'loading' | 'end'
+  onLoadOlder?: () => void
   /** True while auto-follow is detached: incoming turns don't move the view. */
   detached?: boolean
   onScroll?: (event: EventPayload) => void
@@ -753,6 +840,34 @@ export const Transcript = memo(function Transcript({
   /** Outline-rail click: scroll the given row into view. */
   onJumpToTurn?: (index: number) => void
 }) {
+  const { renderer } = useGpuix()
+  const rowKeys = useRowKeys(turns)
+  /*
+   * Scroll-top trigger for older history pages.
+   *
+   * Spike findings (prepend anchoring in the virtualized list): the native
+   * list's behavior when rows are inserted above the viewport could not be
+   * verified headlessly — this needs a manual pass on a real daemon. What
+   * ships here to keep the viewport steady regardless:
+   *   - the head slot above is fixed-height, so affordances never insert or
+   *     remove rows;
+   *   - chat.tsx suppresses its tail-follow scroll when the tail itself did
+   *     not change (the signature of a pure prepend);
+   *   - fetches are re-entrancy safe, so repeated upward ticks page cleanly.
+   * If on-device checks show the list does not anchor to the top turn,
+   * compensate around the commit with renderer.getScrollOffset/scrollTo.
+   */
+  const onScroll = useCallback(
+    (event: { deltaY?: number }) => {
+      onScrollForward?.(event as EventPayload)
+      if (olderPages !== 'more' || !onLoadOlder) return
+      if ((event.deltaY ?? 0) > 0) return
+      if (!nearTop(renderer, listRef?.current?.id)) return
+      onLoadOlder()
+    },
+    [onScrollForward, olderPages, onLoadOlder, renderer, listRef],
+  )
+
   const cards = permissions ?? []
   const rowCount = turns.length + cards.length
   // One tick per user turn, positioned by row index so a click lands exactly.
@@ -763,18 +878,19 @@ export const Transcript = memo(function Transcript({
   return (
     <div style={{ position: 'relative', flexGrow: 1, minHeight: 0, width: '100%' }}>
       <virtual-list
-        ref={listRef}
+        ref={listRef as never}
         overdraw={240}
         estimatedItemHeight={220}
         style={{ width: '100%', height: '100%' }}
         onScroll={onScroll}
       >
-        {/* Tool rows key by call id so a row's local expansion state follows its
-            turn through replace-in-place streaming updates and later insertions. */}
+        {/* Row keys come from useRowKeys: stable across prepends and streaming
+            updates, so local expansion state (tool detail, reasoning) stays put. */}
+        {olderPages && <HistoryHead state={olderPages} />}
         {turns.map((turn, index) => (
           <TranscriptRow
-            key={turn.kind === 'tool' ? `tool:${turn.callId}` : `t${index}`}
-            first={index === 0}
+            key={rowKeys[index]}
+            first={index === 0 && olderPages == null}
             last={index === rowCount - 1}
           >
             {turn.kind === 'user' && (

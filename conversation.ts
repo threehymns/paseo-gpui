@@ -10,7 +10,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { PaseoClient } from '@getpaseo/client'
+import type { PaseoAgentTimelineRefetchOptions, PaseoClient } from '@getpaseo/client'
 import { newAttachmentId, toSendImages, type ImageAttachment } from './attachments'
 import {
   applyTimelineItem,
@@ -24,6 +24,12 @@ import {
 } from './paseo'
 
 export type ConversationStatus = 'loading' | 'ready' | 'error'
+
+/** Position of one fetched timeline window inside the daemon's history. */
+export interface TimelineCursor {
+  epoch: string
+  seq: number
+}
 
 /** A user text queued optimistically before the daemon echoes it back. */
 export interface PendingSend {
@@ -41,11 +47,32 @@ export interface ConversationState {
   usage: AgentUsage | null
   status: ConversationStatus
   error: string | null
+  /**
+   * Daemon truth, oldest first: every loaded page plus everything streamed
+   * since. Turns project from this, so prepending a page re-folds without
+   * disturbing streaming merges.
+   */
+  entries: TimelineEntry[]
+  /** Cursor to fetch pages older than everything currently held; null when unknown. */
+  oldestCursor: TimelineCursor | null
+  hasOlder: boolean
+  loadingHistory: boolean
+}
+
+/** One fetched stretch of timeline, ordered oldest first. */
+export interface TimelinePage {
+  items: TimelineEntry[]
+  hasOlder: boolean
+  /** Window start of this page; fetching `before` it yields the next older page. */
+  oldestCursor: TimelineCursor | null
 }
 
 export type ConversationEvent =
   | { type: 'reset'; seedText?: string; seedImages?: ImageAttachment[] }
-  | { type: 'loaded'; items: TimelineEntry[] }
+  | { type: 'loaded'; page: TimelinePage }
+  | { type: 'historyStarted' }
+  | { type: 'historyAppended'; page: TimelinePage }
+  | { type: 'historyFailed' }
   | { type: 'loadFailed'; error: unknown }
   | { type: 'timeline'; item: TimelineItem; at?: number }
   | { type: 'turnCompleted'; at?: number; usage?: AgentUsage }
@@ -60,6 +87,10 @@ export const initialConversation: ConversationState = {
   usage: null,
   status: 'loading',
   error: null,
+  entries: [],
+  oldestCursor: null,
+  hasOlder: false,
+  loadingHistory: false,
 }
 
 function popMatch(list: PendingSend[], text: string): PendingSend[] {
@@ -75,6 +106,27 @@ function eventTime(timestamp?: string): number | undefined {
   return Number.isFinite(at) ? at : undefined
 }
 
+/**
+ * Prepending a page re-folds turns from the entry list, but completion state
+ * lives only in turns (a sealed reasoning block's duration, a finished
+ * assistant turn's endedAt) — the daemon's turn_completed is not a timeline
+ * entry, so the fold cannot reproduce it. The tail entry is unchanged by a
+ * prepend, so carry the previous tail's seal onto the re-folded tail.
+ */
+function restoreTailSeal(previous: Turn[], reFolded: Turn[]): Turn[] {
+  if (reFolded.length === 0) return reFolded
+  const old = previous[previous.length - 1]
+  const fresh = reFolded[reFolded.length - 1]
+  if (!old || !fresh || old.kind !== fresh.kind) return reFolded
+  if (old.kind === 'reasoning' && old.durationMs != null && fresh.durationMs == null) {
+    return [...reFolded.slice(0, -1), { ...fresh, durationMs: old.durationMs }]
+  }
+  if (old.kind === 'assistant' && old.endedAt != null && fresh.endedAt == null) {
+    return [...reFolded.slice(0, -1), { ...fresh, endedAt: old.endedAt }]
+  }
+  return reFolded
+}
+
 export function reduceConversation(state: ConversationState, event: ConversationEvent): ConversationState {
   switch (event.type) {
     case 'reset':
@@ -84,13 +136,55 @@ export function reduceConversation(state: ConversationState, event: Conversation
           ? [{ id: newAttachmentId(), text: event.seedText, images: event.seedImages ?? [] }]
           : [],
       }
-    case 'loaded':
-      return { ...state, turns: buildTurns(event.items), status: 'ready', error: null }
+    case 'loaded': {
+      const { page } = event
+      return {
+        ...state,
+        turns: buildTurns(page.items),
+        entries: page.items,
+        oldestCursor: page.oldestCursor,
+        hasOlder: page.hasOlder && page.oldestCursor != null,
+        loadingHistory: false,
+        status: 'ready',
+        error: null,
+      }
+    }
+    case 'historyStarted':
+      return state.loadingHistory ? state : { ...state, loadingHistory: true }
+    case 'historyAppended': {
+      // Older pages prepend to the entry list; turns re-fold from the whole
+      // ordered truth so messages, reasoning blocks, and tool lifecycles that
+      // straddle the page boundary merge exactly as they would have live.
+      // Locally synthesized turns (send failures) are not daemon entries and
+      // do not survive the re-fold.
+      const { page } = event
+      const entries = [...page.items, ...state.entries]
+      const reFolded = buildTurns(entries)
+      return {
+        ...state,
+        entries,
+        // The tail entry is unchanged by a prepend; keep its completion state.
+        turns: restoreTailSeal(state.turns, reFolded),
+        // An empty page or a missing cursor means there is nothing reachable
+        // to continue from — stop paging rather than wedge on a dead cursor.
+        oldestCursor: page.oldestCursor ?? state.oldestCursor,
+        hasOlder: page.hasOlder && page.items.length > 0 && page.oldestCursor != null,
+        loadingHistory: false,
+      }
+    }
+    case 'historyFailed':
+      // A failed page fetch leaves history where it was; the next scroll-top
+      // attempt retries.
+      return state.loadingHistory ? { ...state, loadingHistory: false } : state
     case 'loadFailed':
       // e.g. the agent was archived while we were opening it.
       return { ...state, status: 'error', error: errorMessage(event.error) }
     case 'timeline': {
-      const next = { ...state, turns: applyTimelineItem(state.turns, event.item, event.at) }
+      const next = {
+        ...state,
+        entries: [...state.entries, { item: event.item, at: event.at }],
+        turns: applyTimelineItem(state.turns, event.item, event.at),
+      }
       if (event.item.type === 'user_message') {
         return { ...next, pending: popMatch(next.pending, event.item.text) }
       }
@@ -105,7 +199,14 @@ export function reduceConversation(state: ConversationState, event: Conversation
         usage: event.usage ?? state.usage,
       }
     case 'turnFailed':
-      return { ...state, turns: applyTimelineItem(state.turns, { type: 'error', message: event.message }) }
+      // Record the daemon-reported failure in the entry list too so it survives
+      // a later history-page re-fold; only locally synthesized failures
+      // (sendFailed) stay out of persistence.
+      return {
+        ...state,
+        entries: [...state.entries, { item: { type: 'error', message: event.message } }],
+        turns: applyTimelineItem(state.turns, { type: 'error', message: event.message }),
+      }
     case 'sendQueued':
       return {
         ...state,
@@ -139,17 +240,43 @@ export interface UseAgentConversationOptions {
   onSeedConsumed?: () => void
 }
 
+/** Entries fetched when the reader pages back through history. */
+const PAGE_SIZE = 100
+/** The initial tail window; unchanged from before paging existed. */
+const TAIL_LIMIT = 300
+
+function fetchTimelinePage(
+  client: PaseoClient,
+  agentId: string,
+  options: PaseoAgentTimelineRefetchOptions,
+): Promise<TimelinePage> {
+  return client.agents.ref(agentId).timeline.refetch(options).then((page) => ({
+    items: page.entries.map((entry) => ({ item: entry.item, at: eventTime(entry.timestamp) })),
+    hasOlder: Boolean(page.hasOlder),
+    oldestCursor: page.startCursor ?? null,
+  }))
+}
+
 export function useAgentConversation(
   client: PaseoClient,
   agentId: string | null,
   options: UseAgentConversationOptions = {},
 ) {
   const [state, setState] = useState<ConversationState>(initialConversation)
+  const stateRef = useRef(state)
+  stateRef.current = state
   const optionsRef = useRef(options)
   optionsRef.current = options
   const seededFor = useRef<string | null>(null)
+  // Bumped per agent/effect run so a late page fetch for a previous agent
+  // cannot land in the new one's state.
+  const generationRef = useRef(0)
+  // Set synchronously (unlike the reducer's loadingHistory, which React
+  // commits later) so two wheel ticks in one batch cannot double-fetch.
+  const historyInFlight = useRef(false)
 
   useEffect(() => {
+    const generation = ++generationRef.current
     let disposed = false
     let unsub: (() => void) | undefined
 
@@ -166,16 +293,10 @@ export function useAgentConversation(
 
     void (async () => {
       try {
-        const handle = client.agents.ref(agentId)
-        const page = await handle.timeline.refetch({ direction: 'tail', limit: 300 })
-        if (disposed) return
-        setState((prev) =>
-          reduceConversation(prev, {
-            type: 'loaded',
-            items: page.entries.map((entry) => ({ item: entry.item, at: eventTime(entry.timestamp) })),
-          }),
-        )
-        unsub = handle.timeline.subscribe(({ event, timestamp }) => {
+        const page = await fetchTimelinePage(client, agentId, { direction: 'tail', limit: TAIL_LIMIT })
+        if (disposed || generation !== generationRef.current) return
+        setState((prev) => reduceConversation(prev, { type: 'loaded', page }))
+        unsub = client.agents.ref(agentId).timeline.subscribe(({ event, timestamp }) => {
           if (event.type === 'timeline') {
             setState((prev) => reduceConversation(prev, { type: 'timeline', item: event.item, at: eventTime(timestamp) }))
           } else if (event.type === 'turn_completed') {
@@ -197,6 +318,39 @@ export function useAgentConversation(
     }
   }, [client, agentId])
 
+  /** Fetches the next older page once the transcript is scrolled to its top. */
+  const loadHistory = useCallback(async () => {
+    const current = stateRef.current
+    if (
+      historyInFlight.current ||
+      !agentId ||
+      !current.hasOlder ||
+      !current.oldestCursor ||
+      current.status !== 'ready'
+    ) {
+      return
+    }
+    const generation = generationRef.current
+    historyInFlight.current = true
+    setState((prev) => reduceConversation(prev, { type: 'historyStarted' }))
+    try {
+      const page = await fetchTimelinePage(client, agentId, {
+        direction: 'before',
+        cursor: current.oldestCursor,
+        limit: PAGE_SIZE,
+      })
+      if (generation !== generationRef.current) return
+      setState((prev) => reduceConversation(prev, { type: 'historyAppended', page }))
+    } catch {
+      // Leave history where it was; the next scroll-top retries.
+      if (generation === generationRef.current) {
+        setState((prev) => reduceConversation(prev, { type: 'historyFailed' }))
+      }
+    } finally {
+      historyInFlight.current = false
+    }
+  }, [client, agentId])
+
   const send = useCallback(
     async (raw: string, images: ImageAttachment[] = []): Promise<boolean> => {
       const text = raw.trim()
@@ -214,7 +368,7 @@ export function useAgentConversation(
     [client, agentId],
   )
 
-  /** Pulls a queued send back out of the queue by id. */
+/** Pulls a queued send back out of the queue by id. */
   const unqueue = useCallback(
     (id: string) => {
       if (!agentId) return
@@ -223,5 +377,5 @@ export function useAgentConversation(
     [agentId],
   )
 
-  return { ...state, turns: visibleTurns(state), send, unqueue }
+  return { ...state, turns: visibleTurns(state), send, loadHistory, unqueue }
 }

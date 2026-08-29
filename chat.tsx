@@ -280,13 +280,30 @@ export function ChatApp() {
 
   const visibleTurns = turns
 
+  // Older-history availability for the transcript's top edge: quiet while more
+  // pages exist unrequested, a spinner while fetching, a marker once exhausted.
+  const olderPages =
+    conversation.status === 'ready' && visibleTurns.length > 0
+      ? conversation.loadingHistory
+        ? ('loading' as const)
+        : conversation.hasOlder
+          ? ('more' as const)
+          : ('end' as const)
+      : undefined
+
   const listRef = useRef<{ id: number } | null>(null)
   const { renderer } = useGpuix()
   const { following, onScroll, requestJump, jumpToTurn } = useTranscriptFollow({
     listRef,
     turnCount: visibleTurns.length,
+    // The final turn's identity, so a history page prepended above the viewport
+    // (count grew, tail sat still) doesn't drag a following view back down.
+    tailSignature: visibleTurns.length > 0 ? JSON.stringify(visibleTurns.at(-1)) : undefined,
     agentId: activeId,
     renderer,
+    // HistoryHead occupies virtual-list slot 0 whenever older history does (or
+    // may) exist upstream, so every turn row is shifted down by one.
+    slotOffset: olderPages ? 1 : 0,
   })
 
   const send = async (raw: string) => {
@@ -511,6 +528,8 @@ export function ChatApp() {
             onRespond={permissions.respond}
             onEditQueued={editQueued}
             listRef={listRef}
+            olderPages={olderPages}
+            onLoadOlder={conversation.loadHistory}
             detached={!following}
             onScroll={onScroll}
             onJumpToBottom={requestJump}

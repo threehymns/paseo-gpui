@@ -66,14 +66,27 @@ type ListRef = { current: { id: number } | null }
 export function useTranscriptFollow({
   listRef,
   turnCount,
+  tailSignature,
   agentId,
   renderer,
+  slotOffset = 0,
 }: {
   listRef: ListRef
   turnCount: number
+  /**
+   * Identity of the final turn, so growth that is only a history page prepended
+   * above the viewport (tail unchanged) doesn't drag the reader to the bottom.
+   */
+  tailSignature?: string
   agentId: string | null
   /** NativeRenderer from useGpuix(); null before the window mounts. */
   renderer: NativeRenderer | null | undefined
+  /**
+   * How many fixed slots sit above the first turn row in the virtual list.
+   * History paging keeps a head slot at index 0, so every turn row — the tail
+   * and each outline-rail target alike — shifts down by one.
+   */
+  slotOffset?: number
 }) {
   const [state, dispatch] = useReducer(reduceFollow, initialFollow)
 
@@ -95,10 +108,14 @@ export function useTranscriptFollow({
   // (the flip in `following` re-runs this effect). The first run only primes
   // the previous count: a freshly mounted list must not yank itself.
   const prevCount = useRef(0)
+  const prevTailSignature = useRef<string | null>(null)
   const primed = useRef(false)
   useEffect(() => {
-    if (turnCount > prevCount.current) dispatch({ type: 'turnsAppended' })
+    const grew = turnCount > prevCount.current
+    const tailMoved = tailSignature != null && tailSignature !== prevTailSignature.current
+    if (grew || tailMoved) dispatch({ type: 'turnsAppended' })
     prevCount.current = turnCount
+    if (tailSignature != null) prevTailSignature.current = tailSignature
     if (!primed.current) {
       primed.current = true
       return
@@ -106,8 +123,12 @@ export function useTranscriptFollow({
     if (!state.following) return
     const id = listRef.current?.id
     if (id == null || !renderer?.scrollToItem) return
-    renderer.scrollToItem(id, Math.max(0, turnCount - 1))
-  }, [renderer, listRef, turnCount, state.following])
+    // A history page prepends above the viewport: the count grew but the tail
+    // sat still, so a tail-follow scroll would yank the reader away. Every
+    // other growth (new turn, delta on the last turn) is a real tail change.
+    if (grew && !tailMoved) return
+    renderer.scrollToItem(id, Math.max(0, turnCount - 1 + slotOffset))
+  }, [renderer, listRef, turnCount, state.following, tailSignature, slotOffset])
 
   /** Jump-to-bottom click: re-attach; the effect above performs the scroll. */
   const requestJump = useCallback(() => dispatch({ type: 'jumpRequested' }), [])
@@ -117,9 +138,9 @@ export function useTranscriptFollow({
     (index: number) => {
       const id = listRef.current?.id
       if (id == null || !renderer?.scrollToItem) return
-      renderer.scrollToItem(id, index)
+      renderer.scrollToItem(id, index + slotOffset)
     },
-    [renderer, listRef],
+    [renderer, listRef, slotOffset],
   )
 
   return { following: state.following, onScroll, requestJump, jumpToTurn }
