@@ -17,6 +17,7 @@ import type { PaseoAgentConfig, PaseoClient } from '@getpaseo/client'
 import type { DaemonClient } from '@getpaseo/client/internal/daemon-client'
 import {
   DAEMON_URL,
+  activeAgentGone,
   applyAgentPage,
   applyAgentUpdate,
   basename,
@@ -25,6 +26,7 @@ import {
   errorMessage,
   findModel,
   isArchived,
+  sortAgents,
   type AgentEntry,
   type ConnStatus,
   type ProviderEntry,
@@ -204,13 +206,19 @@ export function ChatApp() {
   const attention = useAttention({ agents, activeId, serverId: daemonHost(), bridge: attentionBridge })
   const activeEntry = agents.find((entry) => entry.id === activeId) ?? null
 
+  // Ids the directory has shown, so a just-created agent isn't judged gone
+  // while its upsert is still in flight.
+  const everShownAgentIds = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    for (const entry of agents) everShownAgentIds.current.add(entry.id)
+  }, [agents])
+
   // An agent that vanished from the directory (deleted) or was archived can no
   // longer host a conversation — Paseo's own client redirects away in both cases.
-  const activeEntryGone =
-    activeId != null &&
-    status === 'connected' &&
-    agents.length > 0 &&
-    !agents.some((entry) => entry.id === activeId && !isArchived(entry))
+  const activeEntryGone = activeAgentGone(activeId, agents, {
+    connected: status === 'connected',
+    wasSeen: activeId != null && everShownAgentIds.current.has(activeId),
+  })
   useEffect(() => {
     if (activeEntryGone) setActiveId(null)
   }, [activeEntryGone])

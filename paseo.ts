@@ -615,6 +615,20 @@ export function isArchived(entry: AgentEntry): boolean {
   return entry.archivedAt != null
 }
 
+/**
+ * True when the selected agent can no longer host a conversation: it was
+ * deleted or archived. An agent the directory has never shown gets grace —
+ * a freshly created one may be selected before its upsert arrives.
+ */
+export function activeAgentGone(
+  activeId: string | null,
+  entries: AgentEntry[],
+  opts: { connected: boolean; wasSeen: boolean },
+): boolean {
+  if (activeId == null || !opts.connected || !opts.wasSeen) return false
+  return !entries.some((entry) => entry.id === activeId && !isArchived(entry))
+}
+
 /** Live agents only unless archived ones are revealed. */
 export function visibleAgents(entries: AgentEntry[], showArchived: boolean): AgentEntry[] {
   return showArchived ? entries : entries.filter((entry) => !isArchived(entry))

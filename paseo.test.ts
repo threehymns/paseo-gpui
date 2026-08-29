@@ -6,6 +6,8 @@ import {
   applyAgentPage,
   sortAgents,
   displayName,
+  isArchived,
+  activeAgentGone,
   relativeTime,
   statusBucket,
   statusGroups,
@@ -558,6 +560,12 @@ describe('agent directory', () => {
   test('displayName prefers title over directory basename', () => {
     expect(displayName(entry({ title: 'Fix login' }))).toBe('Fix login')
     expect(displayName(entry({}))).toBe('storefront')
+    expect(displayName(entry({ title: '   ' }))).toBe('storefront')
+  })
+
+  test('isArchived reads the daemon archive timestamp', () => {
+    expect(isArchived(entry({}))).toBe(false)
+    expect(isArchived(entry({ archivedAt: '2026-08-24T09:00:00Z' }))).toBe(true)
   })
 
   test('applyAgentUpdate upserts and removes by id', () => {
@@ -626,6 +634,38 @@ describe('agent directory', () => {
 
   test('relativeTime produces known shapes', () => {
     expect(relativeTime(list[0]!)).toMatch(/^now|\d+[mhd]|\w{3} \d{1,2}$/)
+  })
+})
+
+describe('activeAgentGone', () => {
+  const live = entry({ id: 'live' })
+
+  test('nothing is gone without a selection', () => {
+    expect(activeAgentGone(null, [], { connected: true, wasSeen: false })).toBe(false)
+  })
+
+  test('a disconnected daemon decides nothing', () => {
+    expect(activeAgentGone('live', [], { connected: false, wasSeen: true })).toBe(false)
+  })
+
+  test('an agent not yet seen by the directory gets grace', () => {
+    // A freshly created agent may be selected before its upsert arrives.
+    expect(activeAgentGone('fresh', [live], { connected: true, wasSeen: false })).toBe(false)
+    expect(activeAgentGone('fresh', [], { connected: true, wasSeen: false })).toBe(false)
+  })
+
+  test('a seen agent that vanished from the directory is gone', () => {
+    expect(activeAgentGone('live', [], { connected: true, wasSeen: true })).toBe(true)
+    expect(activeAgentGone('live', [entry({ id: 'other' })], { connected: true, wasSeen: true })).toBe(true)
+  })
+
+  test('a seen agent that was archived can no longer host the conversation', () => {
+    const archived = entry({ id: 'live', archivedAt: '2026-08-24T09:00:00Z' })
+    expect(activeAgentGone('live', [archived], { connected: true, wasSeen: true })).toBe(true)
+  })
+
+  test('a seen live agent stays hosted', () => {
+    expect(activeAgentGone('live', [live], { connected: true, wasSeen: true })).toBe(false)
   })
 })
 
