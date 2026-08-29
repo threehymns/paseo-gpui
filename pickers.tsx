@@ -12,7 +12,7 @@ import {
   type StyleDesc,
 } from '@gpuix/react'
 import { Icon, type IconName } from './chrome'
-import { modelChoices, type ProviderEntry, type ProviderMode, type ProviderModel } from './paseo'
+import { modelChoices, type ProviderEntry, type ProviderFeatureToggle, type ProviderMode, type ProviderModel } from './paseo'
 import { C } from './theme'
 
 const MENU = {
@@ -276,4 +276,80 @@ export function thinkingOptions(model: ProviderModel | undefined): MenuOption[] 
     label: option.label,
     description: option.description,
   }))
+}
+
+/**
+ * One On/Off chip per exposed provider feature; values come from the draft
+ * config or, for a live agent, from daemon truth under optimistic holds.
+ */
+export function FeatureToggles({
+  features,
+  values,
+  onToggle,
+}: {
+  features: ProviderFeatureToggle[]
+  values: Record<string, unknown>
+  onToggle: (id: string, next: boolean) => void
+}) {
+  if (features.length === 0) return null
+  return (
+    <>
+      {features.map((feature) => {
+        const on = values[feature.id] === true
+        return (
+          <div
+            key={feature.id}
+            testId={`feature-${feature.id}`}
+            style={{
+              display: 'flex',
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 6,
+              height: 26,
+              paddingLeft: 7,
+              paddingRight: 5,
+              borderRadius: 6,
+              cursor: 'pointer',
+              flexShrink: 0,
+              hover: { backgroundColor: C.overlay },
+            }}
+            onClick={() => onToggle(feature.id, !on)}
+          >
+            <Icon name="wrench" size={12} color={on ? C.accent : C.tertiary} />
+            <text
+              style={{
+                fontSize: 13,
+                lineHeight: 16,
+                color: on ? C.accent : C.secondary,
+                whiteSpace: 'nowrap',
+                textOverflow: 'ellipsis',
+                minWidth: 0,
+                maxWidth: 120,
+              }}
+            >
+              {feature.label}
+            </text>
+            <div
+              testId={`feature-state-${feature.id}`}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                height: 16,
+                paddingLeft: 6,
+                paddingRight: 6,
+                borderRadius: 8,
+                flexShrink: 0,
+                backgroundColor: on ? '#E2795B26' : C.overlayStrong,
+              }}
+            >
+              <text style={{ fontSize: 11, fontWeight: 500, color: on ? C.accent : C.ghost }}>
+                {on ? 'On' : 'Off'}
+              </text>
+            </div>
+          </div>
+        )
+      })}
+    </>
+  )
 }

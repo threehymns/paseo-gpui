@@ -12,6 +12,7 @@ import type { Root } from 'mdast'
 import type { StyleDesc } from '@gpuix/react'
 import { classifyImageSource, probeRemoteImage } from './markdown-images'
 import { resolveWorkspaceFile } from './open-file'
+import { MermaidFence } from './mermaid-viewer'
 import { C, CHAT_THEME } from './theme'
 
 type MdxChildren = { children?: React.ReactNode }
@@ -385,14 +386,7 @@ export function SafeMdxContent({
         components={components}
         renderNode={(node) => {
           if (node.type !== 'code') return undefined
-          return (
-            <code
-              code={node.value}
-              language={node.lang ?? undefined}
-              showLineNumbers
-              theme={CHAT_THEME}
-            />
-          )
+          return <MermaidFence value={node.value} lang={node.lang ?? undefined} />
         }}
       />
     </div>
