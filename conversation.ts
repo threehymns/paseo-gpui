@@ -16,7 +16,7 @@ import {
   applyTimelineItem,
   buildTurns,
   errorMessage,
-  sealTrailingReasoning,
+  sealTrailingTurns,
   type AgentUsage,
   type TimelineEntry,
   type TimelineItem,
@@ -97,10 +97,11 @@ export function reduceConversation(state: ConversationState, event: Conversation
       return next
     }
     case 'turnCompleted':
-      // Ends any still-open trailing thinking block with nothing after it.
+      // Ends any still-open trailing thinking block or assistant turn with
+      // nothing after it.
       return {
         ...state,
-        turns: sealTrailingReasoning(state.turns, event.at ?? Date.now()),
+        turns: sealTrailingTurns(state.turns, event.at ?? Date.now()),
         usage: event.usage ?? state.usage,
       }
     case 'turnFailed':
