@@ -245,6 +245,7 @@ describe('timeline paging', () => {
     const existing: SubagentTimeline = {
       epoch: 'epoch-1',
       items: { 5: assistant('five'), 6: assistant('six') },
+      at: {},
       lastSeq: 6,
       hasOlder: true,
     }
@@ -259,7 +260,7 @@ describe('timeline paging', () => {
   })
 
   test('reset replaces the window instead of merging', () => {
-    const existing: SubagentTimeline = { epoch: 'epoch-1', items: { 1: assistant('stale') }, lastSeq: 1, hasOlder: true }
+    const existing: SubagentTimeline = { epoch: 'epoch-1', items: { 1: assistant('stale') }, lastSeq: 1, at: {}, hasOlder: true }
     const next = mergeTimelinePage(existing, page({
       reset: true,
       epoch: 'epoch-2',
@@ -271,7 +272,7 @@ describe('timeline paging', () => {
   })
 
   test('a stale cursor invalidates the retained window too', () => {
-    const existing: SubagentTimeline = { epoch: 'epoch-1', items: { 4: assistant('kept?') }, lastSeq: 4, hasOlder: true }
+    const existing: SubagentTimeline = { epoch: 'epoch-1', items: { 4: assistant('kept?') }, lastSeq: 4, at: {}, hasOlder: true }
     const next = mergeTimelinePage(existing, page({
       direction: 'before',
       staleCursor: true,
@@ -282,13 +283,13 @@ describe('timeline paging', () => {
   })
 
   test('an epoch change starts a new generation regardless of flags', () => {
-    const existing: SubagentTimeline = { epoch: 'epoch-1', items: { 1: assistant('old gen') }, lastSeq: 1, hasOlder: true }
+    const existing: SubagentTimeline = { epoch: 'epoch-1', items: { 1: assistant('old gen') }, lastSeq: 1, at: {}, hasOlder: true }
     const next = mergeTimelinePage(existing, page({ epoch: 'epoch-2', rows: [{ seq: 1, item: assistant('new gen') }], maxSeq: 1 }))
     expect(next!.items).toEqual({ 1: assistant('new gen') })
   })
 
   test('a gap on a tail fetch replaces newer rows it cannot attach to', () => {
-    const existing: SubagentTimeline = { epoch: 'epoch-1', items: { 7: assistant('pushed ahead') }, lastSeq: 7, hasOlder: true }
+    const existing: SubagentTimeline = { epoch: 'epoch-1', items: { 7: assistant('pushed ahead') }, lastSeq: 7, at: {}, hasOlder: true }
     const next = mergeTimelinePage(existing, page({
       gap: true,
       rows: [{ seq: 2, item: assistant('window') }],
@@ -301,6 +302,7 @@ describe('timeline paging', () => {
     const existing: SubagentTimeline = {
       epoch: 'epoch-1',
       items: { 8: assistant('pushed eight'), 10: assistant('pushed ten — noncontiguous') },
+      at: {},
       lastSeq: 10,
       hasOlder: true,
     }
@@ -349,6 +351,68 @@ describe('timeline paging', () => {
     state = reduceSubagents(state, { type: 'timelinePage', page: page({ epoch: 'epoch-2', rows: [{ seq: 4, item: assistant('v2-page') }], maxSeq: 4 }) })
     expect(subagentTurns(state, 'parent', 'sub-1')).toEqual([{ kind: 'assistant', source: 'v2-page', messageId: undefined }])
     expect(subagentHasOlder(state, 'parent', 'sub-1')).toBe(false)
+  })
+})
+
+// ---- row timestamps ---------------------------------------------------------------
+
+describe('timeline timestamps', () => {
+  test('page timestamps time the reasoning fold so sealed durations are real', () => {
+    const next = mergeTimelinePage(undefined, page({
+      rows: [
+        { seq: 1, item: { type: 'reasoning', text: 'first pass' } },
+        { seq: 2, timestamp: '2026-08-24T10:00:03Z', item: { type: 'reasoning', text: ' refining' } },
+        { seq: 3, timestamp: '2026-08-24T10:00:05Z', item: { type: 'assistant_message', text: 'done' } },
+      ],
+      maxSeq: 3,
+    }))
+    // The page carries each row's arrival time, keyed by seq.
+    expect(next!.at[1]).toBe(Date.parse('2026-08-24T10:00:00Z'))
+    expect(next!.at[2]).toBe(Date.parse('2026-08-24T10:00:03Z'))
+    const turns = subagentTurns(
+      { descriptors: {}, timelines: { 'parent\0sub-1': next! } },
+      'parent',
+      'sub-1',
+    )
+    // Folded from real deltas (first→last), not Date.now(): 3s of thinking.
+    const thinking = turns[0] as { kind: string; durationMs?: number }
+    expect(thinking.kind).toBe('reasoning')
+    expect(thinking.durationMs).toBe(3_000)
+    expect(turns[1]).toEqual({ kind: 'assistant', source: 'done', messageId: undefined })
+  })
+
+  test('a timeline push carries its timestamp into the fold', () => {
+    let state = reduceSubagents(initialSubagents, {
+      type: 'timelinePage',
+      page: page({
+        rows: [
+          { seq: 1, item: { type: 'reasoning', text: 'planning' } },
+          { seq: 2, timestamp: '2026-08-24T10:00:05Z', item: { type: 'reasoning', text: ' ahead' } },
+        ],
+        maxSeq: 2,
+      }),
+    })
+    state = reduceSubagents(state, {
+      type: 'timelinePush',
+      push: {
+        kind: 'timeline',
+        parentAgentId: 'parent',
+        subagentId: 'sub-1',
+        provider: 'c',
+        item: { type: 'assistant_message', text: 'answer' },
+        timestamp: '2026-08-24T10:00:09Z',
+        seq: 3,
+        epoch: 'epoch-1',
+      },
+    })
+    expect(state.timelines['parent\0sub-1']!.at).toEqual({
+      1: Date.parse('2026-08-24T10:00:00Z'),
+      2: Date.parse('2026-08-24T10:00:05Z'),
+      3: Date.parse('2026-08-24T10:00:09Z'),
+    })
+    const thinking = subagentTurns(state, 'parent', 'sub-1')[0] as { kind: string; durationMs?: number }
+    expect(thinking.kind).toBe('reasoning')
+    expect(thinking.durationMs).toBe(5_000)
   })
 })
 

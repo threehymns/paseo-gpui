@@ -179,6 +179,8 @@ export function subagentKey(parentAgentId: string, subagentId: string): string {
 export interface SubagentTimeline {
   epoch: string | null
   items: Record<number, TimelineItem>
+  /** Row arrival times per seq, epoch-ms from each row/push timestamp. */
+  at: Record<number, number>
   lastSeq: number
   hasOlder: boolean
 }
@@ -206,7 +208,14 @@ export type SubagentsEvent =
   /** A live `agent.provider_subagents.update` timeline push. */
   | { type: 'timelinePush'; push: Extract<ProviderSubagentPush, { kind: 'timeline' }> }
 
-const emptyTimeline: SubagentTimeline = { epoch: null, items: {}, lastSeq: 0, hasOlder: false }
+const emptyTimeline: SubagentTimeline = { epoch: null, items: {}, at: {}, lastSeq: 0, hasOlder: false }
+
+/** ISO row/push timestamp to epoch ms; undefined when absent or unparseable. */
+function eventTime(timestamp: string | undefined): number | undefined {
+  if (!timestamp) return undefined
+  const at = Date.parse(timestamp)
+  return Number.isFinite(at) ? at : undefined
+}
 
 function index(items: Record<number, TimelineItem>): number[] {
   return Object.keys(items)
@@ -232,7 +241,12 @@ export function mergeTimelinePage(
 ): SubagentTimeline | null {
   if (!page.provider) return null
   const rows: Record<number, TimelineItem> = {}
-  for (const row of page.rows) rows[row.seq] = row.item
+  const at: Record<number, number> = {}
+  for (const row of page.rows) {
+    rows[row.seq] = row.item
+    const parsed = eventTime(row.timestamp)
+    if (parsed !== undefined) at[row.seq] = parsed
+  }
 
   const epochChanged = existing != null && existing.epoch != null && existing.epoch !== page.epoch
   const fresh =
@@ -247,6 +261,7 @@ export function mergeTimelinePage(
     return {
       epoch: page.epoch,
       items: rows,
+      at,
       lastSeq: seqs.length > 0 ? Math.max(...seqs) : page.window.maxSeq,
       hasOlder: page.hasOlder,
     }
@@ -254,20 +269,24 @@ export function mergeTimelinePage(
 
   if (page.direction !== 'tail') {
     const items = { ...existing!.items, ...rows }
-    return { ...existing!, items, hasOlder: page.hasOlder }
+    return { ...existing!, items, at: { ...existing!.at, ...at }, hasOlder: page.hasOlder }
   }
 
   let nextSeq = page.rows.length > 0 ? Math.max(...page.rows.map((row) => row.seq)) + 1 : page.window.maxSeq + 1
   const merged = { ...rows }
+  const mergedAt = { ...at }
   for (const seq of index(existing!.items)) {
     if (seq < nextSeq) continue
     if (seq !== nextSeq) break
     merged[seq] = existing!.items[seq]!
+    const seqAt = existing!.at[seq]
+    if (seqAt !== undefined) mergedAt[seq] = seqAt
     nextSeq += 1
   }
   return {
     epoch: page.epoch,
     items: merged,
+    at: mergedAt,
     lastSeq: nextSeq - 1,
     hasOlder: page.hasOlder,
   }
@@ -281,9 +300,11 @@ function applyTimelinePush(
   if (existing?.epoch != null && existing.epoch !== push.epoch) return null
   if (existing != null && push.seq <= existing.lastSeq) return null
   const base = existing ?? emptyTimeline
+  const at = eventTime(push.timestamp)
   return {
     epoch: push.epoch,
     items: { ...base.items, [push.seq]: push.item },
+    at: at === undefined ? base.at : { ...base.at, [push.seq]: at },
     lastSeq: Math.max(base.lastSeq, push.seq),
     hasOlder: base.hasOlder,
   }
@@ -360,7 +381,7 @@ export function subagentTurns(
   const timeline = state.timelines[subagentKey(parentAgentId, subagentId)]
   const descriptor = state.descriptors[subagentKey(parentAgentId, subagentId)]
   const entries = timeline
-    ? index(timeline.items).map((seq) => ({ item: timeline.items[seq]! }))
+    ? index(timeline.items).map((seq) => ({ item: timeline.items[seq]!, at: timeline.at[seq] }))
     : []
   const turns = buildTurns(entries)
   const closing = descriptor ? closingTurn(descriptor.status) : null
