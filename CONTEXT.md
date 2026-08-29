@@ -35,6 +35,13 @@ expansion shows its patch as a diff. A reasoning turn stays collapsed until
 opened: while deltas stream it reads "Thinking…", and once anything proves
 thinking has stopped (the next appended item or the turn's end) its length is
 sealed from the delta timestamps and the row reads "Thought for <duration>".
+An assistant turn carries its own span: it starts at its first delta, and once
+anything proves it finished (the next appended item or turn completion) it is
+sealed at that moment — never at whenever sealing happens to run. Its footer
+ticks elapsed time each second while working, reads "Worked for <duration>"
+when done (swapping to the completion clock time on hover), and offers copying
+its markdown with a brief ✓ flash; turns with nothing copyable show no copy
+affordance.
 _Avoid_: message, item
 
 **Sealed**:
@@ -45,6 +52,18 @@ _Avoid_: closed, ended
 **Transcript**:
 The ordered turns shown for one agent, including optimistic sends not yet
 echoed by the daemon.
+
+**Following**:
+The attached scroll state in which incoming turns pull the transcript to its
+tail. Scrolling up **detaches** it: streaming no longer moves the viewport and
+a floating jump button appears. Jumping (button click) or wheeling down until
+the list pins at its end re-attaches.
+_Avoid_: auto-scroll, stick-to-bottom
+
+**Outline rail**:
+The tick strip along the transcript's right edge, one tick per user turn;
+hovering previews the prompt, clicking scrolls that row into view.
+_Avoid_: minimap, scrollbar
 
 **Pending send**:
 A user text queued optimistically before the daemon echoes it back. Echoes
@@ -67,7 +86,32 @@ _Avoid_: settings, preferences
 
 **Composer**:
 The draft input area with its config chips, used both to create an agent and
-to send follow-up prompts to the active one.
+to send follow-up prompts to the active one. Engaging it — focus, send, or
+blur — is the user showing up in that conversation.
+
+**Attention**:
+The per-agent flag that the user's eye is needed, mirrored from the daemon's
+`requiresAttention` with reason permission, error, or finished. Engaging the
+composer clears it, except permission, which never auto-clears (the explicit
+mark-as-read menu item belongs to tracker issue #16).
+
+**Notice**:
+One ready-to-show OS notification built from a raise: exact title by reason
+("Agent needs permission", "Agent needs attention", "Agent finished"), a
+markdown-stripped body truncated at 220 characters, and routing payload
+{serverId, workspaceId, agentId, reason}. The OS says so only when the window
+is unfocused or a different agent is focused; a higher-priority reason —
+permission < error < finished — supersedes an outstanding notice. Delivery
+goes through a runtime notification bridge and silently no-ops where none
+exists; clicking one deep-links by selecting its agent.
+
+**Context meter**:
+The ring right of the composer's input row showing how much of the selected
+model's context window the conversation uses. Fed by the daemon's usage
+reporting — live stream events first, the agent directory snapshot until one
+lands — and hidden entirely when no usable usage exists. Its fraction,
+threshold tone, and hover lines come from one pure projection.
+_Avoid_: token counter, usage widget
 
 **Workspace**:
 A directory an agent can run in, listed by the daemon. A **worktree** is a git

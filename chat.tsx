@@ -17,6 +17,7 @@ import type { PaseoAgentConfig, PaseoClient } from '@getpaseo/client'
 import type { DaemonClient } from '@getpaseo/client/internal/daemon-client'
 import {
   DAEMON_URL,
+  applyAgentPage,
   applyAgentUpdate,
   basename,
   createDaemonClient,
@@ -24,20 +25,33 @@ import {
   errorMessage,
   findModel,
   isArchived,
-  sortAgents,
   type AgentEntry,
   type ConnStatus,
   type ProviderEntry,
 } from './paseo'
+import {
+  planAttachments,
+  planPaste,
+  removeAttachment,
+  toSendImages,
+  type AttachmentPlan,
+  type ImageAttachment,
+  type IncomingImage,
+  type PastePayload,
+} from './attachments'
 import { C, CONTENT_MAX_WIDTH, SIDEBAR_WIDTH } from './theme'
 import { Sidebar, Header, CenterMessage, agentStatusColor, daemonHost, type RowActionRef, type RowActionVerb } from './chrome'
 import { Transcript } from './transcript'
 import { ModelPicker, OptionPicker, modeOptions, thinkingOptions } from './pickers'
 import { Composer, ConfigNotice, FooterBar } from './composer'
 import { useAgentConversation } from './conversation'
+import { useTranscriptFollow } from './follow'
 import { useAgentPermissions } from './permissions'
+import { useAttention, type NotificationBridge } from './attention'
 import { useDraftConfig } from './draft-config'
+import { contextMeter } from './usage'
 import { liveTruth, useLiveAgentConfig, type DaemonTruth, type ProviderNotice } from './live-config'
+import { createAppStore, defaultStatePath, fileStateStorage } from './app-state'
 
 // ---- daemon hooks ----------------------------------------------------------
 
@@ -77,7 +91,10 @@ function useDaemon(): DaemonView {
       const filter = { includeArchived: true }
       await client.agents.list({ scope: 'active', filter, sort, subscribe: {} })
       const page = await client.agents.list({ scope: 'active', filter, sort })
-      if (!disposed) setAgents(sortAgents(page.entries.map((entry) => entry.agent)))
+      // Merge, never replace: subscription updates may have advanced entries
+      // while the page was in flight, and a wholesale swap would replay their
+      // older snapshots over fresher truth.
+      if (!disposed) setAgents((prev) => applyAgentPage(prev, page.entries.map((entry) => entry.agent)))
 
       const snapshot =
         (await client.providers.waitForReady({ timeoutMs: 30_000 }).catch(() => null)) ??
@@ -124,27 +141,52 @@ function useDaemon(): DaemonView {
 
 const NO_TRUTH: DaemonTruth = { modelValue: null, thinkingId: null, modeId: null }
 
+/**
+ * Opens the raster-filtered multi-select file dialog through a native bridge.
+ * @gpuix ships no dialog API yet; when one lands, pass it
+ * `imagePickerDialogOptions()` from attachments.ts and resolve each chosen path
+ * into an IncomingImage (name, size, raw base64 data). Null means no bridge.
+ */
+async function openImagePicker(): Promise<IncomingImage[] | null> {
+  return null
+}
+
+/** One store per app run: read the state file once, persist every write. */
+const createStateStore = () => createAppStore(fileStateStorage(defaultStatePath()))
+
 export function ChatApp() {
   const { client, daemon, status, error, agents, providers } = useDaemon()
+  const [store] = useState(createStateStore)
 
   const [activeId, setActiveId] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState(false)
   const [draft, setDraft] = useState('')
+  const [draftImages, setDraftImages] = useState<ImageAttachment[]>([])
+  const [attachNotice, setAttachNotice] = useState<{ text: string; tone: 'warn' | 'danger' } | null>(null)
   const [createError, setCreateError] = useState<string | null>(null)
-  const [pendingSeed, setPendingSeed] = useState<{ agentId: string; text: string } | null>(null)
+  const [pendingSeed, setPendingSeed] = useState<{ agentId: string; text: string; images: ImageAttachment[] } | null>(
+    null,
+  )
 
   const { config: draftConfig, setModel: setDraftModel, setThinking: setDraftThinking, setMode: setDraftMode } =
     useDraftConfig(providers)
+  const seed = pendingSeed && pendingSeed.agentId === activeId ? pendingSeed : null
   const [cwd, setCwd] = useState(process.cwd())
   const [cwdOptions, setCwdOptions] = useState<string[]>([])
   const [worktree, setWorktree] = useState('local')
 
   const conversation = useAgentConversation(client, activeId, {
-    seedText: pendingSeed && pendingSeed.agentId === activeId ? pendingSeed.text : null,
+    seedText: seed?.text ?? null,
+    seedImages: seed?.images ?? null,
     onSeedConsumed: () => setPendingSeed(null),
   })
   const turns = conversation.turns
   const permissions = useAgentPermissions(client, daemon, activeId)
+  // No OS notifier exists in @gpuix yet, so delivery silently no-ops; the
+  // payloads are ready for a runtime bridge — clicking one deep-links by
+  // re-selecting notice.payload.agentId.
+  const attentionBridge: NotificationBridge | null = null
+  const attention = useAttention({ agents, activeId, serverId: daemonHost(), bridge: attentionBridge })
   const activeEntry = agents.find((entry) => entry.id === activeId) ?? null
 
   // An agent that vanished from the directory (deleted) or was archived can no
@@ -196,6 +238,22 @@ export function ChatApp() {
     [providers, modelValue],
   )
 
+  // The meter reads the live stream's usage, falling back to the directory
+  // snapshot until the first event lands; the window size falls back to the
+  // selected model's catalog value when usage omits it.
+  const sessionUsage = conversation.usage ?? activeEntry?.lastUsage ?? null
+  const usageMeter = useMemo(
+    () =>
+      contextMeter({
+        usedTokens: sessionUsage?.contextWindowUsedTokens,
+        maxTokens: sessionUsage?.contextWindowMaxTokens ?? modelDef?.contextWindowMaxTokens ?? null,
+        costUsd: sessionUsage?.totalCostUsd,
+        // The wire usage schema carries no per-provider shares yet, so the
+        // breakdown seam stays latched for when the daemon reports them.
+      }),
+    [sessionUsage, modelDef],
+  )
+
   useEffect(() => {
     if (status !== 'connected') return
     let disposed = false
@@ -234,36 +292,42 @@ export function ChatApp() {
       : undefined
 
   const listRef = useRef<{ id: number } | null>(null)
-  // Follow the tail only when the tail itself changed: history pages prepend
-  // above the viewport, and scrolling to the bottom would yank the reader away
-  // from the rows they just opened.
-  const tailSignature = useRef<string | null>(null)
   const { renderer } = useGpuix()
-
-  useEffect(() => {
-    const tail = JSON.stringify(visibleTurns.at(-1) ?? null)
-    const unchanged = tail === tailSignature.current
-    tailSignature.current = tail
-    if (unchanged) return
-    const id = listRef.current?.id
-    if (id == null || !renderer?.scrollToItem) return
+  const { following, onScroll, requestJump, jumpToTurn } = useTranscriptFollow({
+    listRef,
+    turnCount: visibleTurns.length,
+    // The final turn's identity, so a history page prepended above the viewport
+    // (count grew, tail sat still) doesn't drag a following view back down.
+    tailSignature: visibleTurns.length > 0 ? JSON.stringify(visibleTurns.at(-1)) : undefined,
+    agentId: activeId,
+    renderer,
     // HistoryHead occupies virtual-list slot 0 whenever older history does (or
     // may) exist upstream, so every turn row is shifted down by one.
-    const tailIndex = olderPages ? visibleTurns.length : visibleTurns.length - 1
-    renderer.scrollToItem(id, Math.max(0, tailIndex))
-  }, [renderer, visibleTurns.length, olderPages])
+    slotOffset: olderPages ? 1 : 0,
+  })
 
   const send = async (raw: string) => {
     const text = raw.trim()
     if (!text || status !== 'connected') return
+    // Sending means the user is here: any attention on this agent can rest.
+    attention.engageComposer(activeId)
+    const stagedImages = draftImages
+    const outgoing = toSendImages(stagedImages)
+    // Chips clear immediately; a failed send restores them next to the text.
     setDraft('')
+    setDraftImages([])
     setCreateError(null)
+    setAttachNotice(null)
     if (activeId) {
-      void conversation.send(text)
+      void conversation.send(text, stagedImages).then((ok) => {
+        // A failed send restores the exact previous chips next to the text.
+        if (!ok) restoreDraft(text, stagedImages)
+      })
       return
     }
     if (!modelValue) {
       setCreateError('No provider model is ready yet.')
+      restoreDraft(text, stagedImages)
       return
     }
     try {
@@ -274,13 +338,76 @@ export function ChatApp() {
         config,
         cwd,
         prompt: text,
+        ...(outgoing.length > 0 ? { images: outgoing } : {}),
         ...(worktree === 'worktree' ? { git: { createWorktree: true } } : {}),
       })
-      setPendingSeed({ agentId: handle.id, text })
+      setPendingSeed({ agentId: handle.id, text, images: stagedImages })
       setActiveId(handle.id)
     } catch (err) {
       setCreateError(errorMessage(err))
+      restoreDraft(text, stagedImages)
     }
+  }
+
+  /** Puts a failed send back into the composer, text and chips both restored. */
+  const restoreDraft = (text: string, images: ImageAttachment[]) => {
+    setDraft(text)
+    setDraftImages(images)
+  }
+
+  // Brief inline notices dismiss themselves.
+  useEffect(() => {
+    if (!attachNotice) return
+    const timer = setTimeout(() => setAttachNotice(null), 4_000)
+    return () => clearTimeout(timer)
+  }, [attachNotice])
+
+  /** Stages an attach plan's chips and surfaces its inline notice, if any. */
+  const applyPlan = (plan: AttachmentPlan) => {
+    if (plan.images.length > 0) setDraftImages((prev) => [...prev, ...plan.images])
+    if (plan.notice) {
+      setAttachNotice({ text: plan.notice, tone: plan.images.length === 0 ? 'danger' : 'warn' })
+    }
+  }
+
+  /** Validates offered files and stages survivors as chips; attaching needs a daemon. */
+  const offerImages = (files: readonly IncomingImage[]) => {
+    if (disabledReason) return
+    applyPlan(planAttachments(files))
+  }
+
+  /**
+   * Receives clipboard contents once a runtime bridge offers them: raster image
+   * files become chips, everything else falls through as normal text. Bound via
+   * the composer's onPastePayload contract until @gpuix exposes paste events;
+   * note its editor consumes Ctrl+V natively, so failed image pastes never
+   * even reach JS as keystrokes.
+   */
+  const offerPaste = (payload: PastePayload) => {
+    const { appendText, plan } = planPaste(payload)
+    if (plan) applyPlan(plan)
+    else if (appendText != null) setDraft((prev) => prev + appendText)
+  }
+
+  const pickAttachments = async () => {
+    if (disabledReason) return
+    const picked = await openImagePicker()
+    if (picked === null) {
+      setAttachNotice({ text: 'Picking files needs a native dialog; attaching images is not supported yet.', tone: 'warn' })
+      return
+    }
+    if (picked.length > 0) offerImages(picked)
+  }
+
+  /** Pulls a queued send back into the composer for editing, chips included. */
+  const editQueued = (queuedId: string) => {
+    const entry = conversation.pending.find((send) => send.id === queuedId)
+    if (!entry) return
+    conversation.unqueue(queuedId)
+    setDraft(entry.text)
+    setDraftImages(entry.images)
+    setCreateError(null)
+    setAttachNotice(null)
   }
 
   const title = activeId ? (activeEntry ? displayName(activeEntry) : 'Agent') : 'New Task'
@@ -358,6 +485,7 @@ export function ChatApp() {
           onArchive={archiveAgentRow}
           onDelete={deleteAgentRow}
           onRename={renameAgentRow}
+          store={store}
         />
         <div style={{ width: 1, height: '100%', flexShrink: 0, backgroundColor: C.sidebarBorder }} />
       </motion.div>
@@ -398,9 +526,14 @@ export function ChatApp() {
             turns={visibleTurns}
             permissions={permissions.cards}
             onRespond={permissions.respond}
+            onEditQueued={editQueued}
             listRef={listRef}
             olderPages={olderPages}
             onLoadOlder={conversation.loadHistory}
+            detached={!following}
+            onScroll={onScroll}
+            onJumpToBottom={requestJump}
+            onJumpToTurn={jumpToTurn}
           />
         )}
         {createError && (
@@ -418,8 +551,16 @@ export function ChatApp() {
             if (createError) setCreateError(null)
           }}
           onSend={send}
+          onFocus={() => attention.engageComposer(activeId)}
+          onBlur={() => attention.engageComposer(activeId)}
           disabledReason={disabledReason}
           chips={draftChips}
+          attachments={draftImages}
+          onRemoveAttachment={(id) => setDraftImages((prev) => removeAttachment(prev, id))}
+          onAttach={() => void pickAttachments()}
+          onPastePayload={offerPaste}
+          attachNotice={attachNotice}
+          usageMeter={usageMeter}
         />
         <FooterBar
           cwd={activeEntry?.cwd ?? cwd}
