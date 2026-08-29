@@ -21,6 +21,21 @@ hidden behind the view menu's Show section and read dimmed when revealed;
 archiving is one-way.
 _Avoid_: session list, conversation list
 
+**Subagent**:
+A child agent working inside a parent agent's task, one row in the subagent
+panel. Two kinds share that panel and its projections.
+
+**Managed subagent**:
+A real child agent found via its `paseo.parent-agent-id` label in the agent
+directory; archived ones are excluded. Opening one is ordinary conversation
+navigation.
+_Avoid_: child session, spawned agent
+
+**Provider subagent**:
+A provider-owned descriptor pushed by the daemon (`agent.provider_subagents.*`)
+with a timeline fetched and streamed separately. Opening one swaps the
+transcript area for a read-only view.
+
 **Timeline item**:
 One event on an agent's timeline as the daemon emits it (user message,
 assistant delta, reasoning delta, tool call, todo snapshot, error).
