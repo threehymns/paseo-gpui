@@ -30,6 +30,10 @@ import {
   completionTimestamp,
   copyableText,
   toolDetailParts,
+  compactionLabel,
+  summarizeUsage,
+  attachTurnUsage,
+  formatTurnUsage,
   type AgentEntry,
   type ProviderEntry,
   type TimelineEntry,
@@ -250,6 +254,123 @@ describe('timeline mapping', () => {
   test('errors become error turns', () => {
     const turns = applyTimelineItem([], { type: 'error', message: 'boom' })
     expect(turns[turns.length - 1]!.kind).toBe('error')
+  })
+})
+
+// ---- compaction dividers ----------------------------------------------------
+
+const compaction = (
+  over: { status?: 'loading' | 'completed'; trigger?: 'auto' | 'manual'; preTokens?: number } = {},
+): TimelineItem =>
+  ({
+    type: 'compaction',
+    status: over.status ?? 'loading',
+    trigger: over.trigger,
+    preTokens: over.preTokens,
+  }) as never
+
+describe('compaction dividers', () => {
+  test('a compaction item folds into a divider turn', () => {
+    const turns = applyTimelineItem([], compaction())
+    expect(turns).toEqual([{ kind: 'compaction', status: 'loading' }])
+  })
+
+  test('the latest status replaces prior compaction state instead of stacking', () => {
+    const turns = buildTurns([
+      timed(compaction({ status: 'loading' }), 1_000),
+      timed(compaction({ status: 'completed', trigger: 'auto', preTokens: 123_456 }), 2_000),
+    ])
+    expect(turns).toHaveLength(1)
+    expect(turns[0]).toEqual({ kind: 'compaction', status: 'completed', trigger: 'auto', preTokens: 123_456 })
+  })
+
+  test('dividers separated by other turns stay distinct rows', () => {
+    const turns = buildTurns([
+      timed(compaction({ status: 'completed', trigger: 'auto' }), 1_000),
+      timed({ type: 'assistant_message', text: 'ok' }, 2_000),
+      timed(compaction(), 3_000),
+    ])
+    expect(turns.filter((t) => t.kind === 'compaction')).toHaveLength(2)
+  })
+
+  test('an arriving divider seals a trailing thinking block', () => {
+    const turns = buildTurns([
+      timed({ type: 'reasoning', text: 'hmm' }, 1_000),
+      timed({ type: 'reasoning', text: ' m' }, 3_500),
+      timed(compaction(), 9_000),
+    ])
+    const thinking = turns[0] as { kind: string; durationMs?: number }
+    // Sealed from the last delta, not from the divider's arrival.
+    expect(thinking.durationMs).toBe(2_500)
+    expect(turns[1]!.kind).toBe('compaction')
+  })
+
+  test('compactionLabel mirrors upstream strings and precedence', () => {
+    expect(compactionLabel({ kind: 'compaction', status: 'loading' })).toBe('Compacting...')
+    expect(compactionLabel({ kind: 'compaction', status: 'completed', trigger: 'auto' })).toBe(
+      'Context automatically compacted',
+    )
+    expect(compactionLabel({ kind: 'compaction', status: 'completed', trigger: 'manual' })).toBe(
+      'Context manually compacted',
+    )
+    expect(compactionLabel({ kind: 'compaction', status: 'completed', preTokens: 123_456 })).toBe(
+      'Context compacted (123K tokens)',
+    )
+    // Trigger labels outrank the token count, matching upstream.
+    expect(compactionLabel({ kind: 'compaction', status: 'completed', trigger: 'auto', preTokens: 5_000 })).toBe(
+      'Context automatically compacted',
+    )
+    expect(compactionLabel({ kind: 'compaction', status: 'completed', preTokens: 0 })).toBe('Context compacted')
+    expect(compactionLabel({ kind: 'compaction', status: 'completed' })).toBe('Context compacted')
+  })
+})
+
+// ---- turn usage footer ------------------------------------------------------
+
+describe('turn usage footer', () => {
+  test('summarizeUsage totals token fields and keeps cost only when present', () => {
+    expect(summarizeUsage({ inputTokens: 100, cachedInputTokens: 20, outputTokens: 30 })).toEqual({
+      totalTokens: 150,
+    })
+    expect(summarizeUsage({ inputTokens: 10, outputTokens: 5, totalCostUsd: 0.0415 })).toEqual({
+      totalTokens: 15,
+      costUsd: 0.0415,
+    })
+    expect(summarizeUsage({})).toBeUndefined()
+    expect(summarizeUsage({ inputTokens: 0, outputTokens: 0 })).toBeUndefined()
+  })
+
+  test('attachTurnUsage lands on the newest assistant turn, skipping later non-assistant rows', () => {
+    const base = buildTurns([
+      timed({ type: 'user_message', text: 'go' }, 1_000),
+      timed({ type: 'assistant_message', text: 'working' }, 2_000),
+      timed(toolCall({ detail: { type: 'shell', command: 'ls' }, status: 'completed' }), 3_000),
+    ])
+    const withUsage = attachTurnUsage(base, { outputTokens: 42 })
+    expect(withUsage).toHaveLength(3)
+    expect((withUsage[1] as { usage?: unknown }).usage).toEqual({ totalTokens: 42 })
+  })
+
+  test('attachTurnUsage without an assistant turn is a no-op', () => {
+    const turns = applyTimelineItem([], { type: 'user_message', text: 'hi' })
+    expect(attachTurnUsage(turns, { outputTokens: 1 })).toEqual(turns)
+  })
+
+  test('usage attached to an assistant turn survives later deltas merging into it', () => {
+    let turns = applyTimelineItem([], { type: 'assistant_message', text: 'a' }, 1_000)
+    turns = attachTurnUsage(turns, { inputTokens: 5 })
+    turns = applyTimelineItem(turns, { type: 'assistant_message', text: 'b' }, 2_000)
+    expect((turns[0] as { source: string }).source).toBe('ab')
+    expect((turns[0] as { usage?: unknown }).usage).toEqual({ totalTokens: 5 })
+  })
+
+  test('formatTurnUsage renders compact tokens plus cost only when present', () => {
+    expect(formatTurnUsage({ totalTokens: 900 })).toBe('900 tokens')
+    expect(formatTurnUsage({ totalTokens: 12_400 })).toBe('12k tokens')
+    expect(formatTurnUsage({ totalTokens: 3_200_000 })).toBe('3m tokens')
+    expect(formatTurnUsage({ totalTokens: 15, costUsd: 0.0415 })).toBe('15 tokens · $0.04')
+    expect(formatTurnUsage({ totalTokens: 2_500, costUsd: 0.005 })).toBe('3k tokens · $0.0050')
+    expect(formatTurnUsage({ totalTokens: 1_500, costUsd: 1.5 })).toBe('2k tokens · $1.50')
   })
 })
 

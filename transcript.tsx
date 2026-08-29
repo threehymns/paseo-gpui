@@ -9,15 +9,18 @@ import type { EventPayload } from '@gpuix/native'
 import { Icon, StatusDot, type IconName } from './chrome'
 import { SafeMdxContent } from './mdx'
 import {
+  compactionLabel,
   completionTimestamp,
   copyableText,
   diffStats,
+  formatTurnUsage,
   permissionDisplay,
   permissionKindLabel,
   reasoningLabel,
   toolDetailParts,
   workedForLabel,
   type AssistantTurn,
+  type CompactionTurn,
   type PermissionKind,
   type PermissionResponse,
   type ReasoningTurn,
@@ -334,6 +337,39 @@ function ReasoningRow({ turn }: { turn: ReasoningTurn }) {
 }
 
 /**
+/**
+ * Compaction divider: a rule–label–rule separator explaining apparent memory
+ * loss. Deliberately quiet — no card, no wash, ghost-toned like Paseo's own
+ * marker (spinner while compacting, scissors once done).
+ */
+function CompactionRow({ turn }: { turn: CompactionTurn }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 10,
+        width: '100%',
+        minWidth: 0,
+        padding: 6,
+      }}
+    >
+      <div style={{ flexGrow: 1, height: 1, backgroundColor: C.border }} />
+      <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+        {turn.status === 'loading' ? (
+          <StatusDot color={C.running} size={7} />
+        ) : (
+          <Icon name="scissors" size={12} color={C.secondary} />
+        )}
+        <text style={{ fontSize: 12.5, color: C.tertiary }}>{compactionLabel(turn)}</text>
+      </div>
+      <div style={{ flexGrow: 1, height: 1, backgroundColor: C.border }} />
+    </div>
+  )
+}
+
+/**
  * The footer line under an assistant turn: elapsed time ticking each second
  * while it works, "Worked for {duration}" once finished — swapping to the
  * completion clock time on hover — and a copy affordance for its markdown,
@@ -361,7 +397,7 @@ function AssistantFooter({ turn }: { turn: AssistantTurn }) {
     return () => clearTimeout(timer)
   }, [copied])
 
-  if (turn.startedAt == null && !copyText) return null
+  if (turn.startedAt == null && !copyText && !turn.usage) return null
 
   const copy = () => {
     if (!copyText || copied) return
@@ -391,6 +427,11 @@ function AssistantFooter({ turn }: { turn: AssistantTurn }) {
           style={{ fontSize: 11.5, color: C.ghost, flexShrink: 0, userSelect: 'none' }}
         >
           {finished && hovered ? completionTimestamp(turn.endedAt!) : label}
+        </text>
+      )}
+      {turn.usage && (
+        <text style={{ fontSize: 11.5, color: C.ghost, flexShrink: 0, userSelect: 'none' }}>
+          {formatTurnUsage(turn.usage)}
         </text>
       )}
       {copyText && (
@@ -950,6 +991,7 @@ export const Transcript = memo(function Transcript({
             )}
             {turn.kind === 'reasoning' && <ReasoningRow turn={turn} />}
             {turn.kind === 'tool' && <ToolRow turn={turn} />}
+            {turn.kind === 'compaction' && <CompactionRow turn={turn} />}
             {turn.kind === 'todo' && <TodoBlock items={turn.items} />}
             {turn.kind === 'error' && <ErrorBlock text={turn.text} />}
             {turn.kind === 'canceled' && <CanceledBlock reason={turn.reason} />}
@@ -992,4 +1034,5 @@ export const Transcript = memo(function Transcript({
       {railStops.length > 0 && <OutlineRail stops={railStops} onJump={onJumpToTurn ?? (() => {})} />}
     </div>
   )
-})
+}
+)

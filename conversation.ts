@@ -15,6 +15,7 @@ import { newAttachmentId, toSendImages, type ImageAttachment } from './attachmen
 import {
   applyTimelineItem,
   applyTurnCanceled,
+  attachTurnUsage,
   buildTurns,
   errorMessage,
   sealTrailingTurns,
@@ -77,6 +78,9 @@ export type ConversationEvent =
   | { type: 'loadFailed'; error: unknown }
   | { type: 'timeline'; item: TimelineItem; at?: number }
   | { type: 'turnCompleted'; at?: number; usage?: AgentUsage }
+  // The daemon's agent_stream relay does not forward `usage_updated` yet;
+  // this seam keeps mid-turn usage folding ready for when it does.
+  | { type: 'usageUpdated'; usage: AgentUsage }
   | { type: 'turnFailed'; message: string }
   | { type: 'turnCanceled'; reason?: string; at?: number }
   | { type: 'sendQueued'; text: string; images?: ImageAttachment[] }
@@ -192,14 +196,21 @@ export function reduceConversation(state: ConversationState, event: Conversation
       }
       return next
     }
-    case 'turnCompleted':
+    case 'turnCompleted': {
       // Ends any still-open trailing thinking block or assistant turn with
-      // nothing after it.
+      // nothing after it, and files the turn's final usage onto its assistant turn.
+      let turns = sealTrailingTurns(state.turns, event.at ?? Date.now())
+      if (event.usage) turns = attachTurnUsage(turns, event.usage)
       return {
         ...state,
-        turns: sealTrailingTurns(state.turns, event.at ?? Date.now()),
+        turns,
         usage: event.usage ?? state.usage,
       }
+    }
+    case 'usageUpdated':
+      // Mid-turn usage updates land on the newest assistant turn; the turn's
+      // own completion overwrites it with the settled numbers.
+      return { ...state, turns: attachTurnUsage(state.turns, event.usage) }
     case 'turnFailed':
       // Record the daemon-reported failure in the entry list too so it survives
       // a later history-page re-fold; only locally synthesized failures
@@ -305,6 +316,8 @@ export function useAgentConversation(
           if (event.type === 'timeline') {
             setState((prev) => reduceConversation(prev, { type: 'timeline', item: event.item, at: eventTime(timestamp) }))
           } else if (event.type === 'turn_completed') {
+            // Settled per-turn usage rides on turn completion; the daemon's
+            // agent_stream relay does not forward mid-turn usage_updated.
             setState((prev) =>
               reduceConversation(prev, { type: 'turnCompleted', at: eventTime(timestamp), usage: event.usage }),
             )

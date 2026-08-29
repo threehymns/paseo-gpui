@@ -38,18 +38,21 @@ transcript area for a read-only view.
 
 **Timeline item**:
 One event on an agent's timeline as the daemon emits it (user message,
-assistant delta, reasoning delta, tool call, todo snapshot, error).
+assistant delta, reasoning delta, tool call, todo snapshot, compaction,
+error).
 
 **Turn**:
 A transcript row produced by folding timeline items: user, assistant,
-reasoning, tool, todo, or error. Streaming deltas merge into the previous turn
-of their kind; tool calls replace by call id. A tool turn carries both a
-flattened summary and the daemon's structured detail; its row expands in place
-to show that detail, with expansion state kept by the row itself. An edit turn's
-expansion shows its patch as a diff. A reasoning turn stays collapsed until
-opened: while deltas stream it reads "Thinking…", and once anything proves
-thinking has stopped (the next appended item or the turn's end) its length is
-sealed from the delta timestamps and the row reads "Thought for <duration>".
+reasoning, tool, compaction, todo, error, or canceled. Streaming deltas merge into the
+previous turn of their kind; tool calls replace by call id; a compaction item
+replaces the prior compaction state rather than stacking. A tool turn carries
+both a flattened summary and the daemon's structured detail; its row expands in
+place to show that detail, with expansion state kept by the row itself. An edit
+turn's expansion shows its patch as a diff. A reasoning turn stays collapsed
+until opened: while deltas stream it reads "Thinking…", and once anything
+proves thinking has stopped (the next appended item or the turn's end) its
+length is sealed from the delta timestamps and the row reads "Thought for
+<duration>".
 An assistant turn carries its own span: it starts at its first delta, and once
 anything proves it finished (the next appended item or turn completion) it is
 sealed at that moment — never at whenever sealing happens to run. Its footer
@@ -58,6 +61,16 @@ when done (swapping to the completion clock time on hover), and offers copying
 its markdown with a brief ✓ flash; turns with nothing copyable show no copy
 affordance.
 _Avoid_: message, item
+
+**Compaction divider**:
+The quiet rule–label–rule separator a compaction turn renders ("Context
+compacted…", spinner while compacting). It explains apparent memory loss; it is
+not an error or a chat message.
+
+**Usage footer**:
+The lightweight line under the newest assistant turn — tokens, plus cost when
+the daemon provides it — fed by `usage_updated` and `turn_completed` usage.
+_Avoid_: meter, chart
 
 **Sealed**:
 The frozen duration of a finished reasoning block, measured first-delta to
