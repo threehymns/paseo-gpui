@@ -142,6 +142,22 @@ describe('agent conversation', () => {
     expect(said.endedAt).toBe(9_000)
   })
 
+  test('turn_completed usage keeps the session usage fresh; reset clears it', () => {
+    const usage = { contextWindowUsedTokens: 1200, contextWindowMaxTokens: 200_000 }
+    let state = run([{ type: 'loaded', items: [] }])
+    expect(state.usage).toBeNull()
+    state = reduceConversation(state, { type: 'turnCompleted', at: 100, usage })
+    expect(state.usage).toEqual(usage)
+    // A later turn reports newer usage.
+    const next = { ...usage, contextWindowUsedTokens: 4800, totalCostUsd: 0.09 }
+    state = reduceConversation(state, { type: 'turnCompleted', at: 200, usage: next })
+    expect(state.usage).toEqual(next)
+    // A turn without usage leaves the last known value alone.
+    expect(reduceConversation(state, { type: 'turnCompleted', at: 300 }).usage).toEqual(next)
+    // Switching agents clears it.
+    expect(reduceConversation(state, { type: 'reset' }).usage).toBeNull()
+  })
+
   test('loadFailed marks the conversation errored instead of hanging on loading', () => {
     const state = run([{ type: 'loadFailed', error: new Error('archived') }])
     expect(state.status).toBe('error')

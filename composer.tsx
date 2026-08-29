@@ -2,12 +2,17 @@
  * The composer: draft textarea with chips, plus the workspace footer bar.
  */
 
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import React, { useMemo } from 'react'
 import { Icon, IconButton, StatusDot, type IconName } from './chrome'
 import { OptionPicker } from './pickers'
 import { basename } from './paseo'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@gpuix/react'
 import type { ImageAttachment, PastePayload } from './attachments'
 import type { ProviderNotice } from './live-config'
+import { type ContextMeter, type MeterTone } from './usage'
 import { C, CHAT_THEME, CONTENT_MAX_WIDTH } from './theme'
 
 const NOTICE_COLORS: Record<ProviderNotice['type'], string> = {
@@ -117,10 +122,95 @@ function RoundButton({
   )
 }
 
+const METER_COLORS: Record<MeterTone, string> = {
+  neutral: C.secondary,
+  amber: C.warn,
+  red: C.danger,
+}
+
+/**
+ * A ring gauge for the native `svg` element. The renderer takes `src` as a
+ * real filesystem path to an .svg file (raises ENOENT on inline markup) and
+ * paints it monochrome, tinting the whole shape with `style.color`. So the
+ * two-tone ring (faint track + colored arc) is two stacked layers, each its
+ * own file written to a scratch dir and colored via style: the track is the
+ * full circle, the arc covers `fraction` of it starting at 12 o'clock (the
+ * r=15.9155 trick makes the circumference exactly 100).
+ */
+
+const RING_SIZE = 36
+const RING_RADIUS = 15.9155
+const RING_STROKE = 4
+const RING_ROOT = path.join(tmpdir(), 'gpuix-chat-assets')
+
+function ringSvg(dasharray: string): string {
+  const r = RING_SIZE / 2
+  return [
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${RING_SIZE} ${RING_SIZE}">`,
+    `<circle cx="${r}" cy="${r}" r="${RING_RADIUS}" fill="none" stroke="#000" stroke-width="${RING_STROKE}"`,
+    dasharray ? ` stroke-linecap="round" stroke-dasharray="${dasharray}"` : '',
+    ` transform="rotate(-90 ${r} ${r})"/>`,
+    '</svg>',
+  ].join(' ')
+}
+
+/** Materialize an svg string as a real file so the native renderer can load it. */
+function ringAsset(content: string, key: string): string {
+  mkdirSync(RING_ROOT, { recursive: true })
+  const dest = path.join(RING_ROOT, `meter-ring-${key}.svg`)
+  writeFileSync(dest, content)
+  return dest
+}
+
+function meterRingAssets(fraction: number): { track: string; arc: string } {
+  const arcPct = Math.max(0, Math.min(1, fraction)) * 100
+  const track = ringAsset(ringSvg('100 0'), 'track')
+  const arc = ringAsset(ringSvg(`${arcPct} ${100 - arcPct}`), `arc-${Math.round(arcPct * 100)}`)
+  return { track, arc }
+}
+
+/** The context-window meter ring with its hover breakdown. */
+function UsageRing({ meter }: { meter: ContextMeter }) {
+  const color = METER_COLORS[meter.tone]
+  const assets = useMemo(() => meterRingAssets(meter.fraction), [meter.fraction])
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <div testId="context-meter" style={{ position: 'relative', width: 16, height: 16, cursor: 'default', display: 'flex' }}>
+          <svg src={assets.track} style={{ width: 16, height: 16, color: C.overlayStrong, position: 'absolute', inset: 0 }} />
+          <svg src={assets.arc} style={{ width: 16, height: 16, color, position: 'absolute', inset: 0 }} />
+        </div>
+      </TooltipTrigger>
+      <TooltipContent side="top" sideOffset={6}>
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 2,
+            padding: 8,
+            backgroundColor: C.raised,
+            borderWidth: 1,
+            borderColor: C.borderStrong,
+            borderRadius: 10,
+          }}
+        >
+          {meter.lines.map((line) => (
+            <text key={line} style={{ fontSize: 12, lineHeight: 16, color: C.secondary, whiteSpace: 'nowrap' }}>
+              {line}
+            </text>
+          ))}
+        </div>
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
 export function Composer({
   value,
   onChange,
   onSend,
+  onFocus,
+  onBlur,
   disabledReason,
   chips,
   attachments = [],
@@ -128,10 +218,14 @@ export function Composer({
   onAttach,
   onPastePayload,
   attachNotice,
+  usageMeter = null,
 }: {
   value: string
   onChange: (next: string) => void
   onSend: (text: string) => void
+  /** Composer engagement moments — attention clears on all of them. */
+  onFocus?: () => void
+  onBlur?: () => void
   disabledReason: string | null
   chips: React.ReactNode
   /** Staged image chips shown above the input. */
@@ -145,6 +239,8 @@ export function Composer({
    */
   onPastePayload?: (payload: PastePayload) => void
   attachNotice?: { text: string; tone: 'warn' | 'danger' } | null
+  /** Context-window meter ring; hidden entirely when there is no usage data. */
+  usageMeter?: ContextMeter | null
 }) {
   const ready = value.trim().length > 0 && !disabledReason
   const send = (text: string) => {
@@ -220,6 +316,8 @@ export function Composer({
           }}
           onChange={(event) => onChange(event.value ?? '')}
           onSubmit={(event) => send(event.value ?? value)}
+          onFocus={onFocus}
+          onBlur={onBlur}
         />
         {attachNotice && (
           <text
@@ -261,6 +359,7 @@ export function Composer({
         >
           {chips}
           <div style={{ flexGrow: 1 }} />
+          {usageMeter && <UsageRing meter={usageMeter} />}
           <RoundButton
             testId="attach"
             icon="image"
