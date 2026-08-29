@@ -9,6 +9,8 @@ import React, { useMemo } from 'react'
 import { Icon, IconButton, StatusDot, type IconName } from './chrome'
 import { OptionPicker } from './pickers'
 import { basename } from './paseo'
+import type { Turn } from './paseo'
+import { changesTrack, tasksTrack } from './tracks'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@gpuix/react'
 import type { ImageAttachment, PastePayload } from './attachments'
 import type { ProviderNotice } from './live-config'
@@ -28,6 +30,155 @@ export function ConfigNotice({ notice }: { notice: ProviderNotice }) {
       <text style={{ fontSize: 12, color: NOTICE_COLORS[notice.type], width: CONTENT_MAX_WIDTH }}>
         {notice.message}
       </text>
+    </div>
+  )
+}
+
+// ---- tracks row -------------------------------------------------------------
+
+export function Pill({
+  testId,
+  onClick,
+  children,
+}: {
+  testId?: string
+  onClick?: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <div
+      testId={testId}
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        height: 26,
+        paddingLeft: 8,
+        paddingRight: 4,
+        borderRadius: 7,
+        backgroundColor: C.item,
+        flexShrink: 0,
+        ...(onClick ? { cursor: 'pointer' as const, hover: { backgroundColor: C.overlayStrong } } : {}),
+      }}
+      onClick={onClick}
+    >
+      {children}
+    </div>
+  )
+}
+
+/** A compact in-pill icon action; `busy` suspends it while its daemon call is in flight. */
+export function PillAction({
+  testId,
+  icon,
+  busy,
+  onClick,
+}: {
+  testId: string
+  icon: IconName
+  busy?: boolean
+  onClick?: () => void
+}) {
+  return (
+    <div
+      testId={testId}
+      style={{
+        width: 18,
+        height: 18,
+        borderRadius: 5,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        cursor: busy ? undefined : 'pointer',
+        opacity: busy ? 0.35 : 1,
+        hover: busy ? undefined : { backgroundColor: C.overlay },
+      }}
+      onClick={busy ? undefined : onClick}
+    >
+      <Icon name={icon} size={11} color={C.secondary} />
+    </div>
+  )
+}
+
+/**
+ * The tracks row above the composer: live work at a glance. The Tasks and
+ * DiffStat pills fold from the transcript's turns; the Subagents pill arrives
+ * as a slot reading the subagent store instead. The DiffStat pill renders only
+ * while a Changes surface exists (`onOpenChanges`); the whole row disappears
+ * when nothing has to say.
+ */
+export function TracksRow({
+  turns,
+  subagents,
+  onOpenChanges,
+}: {
+  turns: Turn[]
+  /** The Subagents pill element, rendered between Tasks and DiffStat. */
+  subagents?: React.ReactNode
+  /** Present only while a Changes surface exists to open. */
+  onOpenChanges?: () => void
+}) {
+  const tasks = tasksTrack(turns)
+  const changes = changesTrack(turns)
+
+  if (!tasks && !(changes && onOpenChanges) && !subagents) return null
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'row', justifyContent: 'center', paddingBottom: 4 }}>
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'row',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: 6,
+          width: CONTENT_MAX_WIDTH,
+          maxWidth: '100%',
+          paddingLeft: 10,
+          userSelect: 'none',
+        }}
+      >
+        {tasks && (
+          <Pill testId="tracks-tasks">
+            <Icon name="list" size={12} color={C.tertiary} />
+            <text style={{ fontSize: 12, fontWeight: 500, color: C.secondary, whiteSpace: 'nowrap', flexShrink: 0 }}>
+              {`${tasks.completed}/${tasks.total}`}
+            </text>
+            {tasks.active && (
+              <text
+                style={{
+                  fontSize: 12,
+                  color: C.accent,
+                  whiteSpace: 'nowrap',
+                  textOverflow: 'ellipsis',
+                  minWidth: 0,
+                  maxWidth: 220,
+                  marginRight: 4,
+                }}
+              >
+                {tasks.active}
+              </text>
+            )}
+          </Pill>
+        )}
+        {subagents}
+        {changes && onOpenChanges && (
+          <Pill testId="tracks-diffstat" onClick={onOpenChanges}>
+            <Icon name="gitBranch" size={12} color={C.tertiary} />
+            {changes.additions > 0 && (
+              <text style={{ fontSize: 12, fontWeight: 500, color: C.ok, whiteSpace: 'nowrap', flexShrink: 0 }}>
+                {`+\u2060${changes.additions}`}
+              </text>
+            )}
+            {changes.deletions > 0 && (
+              <text style={{ fontSize: 12, fontWeight: 500, color: C.danger, whiteSpace: 'nowrap', flexShrink: 0, marginRight: 4 }}>
+                {`-\u2060${changes.deletions}`}
+              </text>
+            )}
+          </Pill>
+        )}
+      </div>
     </div>
   )
 }

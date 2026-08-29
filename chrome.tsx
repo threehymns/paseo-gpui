@@ -199,7 +199,7 @@ function SidebarAction({
   )
 }
 
-export type RowActionVerb = 'rename' | 'archive' | 'delete'
+export type RowActionVerb = 'rename' | 'archive' | 'delete' | 'detach'
 
 /** One row lifecycle call in flight; every action on that row stays disabled until it settles. */
 export interface RowActionRef {

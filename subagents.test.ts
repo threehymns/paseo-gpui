@@ -465,7 +465,9 @@ describe('track rows', () => {
       agentEntry({ id: 'other-kid', labels: { 'paseo.parent-agent-id': 'someone-else' } }),
     ]
     expect(managedChildren(agents, 'parent').map((entry) => entry.id)).toEqual(['kid'])
-    expect(selectTrackRows(initialSubagents, agents, 'parent').map((row) => row.kind)).toEqual(['managed'])
+    expect(selectTrackRows(initialSubagents, agents, 'parent', false).map((row) => row.kind)).toEqual([
+      'managed',
+    ])
   })
 
   test('managed and provider rows merge in creation order', () => {
@@ -475,13 +477,23 @@ describe('track rows', () => {
       subagents: [descriptor({ id: 'p-late', createdAt: '2026-08-24T11:00:00Z' })],
     })
     const agents = [agentEntry({ id: 'kid', createdAt: '2026-08-24T12:00:00Z' }), agentEntry({ id: 'elder', createdAt: '2026-08-24T08:00:00Z' })]
-    const rows = selectTrackRows(state, agents, 'parent')
+    const rows = selectTrackRows(state, agents, 'parent', true)
     expect(rows.map((row) => row.id)).toEqual(['elder', 'p-late', 'kid'])
     expect(mergeRows([], [])).toEqual([])
   })
 
   test('no parent means no rows at all', () => {
-    expect(selectTrackRows(initialSubagents, [agentEntry({})], null)).toEqual([])
+    expect(selectTrackRows(initialSubagents, [agentEntry({})], null, false)).toEqual([])
+  })
+
+  test('provider rows are suppressed while the daemon flag is off', () => {
+    const state = reduceSubagents(initialSubagents, {
+      type: 'listed',
+      parentAgentId: 'parent',
+      subagents: [descriptor({ id: 'p-kid' })],
+    })
+    const agents = [agentEntry({ id: 'kid', labels: { 'paseo.parent-agent-id': 'parent' } })]
+    expect(selectTrackRows(state, agents, 'parent', false).map((row) => row.kind)).toEqual(['managed'])
   })
 })
 

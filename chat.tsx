@@ -43,7 +43,7 @@ import { C, CONTENT_MAX_WIDTH, SIDEBAR_WIDTH } from './theme'
 import { Sidebar, Header, CenterMessage, agentStatusColor, daemonHost, type RowActionRef, type RowActionVerb } from './chrome'
 import { Transcript } from './transcript'
 import { ModelPicker, OptionPicker, modeOptions, thinkingOptions } from './pickers'
-import { Composer, ConfigNotice, FooterBar } from './composer'
+import { Composer, ConfigNotice, FooterBar, TracksRow } from './composer'
 import { useAgentConversation } from './conversation'
 import { useTranscriptFollow } from './follow'
 import { useAgentPermissions } from './permissions'
@@ -51,6 +51,21 @@ import { useAttention, type NotificationBridge } from './attention'
 import { useDraftConfig } from './draft-config'
 import { contextMeter } from './usage'
 import { liveTruth, useLiveAgentConfig, type DaemonTruth, type ProviderNotice } from './live-config'
+import {
+  providerSubagentsEnabled,
+  selectTrackRows,
+  subagentHasOlder,
+  subagentLabel,
+  subagentRowColor,
+  subagentTurns,
+  useSubagents,
+} from './subagents'
+import {
+  SubagentLoadOlder,
+  SubagentPill,
+  SubagentViewerBar,
+  type OpenSubagent,
+} from './tracks-panel'
 import { createAppStore, defaultStatePath, fileStateStorage } from './app-state'
 
 // ---- daemon hooks ----------------------------------------------------------
@@ -218,6 +233,50 @@ export function ChatApp() {
   const renameAgentRow = (id: string, name: string) =>
     runRowAction('rename', id, () => daemon.updateAgent(id, { name }))
 
+  // Subagents: the tracks-row pill reads the store's rows; opening a managed
+  // row is ordinary conversation navigation, a provider row swaps the
+  // transcript area for its read-only timeline. Managed children work
+  // regardless of any daemon feature flag; provider parts gate strictly.
+  const subagents = useSubagents(daemon, activeId)
+  const [viewing, setViewing] = useState<OpenSubagent | null>(null)
+  useEffect(() => {
+    setViewing(null)
+  }, [activeId])
+  useEffect(() => {
+    // A provider subagent's timeline is garbage-collected the moment its
+    // descriptor leaves the directory; a viewer still pointed at it would sit
+    // on "Loading subagent…" forever. The row no longer being in the track
+    // proves it's gone, so fold the viewer back.
+    if (viewing?.kind === 'provider' && !viewingRow) setViewing(null)
+  }, [viewing, viewingRow])
+  const subagentRows = useMemo(
+    () => selectTrackRows(subagents.state, agents, activeId, subagents.enabled),
+    [subagents.state, subagents.enabled, agents, activeId],
+  )
+  const viewingRow = viewing
+    ? subagentRows.find((row) => row.kind === viewing.kind && row.id === viewing.id) ?? null
+    : null
+  const viewingSubagent = viewing?.kind === 'provider' ? viewing : null
+  const providerTurns =
+    viewingSubagent
+      ? subagentTurns(subagents.state, viewingSubagent.parentAgentId, viewingSubagent.id)
+      : []
+
+  const viewSubagent = (target: OpenSubagent) => {
+    if (target.kind === 'managed') {
+      setActiveId(target.id)
+      return
+    }
+    subagents.openTimeline(target.parentAgentId, target.id)
+    setViewing(target)
+  }
+  const archiveSubagentRow = (id: string) => runRowAction('archive', id, () => daemon.archiveAgent(id))
+  const detachSubagentRow = (id: string) => runRowAction('detach', id, () => daemon.detachAgent(id))
+  // Both halves of the detach gate read the latest server_info snapshot; the
+  // hook re-renders us on each server_info event so the read stays current.
+  const daemonFeatures = daemon.getLastServerInfoMessage()?.features
+  const detachEnabled = providerSubagentsEnabled(daemonFeatures) && daemonFeatures?.agentDetach === true
+
   // Chip values for an active agent come from the live agent; the draft stays
   // authoritative only while no agent is selected.
   const truthOfActive = useMemo(() => (activeEntry ? liveTruth(activeEntry) : null), [activeEntry])
@@ -278,7 +337,10 @@ export function ChatApp() {
     }
   }, [client, status])
 
+  // The transcript area shows the parent conversation, or a provider
+  // subagent's read-only timeline while it is open.
   const visibleTurns = turns
+  const shownTurns = viewingSubagent ? providerTurns : visibleTurns
 
   // Older-history availability for the transcript's top edge: quiet while more
   // pages exist unrequested, a spinner while fetching, a marker once exhausted.
@@ -291,19 +353,22 @@ export function ChatApp() {
           : ('end' as const)
       : undefined
 
-  const listRef = useRef<{ id: number } | null>(null)
+const listRef = useRef<{ id: number } | null>(null)
   const { renderer } = useGpuix()
+  // Follow tracks the list actually rendered: the parent transcript normally,
+  // the open provider subagent's timeline while the viewer is up.
   const { following, onScroll, requestJump, jumpToTurn } = useTranscriptFollow({
     listRef,
-    turnCount: visibleTurns.length,
+    turnCount: shownTurns.length,
     // The final turn's identity, so a history page prepended above the viewport
     // (count grew, tail sat still) doesn't drag a following view back down.
-    tailSignature: visibleTurns.length > 0 ? JSON.stringify(visibleTurns.at(-1)) : undefined,
-    agentId: activeId,
+    tailSignature: shownTurns.length > 0 ? JSON.stringify(shownTurns.at(-1)) : undefined,
+    agentId: viewingSubagent ? viewingSubagent.parentAgentId : activeId,
     renderer,
     // HistoryHead occupies virtual-list slot 0 whenever older history does (or
-    // may) exist upstream, so every turn row is shifted down by one.
-    slotOffset: olderPages ? 1 : 0,
+    // may) exist upstream, so every turn row is shifted down by one. The
+    // subagent viewer pages history with its own head-free list.
+    slotOffset: viewingSubagent ? 0 : olderPages ? 1 : 0,
   })
 
   const send = async (raw: string) => {
@@ -505,6 +570,13 @@ export function ChatApp() {
           title={title}
           entry={activeEntry}
         />
+        {viewingSubagent && (
+          <SubagentViewerBar
+            label={subagentLabel(viewingRow) ?? 'Subagent'}
+            statusColor={viewingRow ? subagentRowColor(viewingRow) : C.ghost}
+            onBack={() => setViewing(null)}
+          />
+        )}
         {status === 'error' ? (
           <CenterMessage
             title={`Cannot reach ${daemonHost()}`}
@@ -512,15 +584,37 @@ export function ChatApp() {
           />
         ) : status === 'connecting' ? (
           <CenterMessage title={`Connecting to ${daemonHost()}…`} />
-        ) : visibleTurns.length === 0 && permissions.cards.length === 0 ? (
+        ) : shownTurns.length === 0 && (viewingSubagent || permissions.cards.length === 0) ? (
           <CenterMessage
-            title={activeId ? 'Starting agent…' : 'New task'}
+            title={viewingSubagent ? 'Loading subagent…' : activeId ? 'Starting agent…' : 'New task'}
             detail={
-              activeId
+              viewingSubagent || activeId
                 ? undefined
                 : `Pick a model, then describe what to build in ${basename(cwd)}.`
             }
           />
+        ) : viewingSubagent ? (
+          <>
+            {subagentHasOlder(subagents.state, viewingSubagent.parentAgentId, viewingSubagent.id) && (
+              <SubagentLoadOlder
+                loading={subagents.loadingOlder}
+                onClick={() =>
+                  subagents.loadOlder(viewingSubagent.parentAgentId, viewingSubagent.id)
+                }
+              />
+            )}
+            <Transcript
+              turns={shownTurns}
+              permissions={[]}
+              onRespond={undefined}
+              onEditQueued={undefined}
+              listRef={listRef}
+              detached={!following}
+              onScroll={onScroll}
+              onJumpToBottom={requestJump}
+              onJumpToTurn={jumpToTurn}
+            />
+          </>
         ) : (
           <Transcript
             turns={visibleTurns}
@@ -544,6 +638,19 @@ export function ChatApp() {
           </div>
         )}
         {editingLive && live.notice && <ConfigNotice notice={live.notice} />}
+        <TracksRow
+          turns={turns}
+          subagents={
+            <SubagentPill
+              rows={subagentRows}
+              busyRows={busyRows}
+              detachEnabled={detachEnabled}
+              onView={viewSubagent}
+              onArchive={archiveSubagentRow}
+              onDetach={detachSubagentRow}
+            />
+          }
+        />
         <Composer
           value={draft}
           onChange={(next) => {
