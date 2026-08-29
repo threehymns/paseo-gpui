@@ -371,7 +371,7 @@ export function Composer({
   onRemoveAttachment,
   onAttach,
   onPastePayload,
-  attachNotice,
+  transientNotice,
   usageMeter = null,
 }: {
   value: string
@@ -397,7 +397,7 @@ export function Composer({
    * a runtime bridge offers them; raster images become chips, text falls through.
    */
   onPastePayload?: (payload: PastePayload) => void
-  attachNotice?: { text: string; tone: 'warn' | 'danger' } | null
+  transientNotice?: { text: string; tone: 'warn' | 'danger' } | null
   /** Context-window meter ring; hidden entirely when there is no usage data. */
   usageMeter?: ContextMeter | null
 }) {
@@ -481,18 +481,18 @@ export function Composer({
           onFocus={onFocus}
           onBlur={onBlur}
         />
-        {attachNotice && (
+        {transientNotice && (
           <text
-            testId="attach-notice"
+            testId="composer-notice"
             style={{
               fontSize: 12,
-              color: attachNotice.tone === 'danger' ? C.danger : C.warn,
+              color: transientNotice.tone === 'danger' ? C.danger : C.warn,
               paddingLeft: 10,
               paddingRight: 10,
               paddingTop: 6,
             }}
           >
-            {attachNotice.text}
+            {transientNotice.text}
           </text>
         )}
         {disabledReason && (
