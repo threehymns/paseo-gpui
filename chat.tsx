@@ -52,16 +52,14 @@ import {
   type IncomingImage,
   type PastePayload,
 } from './attachments'
-import { C, CONTENT_MAX_WIDTH, SIDEBAR_WIDTH } from './theme'
-import { Sidebar, Header, CenterMessage, agentStatusColor, daemonHost, type RowActionRef, type RowActionVerb } from './chrome'
-import { Transcript } from './transcript'
-import { ModelPicker, OptionPicker, modeOptions, thinkingOptions } from './pickers'
+import { FeatureToggles, ModelPicker, OptionPicker, modeOptions, thinkingOptions } from './pickers'
 import { Composer, ConfigNotice, FooterBar, TracksRow } from './composer'
 import { useAgentConversation } from './conversation'
 import { useTranscriptFollow } from './follow'
 import { useAgentPermissions } from './permissions'
 import { useAttention, type NotificationBridge } from './attention'
 import { useDraftConfig } from './draft-config'
+import { toggleFeatures, useProviderFeatures } from './features'
 import {
   checkoutEnabled,
   repoKeyOf,
@@ -210,7 +208,7 @@ function useDaemon(): DaemonView {
 
 // ---- app -------------------------------------------------------------------
 
-const NO_TRUTH: DaemonTruth = { modelValue: null, thinkingId: null, modeId: null }
+const NO_TRUTH: DaemonTruth = { modelValue: null, thinkingId: null, modeId: null, features: {} }
 
 /**
  * Opens the raster-filtered multi-select file dialog through a native bridge.
@@ -240,8 +238,14 @@ export function ChatApp() {
     null,
   )
 
-  const { config: draftConfig, setModel: setDraftModel, setThinking: setDraftThinking, setMode: setDraftMode } =
-    useDraftConfig(providers)
+  const {
+    config: draftConfig,
+    setModel: setDraftModel,
+    setThinking: setDraftThinking,
+    setMode: setDraftMode,
+    setFeature: setDraftFeature,
+    syncFeatures,
+  } = useDraftConfig(providers)
   const seed = pendingSeed && pendingSeed.agentId === activeId ? pendingSeed : null
   const [cwd, setCwd] = useState(process.cwd())
   const [worktree, setWorktree] = useState('local')
@@ -403,6 +407,7 @@ export function ChatApp() {
   const modelValue = chipValues.modelValue
   const thinkingId = chipValues.thinkingId
   const modeId = chipValues.modeId
+  const featureValues = chipValues.featureValues
   // A running agent is one provider's process, so only that provider's models apply.
   const chipProviders = useMemo(
     () => (activeEntry ? providers.filter((entry) => entry.provider === activeEntry.provider) : providers),
@@ -413,6 +418,19 @@ export function ChatApp() {
     () => findModel(providers, modelValue),
     [providers, modelValue],
   )
+
+  // Draft-side feature catalog for the picked provider/model; live agents read
+  // theirs straight off the agent snapshot instead. Merged responses land in
+  // the draft config, where catalog values become the toggles' defaults.
+  const draftFeatures = useProviderFeatures(
+    editingLive ? null : daemon,
+    editingLive ? undefined : providerOfModel?.provider,
+    editingLive ? undefined : modelDef?.id,
+  )
+  useEffect(() => {
+    if (!editingLive) syncFeatures(draftFeatures)
+    // syncFeatures only reads its argument; it needs no dep.
+  }, [editingLive, draftFeatures])
 
   // Composer folder choices come straight from the workspace store.
   const cwdOptions = useMemo(() => workspaceDirectoryChoices(workspaces), [workspaces])
@@ -495,6 +513,7 @@ const listRef = useRef<{ id: number } | null>(null)
       const config: PaseoAgentConfig = { provider: modelValue }
       if (modeId) config.modeId = modeId
       if (thinkingId) config.thinkingOptionId = thinkingId
+      if (Object.keys(featureValues).length > 0) config.featureValues = { ...featureValues }
       const handle = await client.agents.create({
         config,
         cwd,
@@ -585,6 +604,7 @@ const listRef = useRef<{ id: number } | null>(null)
   const onModelChange = editingLive ? live.setModel : setDraftModel
   const onThinkingChange = editingLive ? live.setThinking : setDraftThinking
   const onModeChange = editingLive ? live.setMode : setDraftMode
+  const onFeatureToggle = editingLive ? live.setFeature : setDraftFeature
 
   const draftChips = (
     <>
@@ -605,6 +625,11 @@ const listRef = useRef<{ id: number } | null>(null)
         sectionLabel="Access"
         fallbackLabel="Access"
         menuWidth={288}
+      />
+      <FeatureToggles
+        features={editingLive ? toggleFeatures(activeEntry?.features) : draftFeatures}
+        values={featureValues}
+        onToggle={onFeatureToggle}
       />
     </>
   )

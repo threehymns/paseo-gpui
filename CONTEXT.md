@@ -106,8 +106,10 @@ The daemon's providers and their models, modes, and thinking options;
 only ready providers are selectable.
 
 **Draft config**:
-The model/thinking/mode triple a new agent will start with. It tracks catalog
-defaults until the user overrides it; picking a model resets thinking and mode.
+The model/thinking/mode picks plus provider feature toggles a new agent will
+start with. It tracks catalog defaults until the user overrides it; picking a
+model resets thinking and mode, and drops held features until the next
+provider-catalog merge re-anchors them.
 _Avoid_: settings, preferences
 
 **Composer**:

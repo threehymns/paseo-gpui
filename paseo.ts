@@ -16,6 +16,7 @@ import {
   type PaseoAgentStream,
   type PaseoAgentUpdate,
   type PaseoClient,
+  type PaseoProviderFeaturesResult,
   type PaseoProviderSnapshotResult,
   type PaseoWorkspace,
   type PaseoWorkspaceUpdate,
@@ -71,6 +72,12 @@ export type WorkspaceUpdate = PaseoWorkspaceUpdate
 export type EmptyProjectDescriptor = NonNullable<
   Extract<WorkspaceUpdate, { kind: 'remove' }>['emptyProject']
 >
+
+/** One provider feature as the daemon describes it: an On/Off toggle or a select. */
+export type ProviderFeature = NonNullable<PaseoProviderFeaturesResult['features']>[number]
+export type ProviderFeatureToggle = Extract<ProviderFeature, { type: 'toggle' }>
+/** Same shape riding on agent snapshots, where it doubles as live truth. */
+export type AgentFeature = NonNullable<AgentEntry['features']>[number]
 
 type StreamEvent = PaseoAgentStream['event']
 export type TimelineItem = Extract<StreamEvent, { type: 'timeline' }>['item']
