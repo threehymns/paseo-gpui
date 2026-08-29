@@ -51,6 +51,14 @@ import { useTranscriptFollow } from './follow'
 import { useAgentPermissions } from './permissions'
 import { useAttention, type NotificationBridge } from './attention'
 import { useDraftConfig } from './draft-config'
+import {
+  checkoutEnabled,
+  repoKeyOf,
+  useCheckoutStatus,
+  useDaemonFeatures,
+} from './checkout'
+import { useCheckoutActions } from './checkout-actions'
+import { CheckoutPanel } from './checkout-panel'
 import { contextMeter } from './usage'
 import { liveTruth, useLiveAgentConfig, type DaemonTruth, type ProviderNotice } from './live-config'
 import {
@@ -205,6 +213,16 @@ export function ChatApp() {
   const attentionBridge: NotificationBridge | null = null
   const attention = useAttention({ agents, activeId, serverId: daemonHost(), bridge: attentionBridge })
   const activeEntry = agents.find((entry) => entry.id === activeId) ?? null
+
+  // Checkout status spine: daemon pushes fill the store; the feature flag
+  // hides the whole panel when the daemon has no checkout subsystem.
+  const features = useDaemonFeatures(daemon)
+  const checkoutOn = checkoutEnabled(features)
+  const { state: checkout, retry: retryStatusFetch } = useCheckoutStatus(daemon, activeEntry?.cwd ?? null)
+  const repoActions = useCheckoutActions()
+  const activeStatus = activeEntry ? (checkout.entries[activeEntry.cwd]?.status ?? null) : null
+  const activeRepoKey = activeStatus ? repoKeyOf(activeStatus) : (activeEntry?.cwd ?? null)
+  const activeQueue = activeRepoKey ? repoActions.state.repos[activeRepoKey] : undefined
 
   // Ids the directory has shown, so a just-created agent isn't judged gone
   // while its upsert is still in flight.
@@ -599,6 +617,27 @@ const listRef = useRef<{ id: number } | null>(null)
           title={title}
           entry={activeEntry}
         />
+        {activeEntry && checkoutOn && (
+          <CheckoutPanel
+            entry={checkout.entries[activeEntry.cwd]}
+            actions={activeQueue}
+            onRefresh={() => {
+              if (!activeEntry || !activeRepoKey || activeQueue?.running) return
+              // A failed lookup holds no repository truth yet: re-run the
+              // status fetch instead of mutating through the queue.
+              if (!checkout.entries[activeEntry.cwd]?.status) {
+                retryStatusFetch(activeEntry.cwd)
+                return
+              }
+              void repoActions.run(
+                activeRepoKey,
+                'refresh',
+                'Refreshed',
+                () => daemon.checkoutRefresh(activeEntry.cwd),
+              )
+            }}
+          />
+        )}
         {viewingSubagent && (
           <SubagentViewerBar
             label={subagentLabel(viewingRow) ?? 'Subagent'}
