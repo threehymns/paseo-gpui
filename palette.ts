@@ -93,7 +93,7 @@ export function clampSelection(index: number, count: number): number {
 
 export interface KeyEventLike {
   key?: string
-  modifiers?: { cmd?: boolean; ctrl?: boolean; alt?: boolean }
+  modifiers?: { cmd?: boolean; ctrl?: boolean; alt?: boolean; shift?: boolean }
 }
 
 /** True for the palette's open/close chord: ⌘K on macOS, Ctrl+K elsewhere. */
@@ -101,5 +101,5 @@ export function isPaletteToggle(event: KeyEventLike): boolean {
   if (event.key !== 'k') return false
   const { modifiers } = event
   if (!modifiers || !(modifiers.cmd || modifiers.ctrl)) return false
-  return !modifiers.alt
+  return !modifiers.alt && !modifiers.shift
 }
