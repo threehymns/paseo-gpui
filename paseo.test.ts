@@ -3,6 +3,7 @@ import {
   applyTimelineItem,
   buildTurns,
   applyAgentUpdate,
+  applyAgentPage,
   sortAgents,
   displayName,
   isArchived,
@@ -23,6 +24,10 @@ import {
   diffStats,
   reasoningLabel,
   sealTrailingReasoning,
+  sealTrailingTurns,
+  workedForLabel,
+  completionTimestamp,
+  copyableText,
   toolDetailParts,
   type AgentEntry,
   type ProviderEntry,
@@ -157,6 +162,84 @@ describe('timeline mapping', () => {
     })
   })
 
+  test('assistant turns start at their first delta and keep it across merges', () => {
+    let turns = applyTimelineItem([], { type: 'assistant_message', text: 'Work' }, 5_000)
+    turns = applyTimelineItem(turns, { type: 'assistant_message', text: 'ing' }, 7_500)
+    const first = turns[0] as { kind: string; source: string; startedAt?: number }
+    expect(first.kind).toBe('assistant')
+    expect(first.source).toBe('Working')
+    expect(first.startedAt).toBe(5_000)
+    expect((first as { endedAt?: number }).endedAt).toBeUndefined()
+    expect(turns).toHaveLength(1)
+  })
+
+  test('the next appended item proves a working assistant turn finished', () => {
+    const turns = buildTurns([
+      timed({ type: 'assistant_message', text: 'On it.' }, 5_000),
+      timed({ type: 'user_message', text: 'thanks' }, 11_000),
+    ])
+    const said = turns[0] as { kind: string; endedAt?: number }
+    expect(said.kind).toBe('assistant')
+    expect(said.endedAt).toBe(11_000)
+  })
+
+  test('a fresh assistant segment seals the segment before it', () => {
+    let turns = applyTimelineItem([], { type: 'assistant_message', text: 'part one', messageId: 'm1' }, 1_000)
+    turns = applyTimelineItem(turns, toolCall({ detail: { type: 'shell', command: 'ls' } }), 2_000)
+    turns = applyTimelineItem(turns, { type: 'assistant_message', text: 'done', messageId: 'm2' }, 9_000)
+    const first = turns[0] as { kind: string; endedAt?: number }
+    const second = turns[2] as { kind: string; source: string; startedAt?: number; endedAt?: number }
+    expect(first.endedAt).toBe(2_000)
+    expect(second.source).toBe('done')
+    expect(second.startedAt).toBe(9_000)
+    expect(second.endedAt).toBeUndefined()
+  })
+
+  test('folding history leaves a trailing assistant turn unsealed, so a live delta can keep merging', () => {
+    const turns = buildTurns([
+      timed({ type: 'user_message', text: 'go' }, 1_000),
+      timed({ type: 'assistant_message', text: 'On it.' }, 2_000),
+      timed({ type: 'assistant_message', text: ' Done.' }, 8_000),
+    ])
+    const said = turns[1] as { kind: string; source: string; startedAt?: number; endedAt?: number }
+    expect(said.source).toBe('On it. Done.')
+    expect(said.startedAt).toBe(2_000)
+    // A reload is mid-stream and cannot know the agent finished: the tail stays
+    // open so the next live delta of the same message merges in, not splits.
+    expect(said.endedAt).toBeUndefined()
+  })
+
+  test('a live delta after a reload merges into the loaded turn instead of splitting', () => {
+    const loaded = buildTurns([
+      timed({ type: 'assistant_message', text: 'On it.', messageId: 'm1' }, 2_000),
+      timed({ type: 'assistant_message', text: ' still', messageId: 'm1' }, 7_000),
+    ])
+    const live = applyTimelineItem(loaded, { type: 'assistant_message', text: ' working.', messageId: 'm1' }, 9_000)
+    expect(live).toHaveLength(1)
+    const said = live[0] as { source: string; startedAt?: number; endedAt?: number }
+    expect(said.source).toBe('On it. still working.')
+    expect(said.startedAt).toBe(2_000)
+    expect(said.endedAt).toBeUndefined()
+  })
+
+  test('sealing a finished or absent assistant tail changes nothing', () => {
+    const turns = buildTurns([
+      timed({ type: 'assistant_message', text: 'hi' }, 1_000),
+      timed({ type: 'user_message', text: 'yo' }, 2_000),
+    ])
+    expect(sealTrailingTurns(turns, 99_999)).toEqual(turns)
+    expect(sealTrailingTurns([], 99_999)).toEqual([])
+  })
+
+  test('text arriving after the turn finished starts a fresh segment', () => {
+    let turns = applyTimelineItem([], { type: 'assistant_message', text: 'done', messageId: 'm1' }, 1_000)
+    turns = sealTrailingTurns(turns, 3_000)
+    turns = applyTimelineItem(turns, { type: 'assistant_message', text: 'one more thing', messageId: 'm1' }, 4_000)
+    expect(turns).toHaveLength(2)
+    expect((turns[0] as { source: string }).source).toBe('done')
+    expect((turns[1] as { source: string; startedAt?: number }).startedAt).toBe(4_000)
+  })
+
   test('todo snapshots replace rather than append', () => {
     let turns = applyTimelineItem([], { type: 'todo', items: [{ text: 'a', completed: false }] })
     turns = applyTimelineItem(turns, { type: 'todo', items: [{ text: 'a', completed: true }] })
@@ -237,10 +320,12 @@ describe('reasoning timing', () => {
   })
 
   test('replace-in-place updates do not seal a trailing block started after that call', () => {
-    let turns = buildTurns([
-      timed(toolCall({ callId: 'c1', detail: { type: 'shell', command: 'npm test' }, status: 'running' }), 1_000),
-      timed({ type: 'reasoning', text: 'watching tests' }, 2_000),
-    ])
+    let turns = applyTimelineItem(
+      [],
+      toolCall({ callId: 'c1', detail: { type: 'shell', command: 'npm test' }, status: 'running' }),
+      1_000,
+    )
+    turns = applyTimelineItem(turns, { type: 'reasoning', text: 'watching tests' }, 2_000)
     turns = applyTimelineItem(
       turns,
       toolCall({ callId: 'c1', detail: { type: 'shell', command: 'npm test', exitCode: 0 }, status: 'completed' }),
@@ -278,6 +363,39 @@ describe('reasoning timing', () => {
     expect(sealTrailingReasoning(turns, 99_999)).toEqual(turns)
     const sealed = sealTrailingReasoning(buildTurns([timed({ type: 'reasoning', text: 'x' }, 1_000)]), 4_000)
     expect(sealTrailingReasoning(sealed, 99_999)).toEqual(sealed)
+  })
+})
+
+// ---- assistant turn footers -------------------------------------------------
+
+describe('assistant turn footers', () => {
+  const working = { kind: 'assistant', source: 'hi', startedAt: 60_000 } as const
+  const done = { kind: 'assistant', source: 'hi', startedAt: 60_000, endedAt: 107_000 } as const
+
+  test('a working turn shows its elapsed time so far', () => {
+    expect(workedForLabel(working, 63_000)).toBe('3s')
+    expect(workedForLabel(working, 150_000)).toBe('1m 30s')
+    expect(workedForLabel(working, 7_800_000)).toBe('2h 9m')
+  })
+
+  test('a finished turn reports what it worked for', () => {
+    expect(workedForLabel(done, Infinity)).toBe('Worked for 47s')
+    expect(workedForLabel({ ...done, endedAt: 60_000 }, Infinity)).toBe('Worked for 0s')
+  })
+
+  test('turns without a recorded start show no footer label', () => {
+    expect(workedForLabel({ kind: 'assistant', source: 'hi' }, 1_000)).toBeUndefined()
+  })
+
+  test('completionTimestamp renders the finished-at clock time for hover', () => {
+    expect(completionTimestamp(107_000)).toMatch(/\d{1,2}:\d{2}/)
+  })
+
+  test('copyableText is the markdown source, and only when there is some', () => {
+    expect(copyableText(done)).toBe('hi')
+    expect(copyableText({ ...done, source: '   ' })).toBeUndefined()
+    expect(copyableText({ kind: 'user', text: 'hi' })).toBeUndefined()
+    expect(copyableText({ kind: 'reasoning', text: 'hmm' })).toBeUndefined()
   })
 })
 
@@ -459,6 +577,59 @@ describe('agent directory', () => {
     expect(upserted[0]!.id).toBe('c')
     const removed = applyAgentUpdate(upserted, { kind: 'remove', agentId: 'c' })
     expect(removed).toHaveLength(2)
+  })
+
+  describe('applyAgentPage', () => {
+    // A raise snapshot as a fetched page would carry it, and the same agent
+    // after the subscription delivered the daemon's truth-clear.
+    const raising = entry({
+      id: 'a1',
+      requiresAttention: true,
+      attentionReason: 'error',
+      updatedAt: '2026-08-24T11:00:00Z',
+    })
+    const cleared = entry({
+      id: 'a1',
+      requiresAttention: false,
+      attentionReason: null,
+      attentionTimestamp: null,
+      updatedAt: '2026-08-24T12:00:00Z',
+    })
+
+    test('an empty mirror takes the whole page', () => {
+      const page = [raising, entry({ id: 'b2' })]
+      expect(applyAgentPage([], page).map((e) => e.id)).toEqual(['a1', 'b2'])
+    })
+
+    test('a stale page snapshot never regresses an entry the subscription advanced', () => {
+      // Replaying the pre-clear raising snapshot must not resurrect attention
+      // the daemon already ended — that re-fires an OS notice.
+      const merged = applyAgentPage([cleared], [raising])
+      expect(merged).toHaveLength(1)
+      expect(merged[0]!.requiresAttention).toBe(false)
+      expect(merged[0]!.updatedAt).toBe('2026-08-24T12:00:00Z')
+    })
+
+    test('a newer page entry replaces an older mirror entry', () => {
+      const raisedAgain = entry({
+        id: 'a1',
+        requiresAttention: true,
+        attentionReason: 'finished',
+        updatedAt: '2026-08-24T12:00:00Z',
+      })
+      const merged = applyAgentPage([raising], [raisedAgain])
+      expect(merged).toHaveLength(1)
+      expect(merged[0]!.attentionReason).toBe('finished')
+      expect(merged[0]!.updatedAt).toBe('2026-08-24T12:00:00Z')
+    })
+
+    test('agents only the page knows are added to the mirror', () => {
+      const merged = applyAgentPage(
+        [entry({ id: 'old' })],
+        [entry({ id: 'fresh', updatedAt: '2026-08-24T13:00:00Z' })],
+      )
+      expect(merged.map((e) => e.id)).toEqual(['fresh', 'old'])
+    })
   })
 
   test('relativeTime produces known shapes', () => {
