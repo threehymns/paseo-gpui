@@ -11,15 +11,20 @@ import { Select, SelectContent, SelectItem, SelectTrigger } from '@gpuix/react'
 import {
   DAEMON_URL,
   basename,
-  displayName,
-  isArchived,
-  projectGroups,
-  relativeTime,
-  statusGroups,
+  relativeTimeAt,
   type AgentEntry,
   type ConnStatus,
-  type DirectoryGroupMode,
+  type WorkspaceDescriptor,
 } from './paseo'
+import {
+  isArchivedWorkspace,
+  workspaceActivityAt,
+  workspaceDisplayName,
+  workspaceDirectory,
+  workspaceProjectGroups,
+  type WorkspaceStore,
+} from './workspaces'
+import { showArchivedAgents, useAppState, type AppStore } from './app-state'
 import { C, SIDEBAR_WIDTH, TITLEBAR_HEIGHT, TRAFFIC_LIGHT_CLEARANCE } from './theme'
 
 function realAssetPath(virtualPath: string): string {
@@ -54,8 +59,11 @@ import iconSparkle from './assets/icons/sparkle.svg' with { type: 'file' }
 import iconWrench from './assets/icons/wrench.svg' with { type: 'file' }
 import iconSend from './assets/icons/arrow-up.svg' with { type: 'file' }
 import iconCheck from './assets/icons/check.svg' with { type: 'file' }
+import iconScissors from './assets/icons/scissors.svg' with { type: 'file' }
+import iconSquare from './assets/icons/square.svg' with { type: 'file' }
 import iconImage from './assets/icons/image.svg' with { type: 'file' }
 import iconX from './assets/icons/x.svg' with { type: 'file' }
+import iconRotateCcw from './assets/icons/rotate-ccw.svg' with { type: 'file' }
 
 const ICONS = {
   compose: realAssetPath(iconCompose),
@@ -81,8 +89,11 @@ const ICONS = {
   wrench: realAssetPath(iconWrench),
   send: realAssetPath(iconSend),
   check: realAssetPath(iconCheck),
+  scissors: realAssetPath(iconScissors),
+  square: realAssetPath(iconSquare),
   image: realAssetPath(iconImage),
   x: realAssetPath(iconX),
+  rotateCcw: realAssetPath(iconRotateCcw),
 } as const
 
 export type IconName = keyof typeof ICONS
@@ -200,7 +211,7 @@ function SidebarAction({
   )
 }
 
-export type RowActionVerb = 'rename' | 'archive' | 'delete'
+export type RowActionVerb = 'rename' | 'archive' | 'delete' | 'detach'
 
 /** One row lifecycle call in flight; every action on that row stays disabled until it settles. */
 export interface RowActionRef {
@@ -264,31 +275,21 @@ function ViewSection({ label }: { label: string }) {
   )
 }
 
-function ViewSeparator() {
-  return <div style={{ height: 1, backgroundColor: C.border, marginTop: 4, marginBottom: 4 }} />
-}
-
 /**
  * The sidebar's display-preferences popover, mirroring Paseo's: one trigger in
- * the section header, grouping as a radio choice, visibility toggles under
- * Show. Decisions that would be dead controls here (title source, trailing
- * diff stat, host/project/label filters) have no backing data on this client
- * and stay out.
+ * the section header and visibility toggles under Show. The directory itself
+ * always renders as collapsible project groups of workspaces, so there is no
+ * grouping choice anymore.
  */
 function ViewPreferencesMenu({
-  groupMode,
-  onGroupModeChange,
   showArchived,
   onShowArchivedChange,
 }: {
-  groupMode: DirectoryGroupMode
-  onGroupModeChange: (mode: DirectoryGroupMode) => void
   showArchived: boolean
   onShowArchivedChange: (show: boolean) => void
 }) {
   const runChoice = (choice: string) => {
-    if (choice.startsWith('grouping:')) onGroupModeChange(choice.slice('grouping:'.length) as DirectoryGroupMode)
-    else if (choice === 'show:archived') onShowArchivedChange(!showArchived)
+    if (choice === 'show:archived') onShowArchivedChange(!showArchived)
   }
 
   return (
@@ -311,48 +312,59 @@ function ViewPreferencesMenu({
         <Icon name="listFilter" size={14} color={C.secondary} />
       </SelectTrigger>
       <SelectContent side="bottom" align="end" sideOffset={4} style={{ width: VIEW_MENU_WIDTH }}>
-        <ViewSection label="Grouping" />
-        <SelectItem value="grouping:project" textValue="Project">
-          <ViewOption icon="folder" label="Project" selected={groupMode === 'project'} />
-        </SelectItem>
-        <SelectItem value="grouping:status" textValue="Status">
-          <ViewOption icon="list" label="Status" selected={groupMode === 'status'} />
-        </SelectItem>
-        <ViewSeparator />
         <ViewSection label="Show" />
-        <SelectItem value="show:archived" textValue="Archived agents">
-          <ViewOption icon="archive" label="Archived agents" selected={showArchived} />
+        <SelectItem value="show:archived" textValue="Archived workspaces">
+          <ViewOption icon="archive" label="Archived workspaces" selected={showArchived} />
         </SelectItem>
       </SelectContent>
     </Select>
   )
 }
 
-function AgentRow({
-  entry,
+/** Sidebar dot color for a workspace's status bucket. */
+export function workspaceStatusColor(status: WorkspaceDescriptor['status']): string {
+  switch (status) {
+    case 'running':
+      return C.running
+    case 'attention':
+    case 'needs_input':
+      return C.accent
+    case 'failed':
+      return C.danger
+    case 'done':
+      return C.ok
+  }
+}
+
+function WorkspaceRow({
+  descriptor,
   active,
   busy,
   onSelect,
   onRename,
   onArchive,
-  onDelete,
 }: {
-  entry: AgentEntry
+  descriptor: WorkspaceDescriptor
   active: boolean
   /** True while any lifecycle action on this row is in flight. */
   busy: boolean
   onSelect: (id: string) => void
   onRename: (id: string, name: string) => void
   onArchive: (id: string) => void
-  onDelete: (id: string) => void
 }) {
   const [hover, setHover] = useState(false)
   const [renaming, setRenaming] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
-  const archived = isArchived(entry)
+  const archived = isArchivedWorkspace(descriptor)
+  const directory = workspaceDirectory(descriptor)
+  const secondaryIcon = descriptor.workspaceKind === 'worktree' ? 'gitBranch' : 'folder'
+  const secondaryLabel =
+    descriptor.workspaceKind === 'worktree'
+      ? (descriptor.worktreeSlug ?? basename(directory))
+      : basename(directory)
 
   const startRename = () => {
-    setNameDraft(displayName(entry))
+    setNameDraft(workspaceDisplayName(descriptor))
     setRenaming(true)
   }
 
@@ -364,20 +376,19 @@ function AgentRow({
     if (!renaming) return
     setRenaming(false)
     const next = nameDraft.trim()
-    if (busy || next.length === 0 || next === displayName(entry)) return
-    onRename(entry.id, next)
+    if (busy || next.length === 0 || next === workspaceDisplayName(descriptor)) return
+    onRename(descriptor.id, next)
   }
 
   const runAction = (action: RowActionVerb) => {
     if (busy) return
     if (action === 'rename') startRename()
-    else if (action === 'archive') onArchive(entry.id)
-    else onDelete(entry.id)
+    else onArchive(descriptor.id)
   }
 
   return (
     <div
-      testId="agent-row"
+      testId="workspace-row"
       style={{
         display: 'flex',
         flexDirection: 'column',
@@ -395,15 +406,15 @@ function AgentRow({
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       onClick={() => {
-        if (!renaming) onSelect(entry.id)
+        if (!renaming) onSelect(descriptor.id)
       }}
     >
       {renaming ? (
         <input
           value={nameDraft}
-          placeholder="Agent name"
+          placeholder="Workspace name"
           autoFocus
-          testId="agent-rename"
+          testId="workspace-rename"
           style={{
             flexGrow: 1,
             minWidth: 0,
@@ -423,7 +434,7 @@ function AgentRow({
         />
       ) : (
         <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-          <StatusDot color={agentStatusColor(entry)} />
+          <StatusDot color={workspaceStatusColor(descriptor.status)} />
           <text
             style={{
               fontSize: 13.5,
@@ -435,12 +446,12 @@ function AgentRow({
               flexGrow: 1,
             }}
           >
-            {displayName(entry)}
+            {workspaceDisplayName(descriptor)}
           </text>
           {hover ? (
             <Select value="" onValueChange={(action) => runAction(action as RowActionVerb)}>
               <SelectTrigger
-                testId="agent-row-menu"
+                testId="workspace-row-menu"
                 style={(state) => ({
                   display: 'flex',
                   alignItems: 'center',
@@ -464,18 +475,17 @@ function AgentRow({
                     <MenuAction label="Archive" disabled={busy} />
                   </SelectItem>
                 )}
-                <SelectItem value="delete" textValue="Delete">
-                  <MenuAction label="Delete" tone="danger" disabled={busy} />
-                </SelectItem>
               </SelectContent>
             </Select>
-          ) : (
-            <text style={{ fontSize: 12.5, color: C.ghost, flexShrink: 0 }}>{relativeTime(entry)}</text>
-          )}
+          ) : workspaceActivityAt(descriptor) > 0 ? (
+            <text style={{ fontSize: 12.5, color: C.ghost, flexShrink: 0 }}>
+              {relativeTimeAt(workspaceActivityAt(descriptor))}
+            </text>
+          ) : null}
         </div>
       )}
       <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 5, paddingLeft: 13 }}>
-        <Icon name="folder" size={12.5} color={C.tertiary} />
+        <Icon name={secondaryIcon} size={12.5} color={C.tertiary} />
         <text
           style={{
             fontSize: 13,
@@ -487,10 +497,7 @@ function AgentRow({
             textOverflow: 'ellipsis',
           }}
         >
-          {basename(entry.cwd)}
-        </text>
-        <text style={{ fontSize: 11.5, color: C.ghost, flexShrink: 0 }}>
-          {entry.model ?? entry.provider}
+          {secondaryLabel}
         </text>
       </div>
     </div>
@@ -522,20 +529,65 @@ function MenuAction({ label, tone, disabled }: { label: string; tone?: 'danger';
   )
 }
 
+/** One collapsible project group header: chevron, name, click toggles its rows. */
+function ProjectGroupHeader({
+  name,
+  collapsed,
+  onToggle,
+}: {
+  name: string
+  collapsed: boolean
+  onToggle: () => void
+}) {
+  return (
+    <div
+      testId="project-group-header"
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 5,
+        height: 26,
+        paddingLeft: 8,
+        paddingRight: 8,
+        borderRadius: 6,
+        cursor: 'pointer',
+        hover: { backgroundColor: C.overlay },
+      }}
+      onClick={onToggle}
+    >
+      <Icon name={collapsed ? 'arrowRight' : 'chevronDown'} size={11} color={C.ghost} />
+      <text
+        style={{
+          fontSize: 12.5,
+          color: C.tertiary,
+          flexGrow: 1,
+          minWidth: 0,
+          whiteSpace: 'nowrap',
+          textOverflow: 'ellipsis',
+        }}
+      >
+        {name}
+      </text>
+    </div>
+  )
+}
+
 export function Sidebar({
-  agents,
-  activeId,
+  workspaces,
+  activeWorkspaceId,
   onSelect,
   onNewTask,
   onCollapse,
   status,
   busyRows,
   onArchive,
-  onDelete,
   onRename,
+  appStore,
 }: {
-  agents: AgentEntry[]
-  activeId: string | null
+  /** The whole workspace directory, written only by the daemon subscription. */
+  workspaces: WorkspaceStore
+  activeWorkspaceId: string | null
   onSelect: (id: string) => void
   onNewTask: () => void
   onCollapse: () => void
@@ -543,15 +595,22 @@ export function Sidebar({
   /** Row lifecycle calls currently in flight. */
   busyRows: RowActionRef[]
   onArchive: (id: string) => void
-  onDelete: (id: string) => void
   onRename: (id: string, name: string) => void
+  /** Persisted app state; the sidebar's view choices survive a restart. */
+  appStore: AppStore
 }) {
-  const [showArchived, setShowArchived] = useState(false)
-  const [groupMode, setGroupMode] = useState<DirectoryGroupMode>('status')
-  const groups = useMemo(
-    () => (groupMode === 'project' ? projectGroups(agents, showArchived) : statusGroups(agents, showArchived)),
-    [agents, showArchived, groupMode],
-  )
+  const [showArchived, setShowArchived] = useAppState(appStore, showArchivedAgents)
+  // Collapse state is view state; the store itself stays daemon-written.
+  const [collapsedProjects, setCollapsedProjects] = useState<ReadonlySet<string>>(new Set())
+  const groups = useMemo(() => workspaceProjectGroups(workspaces, showArchived), [workspaces, showArchived])
+  const toggleProject = (projectId: string) => {
+    setCollapsedProjects((prev) => {
+      const next = new Set(prev)
+      if (next.has(projectId)) next.delete(projectId)
+      else next.add(projectId)
+      return next
+    })
+  }
 
   return (
     <div
@@ -607,14 +666,9 @@ export function Sidebar({
         }}
       >
         <text style={{ fontSize: 13, fontWeight: 500, color: C.secondary, flexGrow: 1, minWidth: 0 }}>
-          Agents
+          Workspaces
         </text>
-        <ViewPreferencesMenu
-          groupMode={groupMode}
-          onGroupModeChange={setGroupMode}
-          showArchived={showArchived}
-          onShowArchivedChange={setShowArchived}
-        />
+        <ViewPreferencesMenu showArchived={showArchived} onShowArchivedChange={setShowArchived} />
       </div>
 
       <div
@@ -630,41 +684,32 @@ export function Sidebar({
       >
         {groups.map((group) => (
           <div
-            key={group.name}
+            key={group.projectId}
             style={{ display: 'flex', flexDirection: 'column', paddingBottom: 10 }}
           >
-            <div
-              style={{
-                display: 'flex',
-                flexDirection: 'row',
-                alignItems: 'center',
-                height: 26,
-                paddingLeft: 8,
-                paddingRight: 8,
-              }}
-            >
-              <text style={{ fontSize: 12.5, color: C.tertiary, flexGrow: 1, minWidth: 0 }}>
-                {group.name}
-              </text>
-            </div>
-            {group.items.map((entry) => (
-              <AgentRow
-                key={entry.id}
-                entry={entry}
-                active={entry.id === activeId}
-                busy={busyRows.some((row) => row.id === entry.id)}
-                onSelect={onSelect}
-                onRename={onRename}
-                onArchive={onArchive}
-                onDelete={onDelete}
-              />
-            ))}
+            <ProjectGroupHeader
+              name={group.name}
+              collapsed={collapsedProjects.has(group.projectId)}
+              onToggle={() => toggleProject(group.projectId)}
+            />
+            {!collapsedProjects.has(group.projectId) &&
+              group.workspaces.map((descriptor) => (
+                <WorkspaceRow
+                  key={descriptor.id}
+                  descriptor={descriptor}
+                  active={descriptor.id === activeWorkspaceId}
+                  busy={busyRows.some((row) => row.id === descriptor.id)}
+                  onSelect={onSelect}
+                  onRename={onRename}
+                  onArchive={onArchive}
+                />
+              ))}
           </div>
         ))}
         {groups.length === 0 && (
           <div style={{ padding: 14 }}>
             <text style={{ fontSize: 12.5, lineHeight: 17, color: C.tertiary }}>
-              No agents yet. Start one from the composer.
+              No workspaces yet. Start one from the composer.
             </text>
           </div>
         )}

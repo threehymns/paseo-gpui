@@ -14,6 +14,7 @@ const truth: DaemonTruth = {
   modelValue: 'claude-code/sonnet-4.6',
   thinkingId: 'high',
   modeId: 'plan',
+  features: { memory: true },
 }
 
 function run(events: LiveConfigEvent[], start: LiveConfigState = initialLiveConfig): LiveConfigState {
@@ -27,6 +28,7 @@ describe('live config chips', () => {
       modelValue: 'claude-code/opus-4.6',
       thinkingId: 'high',
       modeId: 'plan',
+      featureValues: { memory: true },
     })
   })
 
@@ -35,6 +37,7 @@ describe('live config chips', () => {
       modelValue: 'claude-code/sonnet-4.6',
       thinkingId: 'high',
       modeId: 'plan',
+      featureValues: { memory: true },
     })
   })
 
@@ -119,11 +122,57 @@ describe('live config chips', () => {
       model: 'gpt-5.2',
       thinkingOptionId: null,
       currentModeId: 'work',
+      features: [
+        { type: 'toggle', id: 'memory', label: 'Memory', value: true },
+        { type: 'toggle', id: 'webSearch', label: 'Web search', value: false },
+      ],
     } as AgentEntry
     expect(liveTruth(entry)).toEqual({
       modelValue: 'codex/gpt-5.2',
       thinkingId: null,
       modeId: 'work',
+      features: { memory: true, webSearch: false },
     })
+  })
+})
+
+describe('live feature toggles', () => {
+  test('a flipped toggle holds immediately and beats daemon truth', () => {
+    const state = run([{ type: 'featureApplied', id: 'memory', value: false }])
+    expect(state.featureHolds.memory).toBe(false)
+    const shown = displayConfig(state, truth)
+    expect(shown.featureValues.memory).toBe(false)
+    expect(shown.modelValue).toBe('claude-code/sonnet-4.6') // other chips untouched
+  })
+
+  test('the daemon echo dissolves a matching feature hold', () => {
+    const state = run([{ type: 'featureApplied', id: 'memory', value: false }])
+    const echoed = reduceLiveConfig(state, { type: 'synced', truth: { ...truth, features: { memory: false } } })
+    expect(echoed.featureHolds.memory).toBeUndefined()
+    expect(displayConfig(echoed, { ...truth, features: { memory: false } }).featureValues.memory).toBe(false)
+  })
+
+  test('an unrelated broadcast leaves the feature hold in place', () => {
+    const state = run([{ type: 'featureApplied', id: 'memory', value: false }])
+    const synced = reduceLiveConfig(state, { type: 'synced', truth })
+    expect(synced.featureHolds.memory).toBe(false)
+  })
+
+  test('a rejected feature change reverts to daemon truth and surfaces an error notice', () => {
+    const state = run([
+      { type: 'featureApplied', id: 'memory', value: false },
+      { type: 'featureFailed', id: 'memory', error: new Error('provider refused') },
+    ])
+    expect(state.featureHolds.memory).toBeUndefined()
+    expect(displayConfig(state, truth).featureValues.memory).toBe(true)
+    expect(state.notice).toEqual({ type: 'error', message: 'provider refused' })
+  })
+
+  test('reset clears feature holds with the rest when the agent switches', () => {
+    const state = run([
+      { type: 'featureApplied', id: 'memory', value: false },
+      { type: 'reset' },
+    ])
+    expect(state).toEqual(initialLiveConfig)
   })
 })

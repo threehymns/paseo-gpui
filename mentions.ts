@@ -173,6 +173,7 @@ export function useMentionCompletions(source: MentionSource | null, value: strin
     setHighlight(0)
     const src = sourceRef.current
     if (!token || !src) {
+      if (!token) setDismissedStart(null)
       setEntries([])
       return
     }
