@@ -50,6 +50,7 @@ import { useAttention, type NotificationBridge } from './attention'
 import { useDraftConfig } from './draft-config'
 import { contextMeter } from './usage'
 import { liveTruth, useLiveAgentConfig, type DaemonTruth, type ProviderNotice } from './live-config'
+import { createAppStore, defaultStatePath, fileStateStorage } from './app-state'
 
 // ---- daemon hooks ----------------------------------------------------------
 
@@ -149,8 +150,12 @@ async function openImagePicker(): Promise<IncomingImage[] | null> {
   return null
 }
 
+/** One store per app run: read the state file once, persist every write. */
+const createStateStore = () => createAppStore(fileStateStorage(defaultStatePath()))
+
 export function ChatApp() {
   const { client, daemon, status, error, agents, providers } = useDaemon()
+  const [store] = useState(createStateStore)
 
   const [activeId, setActiveId] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState(false)
@@ -467,6 +472,7 @@ export function ChatApp() {
           onArchive={archiveAgentRow}
           onDelete={deleteAgentRow}
           onRename={renameAgentRow}
+          store={store}
         />
         <div style={{ width: 1, height: '100%', flexShrink: 0, backgroundColor: C.sidebarBorder }} />
       </motion.div>
