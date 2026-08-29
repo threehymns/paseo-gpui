@@ -233,6 +233,8 @@ export function ChatApp() {
         usedTokens: sessionUsage?.contextWindowUsedTokens,
         maxTokens: sessionUsage?.contextWindowMaxTokens ?? modelDef?.contextWindowMaxTokens ?? null,
         costUsd: sessionUsage?.totalCostUsd,
+        // The wire usage schema carries no per-provider shares yet, so the
+        // breakdown seam stays latched for when the daemon reports them.
       }),
     [sessionUsage, modelDef],
   )

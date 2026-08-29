@@ -2,6 +2,9 @@
  * The composer: draft textarea with chips, plus the workspace footer bar.
  */
 
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import React, { useMemo } from 'react'
 import { Icon, IconButton, StatusDot, type IconName } from './chrome'
 import { OptionPicker } from './pickers'
@@ -126,29 +129,56 @@ const METER_COLORS: Record<MeterTone, string> = {
 }
 
 /**
- * A ring gauge as an inline SVG string for the native `svg` element: a faint
- * track plus an arc starting at 12 o'clock covering `fraction` of the circle
- * (the r=15.9155 trick makes the circumference exactly 100).
+ * A ring gauge for the native `svg` element. The renderer takes `src` as a
+ * real filesystem path to an .svg file (raises ENOENT on inline markup) and
+ * paints it monochrome, tinting the whole shape with `style.color`. So the
+ * two-tone ring (faint track + colored arc) is two stacked layers, each its
+ * own file written to a scratch dir and colored via style: the track is the
+ * full circle, the arc covers `fraction` of it starting at 12 o'clock (the
+ * r=15.9155 trick makes the circumference exactly 100).
  */
-function meterRingSvg(fraction: number, color: string): string {
-  const arc = Math.max(0, Math.min(1, fraction)) * 100
+
+const RING_SIZE = 36
+const RING_RADIUS = 15.9155
+const RING_STROKE = 4
+const RING_ROOT = path.join(tmpdir(), 'gpuix-chat-assets')
+
+function ringSvg(dasharray: string): string {
+  const r = RING_SIZE / 2
   return [
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 36">',
-    `<circle cx="18" cy="18" r="15.9155" fill="none" stroke="${C.overlayStrong}" stroke-width="4"/>`,
-    `<circle cx="18" cy="18" r="15.9155" fill="none" stroke="${color}" stroke-width="4"`,
-    'stroke-linecap="round" stroke-dasharray="' + arc + ' ' + (100 - arc) + '" transform="rotate(-90 18 18)"/>',
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${RING_SIZE} ${RING_SIZE}">`,
+    `<circle cx="${r}" cy="${r}" r="${RING_RADIUS}" fill="none" stroke="#000" stroke-width="${RING_STROKE}"`,
+    dasharray ? ` stroke-linecap="round" stroke-dasharray="${dasharray}"` : '',
+    ` transform="rotate(-90 ${r} ${r})"/>`,
     '</svg>',
   ].join(' ')
+}
+
+/** Materialize an svg string as a real file so the native renderer can load it. */
+function ringAsset(content: string, key: string): string {
+  mkdirSync(RING_ROOT, { recursive: true })
+  const dest = path.join(RING_ROOT, `meter-ring-${key}.svg`)
+  writeFileSync(dest, content)
+  return dest
+}
+
+function meterRingAssets(fraction: number): { track: string; arc: string } {
+  const arcPct = Math.max(0, Math.min(1, fraction)) * 100
+  const track = ringAsset(ringSvg('100 0'), 'track')
+  const arc = ringAsset(ringSvg(`${arcPct} ${100 - arcPct}`), `arc-${Math.round(arcPct * 100)}`)
+  return { track, arc }
 }
 
 /** The context-window meter ring with its hover breakdown. */
 function UsageRing({ meter }: { meter: ContextMeter }) {
   const color = METER_COLORS[meter.tone]
+  const assets = useMemo(() => meterRingAssets(meter.fraction), [meter.fraction])
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <div testId="context-meter" style={{ display: 'flex', cursor: 'default' }}>
-          <svg src={meterRingSvg(meter.fraction, color)} style={{ width: 16, height: 16 }} />
+        <div testId="context-meter" style={{ position: 'relative', width: 16, height: 16, cursor: 'default', display: 'flex' }}>
+          <svg src={assets.track} style={{ width: 16, height: 16, color: C.overlayStrong, position: 'absolute', inset: 0 }} />
+          <svg src={assets.arc} style={{ width: 16, height: 16, color, position: 'absolute', inset: 0 }} />
         </div>
       </TooltipTrigger>
       <TooltipContent side="top" sideOffset={6}>
