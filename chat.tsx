@@ -72,6 +72,7 @@ import { useCheckoutActions } from './checkout-actions'
 import { CheckoutPanel } from './checkout-panel'
 import { contextMeter } from './usage'
 import { liveTruth, useLiveAgentConfig, type DaemonTruth, type ProviderNotice } from './live-config'
+import type { ComposerCommands } from './composer'
 import {
   providerSubagentsEnabled,
   selectTrackRows,
@@ -672,6 +673,16 @@ const listRef = useRef<{ id: number } | null>(null)
     </>
   )
 
+  // Slash commands ask about the active agent, or the draft for a new one.
+  const composerCommands: ComposerCommands | undefined =
+    status === 'connected'
+      ? {
+          seam: daemon,
+          agentId: activeId,
+          draft: activeId ? null : { modelValue, thinkingId, modeId, cwd },
+        }
+      : undefined
+
   return (
     <div
       style={{
@@ -844,6 +855,7 @@ const listRef = useRef<{ id: number } | null>(null)
           onBlur={() => attention.engageComposer(activeId)}
           disabledReason={disabledReason}
           chips={draftChips}
+          commands={composerCommands}
           canStop={agentRunning}
           stopping={stopping}
           onStop={() => void stopAgent()}

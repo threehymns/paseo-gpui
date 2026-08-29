@@ -1,11 +1,12 @@
 /**
- * The composer: draft textarea with chips, plus the workspace footer bar.
+ * The composer: draft textarea with chips, the slash-command menu, plus the
+ * workspace footer bar.
  */
 
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import React, { useMemo } from 'react'
+import React, { useMemo, useRef, useState } from 'react'
 import { Icon, IconButton, StatusDot, type IconName } from './chrome'
 import { OptionPicker } from './pickers'
 import { basename } from './paseo'
@@ -15,6 +16,13 @@ import { changesTrack, tasksTrack } from './tracks'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@gpuix/react'
 import type { ImageAttachment, PastePayload } from './attachments'
 import type { ProviderNotice } from './live-config'
+import {
+  nextCaretAfterEdit,
+  useSlashCommandMenu,
+  type DaemonCommandsSeam,
+  type DraftCommandsInput,
+  type SlashCommand,
+} from './slash-commands'
 import { type ContextMeter, type MeterTone } from './usage'
 import { C, CHAT_THEME, CONTENT_MAX_WIDTH } from './theme'
 
@@ -33,6 +41,13 @@ export function ConfigNotice({ notice }: { notice: ProviderNotice }) {
       </text>
     </div>
   )
+}
+
+/** Who the daemon should list commands for while this composer is live. */
+export interface ComposerCommands {
+  seam: DaemonCommandsSeam
+  agentId: string | null
+  draft: DraftCommandsInput | null
 }
 
 // ---- tracks row -------------------------------------------------------------
@@ -455,6 +470,7 @@ export function Composer({
   onBlur,
   disabledReason,
   chips,
+  commands,
   canStop,
   stopping,
   onStop,
@@ -474,6 +490,7 @@ export function Composer({
   onBlur?: () => void
   disabledReason: string | null
   chips: React.ReactNode
+  commands?: ComposerCommands
   /** True only while the open agent is running; shows the stop control. */
   canStop?: boolean
   /** True while the cancel request is in flight; clicks are held until it settles. */
@@ -496,16 +513,40 @@ export function Composer({
   mentionSource?: MentionSource | null
 }) {
   const ready = value.trim().length > 0 && !disabledReason
+
+  // The native textarea reports values but not caret offsets, so the caret is
+  // tracked here: edits at the end stay at the end, arrows and home/end move it.
+  const [caret, setCaret] = useState(value.length)
+  const lastValueRef = useRef(value)
+  const trackChange = (next: string, explicitCaret?: number) => {
+    setCaret(explicitCaret ?? nextCaretAfterEdit(lastValueRef.current, next, caret))
+    lastValueRef.current = next
+    onChange(next)
+  }
+
+  const menu = useSlashCommandMenu({
+    seam: commands?.seam ?? null,
+    agentId: commands?.agentId ?? null,
+    draft: commands?.draft ?? null,
+    text: value,
+    caret,
+    onTextChange: (next, nextCaret) => trackChange(next, nextCaret),
+  })
+
   const send = (text: string) => {
+    // Enter with the menu open never submits.
+    if (menu.visible) return
     const next = text.trim()
     if (!next || disabledReason) return
     onSend(next)
   }
+
   const completions = useMentionCompletions(mentionSource ?? null, value)
   const pick = (entry: MentionEntry) => {
     const next = completions.draftFor(entry)
     if (next != null) onChange(next)
   }
+
   return (
     <div
       style={{
@@ -535,6 +576,7 @@ export function Composer({
           paddingBottom: 10,
         }}
       >
+        {menu.visible && <SlashCommandMenu menu={menu} />}
         {completions.open && <MentionList completions={completions} onPick={pick} />}
         {attachments.length > 0 && (
           <div
@@ -574,20 +616,30 @@ export function Composer({
             paddingLeft: 10,
             paddingRight: 10,
           }}
-          onChange={(event) => onChange(event.value ?? '')}
+          onChange={(event) => trackChange(event.value ?? '')}
           onKeyDown={(event) => {
+            if (menu.visible && event.key && menu.handleKey(event.key)) return
             if (completions.open) {
               if (event.key === 'down') completions.moveHighlight(1)
               else if (event.key === 'up') completions.moveHighlight(-1)
               else if (event.key === 'escape') completions.dismiss()
               return
             }
-            if (event.key === 'escape' && canStop && !stopping) onStop?.()
+            if (event.key === 'left' || event.key === 'right') {
+              setCaret((current) =>
+                Math.max(0, Math.min(current + (event.key === 'left' ? -1 : 1), value.length)),
+              )
+            } else if (event.key === 'home') {
+              setCaret(0)
+            } else if (event.key === 'end') {
+              setCaret(value.length)
+            } else if (event.key === 'escape' && canStop && !stopping) {
+              onStop?.()
+            }
           }}
           onSubmit={(event) => {
+            if (menu.visible) return
             const highlighted = completions.entries[completions.highlight]
-            // Enter completes the live mention instead of sending; normal
-            // typing and submits are untouched while the list is closed.
             if (completions.open && highlighted) {
               pick(highlighted)
               return
@@ -694,6 +746,141 @@ export function Composer({
           />
         </div>
       </div>
+    </div>
+  )
+}
+
+function SlashCommandMenu({ menu }: { menu: ReturnType<typeof useSlashCommandMenu> }) {
+  return (
+    <div
+      testId="slash-command-menu"
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        width: '100%',
+        maxHeight: 264,
+        overflowY: 'scroll',
+        marginBottom: 6,
+        paddingTop: 4,
+        paddingBottom: 4,
+        paddingLeft: 4,
+        paddingRight: 4,
+        backgroundColor: C.raised,
+        borderWidth: 1,
+        borderColor: C.borderStrong,
+        borderRadius: 12,
+      }}
+    >
+      {menu.error ? (
+        <text
+          testId="slash-command-error"
+          style={{ fontSize: 12.5, color: C.danger, paddingTop: 5, paddingBottom: 5, paddingLeft: 8 }}
+        >
+          {menu.error}
+        </text>
+      ) : menu.rows.length === 0 ? (
+        <text style={{ fontSize: 12.5, color: C.tertiary, paddingTop: 5, paddingBottom: 5, paddingLeft: 8 }}>
+          No commands found
+        </text>
+      ) : (
+        <>
+          {menu.detail && (
+            <div
+              testId="slash-command-detail"
+              style={{
+                display: 'flex',
+                flexDirection: 'row',
+                alignItems: 'baseline',
+                gap: 10,
+                paddingLeft: 8,
+                paddingRight: 8,
+                paddingBottom: 6,
+              }}
+            >
+              <text style={{ fontSize: 12.5, color: C.secondary, whiteSpace: 'nowrap' }}>
+                /{menu.detail.name}
+              </text>
+              {menu.detail.argumentHint && (
+                <text style={{ fontSize: 11.5, color: C.ghost, flexShrink: 0 }}>{menu.detail.argumentHint}</text>
+              )}
+              <text
+                style={{
+                  fontSize: 12.5,
+                  color: C.tertiary,
+                  flexGrow: 1,
+                  minWidth: 0,
+                  textAlign: 'right',
+                  whiteSpace: 'nowrap',
+                  textOverflow: 'ellipsis',
+                }}
+              >
+                {menu.detail.description}
+              </text>
+            </div>
+          )}
+          <div style={{ height: 1, backgroundColor: C.border, marginBottom: 2 }} />
+          {menu.rows.map((command, index) => (
+            <CommandRow
+              key={command.name}
+              command={command}
+              highlighted={index === menu.selectedIndex}
+              onClick={() => menu.select(index)}
+            />
+          ))}
+        </>
+      )}
+    </div>
+  )
+}
+
+function CommandRow({
+  command,
+  highlighted,
+  onClick,
+}: {
+  command: SlashCommand
+  highlighted: boolean
+  onClick: () => void
+}) {
+  return (
+    <div
+      testId="slash-command-row"
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        alignItems: 'baseline',
+        gap: 10,
+        width: '100%',
+        paddingTop: 6,
+        paddingBottom: 6,
+        paddingLeft: 8,
+        paddingRight: 8,
+        borderRadius: 7,
+        backgroundColor: highlighted ? '#404040' : C.raised,
+        hover: { backgroundColor: '#404040' },
+        cursor: 'pointer',
+      }}
+      onClick={onClick}
+    >
+      <text style={{ fontSize: 13, fontWeight: highlighted ? 600 : 500, color: C.text, flexShrink: 0 }}>
+        /{command.name}
+      </text>
+      {command.argumentHint && (
+        <text style={{ fontSize: 11.5, color: C.ghost, flexShrink: 0 }}>{command.argumentHint}</text>
+      )}
+      <text
+        style={{
+          fontSize: 12.5,
+          color: C.tertiary,
+          flexGrow: 1,
+          minWidth: 0,
+          textAlign: 'right',
+          whiteSpace: 'nowrap',
+          textOverflow: 'ellipsis',
+        }}
+      >
+        {command.description}
+      </text>
     </div>
   )
 }
