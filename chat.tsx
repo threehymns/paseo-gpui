@@ -593,8 +593,7 @@ const listRef = useRef<{ id: number } | null>(null)
                 : `Pick a model, then describe what to build in ${basename(cwd)}.`
             }
           />
-        ) : (
-) : viewingSubagent ? (
+        ) : viewingSubagent ? (
           <>
             {subagentHasOlder(subagents.state, viewingSubagent.parentAgentId, viewingSubagent.id) && (
               <SubagentLoadOlder
