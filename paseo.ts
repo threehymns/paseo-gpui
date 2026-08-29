@@ -95,7 +95,7 @@ export type ToolName =
   | 'plan'
   | 'generic'
 
-export type ToolStatus = 'running' | 'ok' | 'failed'
+export type ToolStatus = 'running' | 'ok' | 'failed' | 'canceled'
 
 export type ReasoningTurn = {
   kind: 'reasoning'
@@ -133,6 +133,7 @@ export type Turn =
       status: ToolStatus
     }
   | { kind: 'error'; text: string }
+  | { kind: 'canceled'; reason?: string }
 
 function splitLines(text: string): string[] {
   if (!text) return []
@@ -266,6 +267,15 @@ export function reasoningLabel(turn: ReasoningTurn): string {
   return turn.durationMs == null ? 'Thinking…' : `Thought for ${formatDuration(turn.durationMs)}`
 }
 
+/**
+ * Folds the daemon's canceled-turn stream event into its own outcome,
+ * sealing any still-open trailing thinking block first. Cancellation is kept
+ * distinct from failures on purpose: nothing went wrong — the turn was stopped.
+ */
+export function applyTurnCanceled(turns: Turn[], options: { at?: number; reason?: string } = {}): Turn[] {
+  return appendTurn(sealTrailingReasoning(turns, options.at ?? Date.now()), { kind: 'canceled', reason: options.reason })
+}
+
 export type AssistantTurn = Extract<Turn, { kind: 'assistant' }>
 
 /**
@@ -383,6 +393,14 @@ export function toolDetailParts(detail: ToolCallDetail): ToolDetailPart[] {
   }
 }
 
+/** Folds a daemon tool-call status onto its transcript ToolStatus; cancellation stays its own outcome. */
+const TOOL_STATUS_FOLD: Record<ToolCallItem['status'], ToolStatus> = {
+  running: 'running',
+  completed: 'ok',
+  failed: 'failed',
+  canceled: 'canceled',
+}
+
 /**
  * Folds one timeline item into the transcript. Streaming deltas merge into the
  * previous turn of their kind. `at` is the item's epoch-ms arrival time (live
@@ -435,8 +453,7 @@ export function applyTimelineItem(turns: Turn[], item: TimelineItem, at: number 
     }
     case 'tool_call': {
       const index = findLastIndex(turns, (t) => t.kind === 'tool' && t.callId === item.callId)
-      const status: ToolStatus =
-        item.status === 'running' ? 'running' : item.status === 'completed' ? 'ok' : 'failed'
+      const status: ToolStatus = TOOL_STATUS_FOLD[item.status]
       const next: Turn = { kind: 'tool', callId: item.callId, ...toolMeta(item), structured: item.detail, status }
       if (index >= 0) return [...turns.slice(0, index), next, ...turns.slice(index + 1)]
       return appendTurn(sealTrailingTurns(turns, at), next)

@@ -54,6 +54,7 @@ import iconSparkle from './assets/icons/sparkle.svg' with { type: 'file' }
 import iconWrench from './assets/icons/wrench.svg' with { type: 'file' }
 import iconSend from './assets/icons/arrow-up.svg' with { type: 'file' }
 import iconCheck from './assets/icons/check.svg' with { type: 'file' }
+import iconSquare from './assets/icons/square.svg' with { type: 'file' }
 import iconImage from './assets/icons/image.svg' with { type: 'file' }
 import iconX from './assets/icons/x.svg' with { type: 'file' }
 
@@ -80,6 +81,7 @@ const ICONS = {
   wrench: realAssetPath(iconWrench),
   send: realAssetPath(iconSend),
   check: realAssetPath(iconCheck),
+  square: realAssetPath(iconSquare),
   image: realAssetPath(iconImage),
   x: realAssetPath(iconX),
 } as const

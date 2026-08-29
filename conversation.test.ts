@@ -211,6 +211,44 @@ describe('agent conversation', () => {
     })
     expect(state.turns).toHaveLength(1)
   })
+
+  test('turnCanceled folds to its own outcome, distinct from turnFailed', () => {
+    const canceled = run([
+      loadedPage([{ item: assistant('working…') }]),
+      { type: 'turnCanceled', reason: 'user requested' },
+    ])
+    expect(canceled.turns).toHaveLength(2)
+    expect((canceled.turns[1] as { kind: string; reason?: string }).kind).toBe('canceled')
+    expect((canceled.turns[1] as { reason?: string }).reason).toBe('user requested')
+
+    const failed = run([{ type: 'turnFailed', message: 'boom' }])
+    expect(failed.turns[0]!.kind).toBe('error')
+  })
+
+  test('turnCanceled seals an open thinking block before landing', () => {
+    let state = reduceConversation(initialConversation, { type: 'timeline', item: { type: 'reasoning', text: 'hmm' } })
+    state = reduceConversation(state, { type: 'turnCanceled' })
+    expect(state.turns).toHaveLength(2)
+    expect(typeof (state.turns[0] as { durationMs?: number }).durationMs).toBe('number')
+    expect(state.turns[1]!.kind).toBe('canceled')
+  })
+
+  test('a canceled tool call folds to its own status through the timeline path', () => {
+    const state = run([
+      {
+        type: 'timeline',
+        item: {
+          type: 'tool_call',
+          callId: 'c1',
+          name: 'bash',
+          detail: { type: 'shell', command: 'ls' },
+          status: 'canceled',
+          error: null,
+        } as never,
+      },
+    ])
+    expect((state.turns[0] as { kind: string; status: string }).status).toBe('canceled')
+  })
 })
 
 describe('history paging', () => {

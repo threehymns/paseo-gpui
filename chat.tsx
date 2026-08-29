@@ -241,6 +241,27 @@ export function ChatApp() {
   const renameAgentRow = (id: string, name: string) =>
     runRowAction('rename', id, () => daemon.updateAgent(id, { name }))
 
+  // The composer's stop control: enabled only while the open agent runs. From
+  // click until the cancellation is confirmed — the agent leaving running via
+  // the directory subscription — the control reflects that so double-clicks are
+  // unambiguous.
+  const agentRunning = activeEntry?.status === 'running'
+  const [stopping, setStopping] = useState(false)
+  useEffect(() => setStopping(false), [activeId])
+  useEffect(() => {
+    if (!agentRunning) setStopping(false)
+  }, [agentRunning])
+  const stopAgent = async () => {
+    if (!activeId || !agentRunning || stopping) return
+    setStopping(true)
+    try {
+      await daemon.cancelAgent(activeId)
+    } catch (err) {
+      setStopping(false)
+      setCreateError(errorMessage(err))
+    }
+  }
+
   // Subagents: the tracks-row pill reads the store's rows; opening a managed
   // row is ordinary conversation navigation, a provider row swaps the
   // transcript area for its read-only timeline. Managed children work
@@ -670,6 +691,9 @@ const listRef = useRef<{ id: number } | null>(null)
           onBlur={() => attention.engageComposer(activeId)}
           disabledReason={disabledReason}
           chips={draftChips}
+          canStop={agentRunning}
+          stopping={stopping}
+          onStop={() => void stopAgent()}
           attachments={draftImages}
           onRemoveAttachment={(id) => setDraftImages((prev) => removeAttachment(prev, id))}
           onAttach={() => void pickAttachments()}

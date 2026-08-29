@@ -364,6 +364,9 @@ export function Composer({
   onBlur,
   disabledReason,
   chips,
+  canStop,
+  stopping,
+  onStop,
   attachments = [],
   onRemoveAttachment,
   onAttach,
@@ -379,6 +382,11 @@ export function Composer({
   onBlur?: () => void
   disabledReason: string | null
   chips: React.ReactNode
+  /** True only while the open agent is running; shows the stop control. */
+  canStop?: boolean
+  /** True while the cancel request is in flight; clicks are held until it settles. */
+  stopping?: boolean
+  onStop?: () => void
   /** Staged image chips shown above the input. */
   attachments?: readonly ImageAttachment[]
   onRemoveAttachment?: (id: string) => void
@@ -467,6 +475,9 @@ export function Composer({
           }}
           onChange={(event) => onChange(event.value ?? '')}
           onSubmit={(event) => send(event.value ?? value)}
+          onKeyDown={(event) => {
+            if (event.key === 'escape' && canStop && !stopping) onStop?.()
+          }}
           onFocus={onFocus}
           onBlur={onBlur}
         />
@@ -510,6 +521,42 @@ export function Composer({
         >
           {chips}
           <div style={{ flexGrow: 1 }} />
+          {canStop && (
+            <text
+              style={{
+                fontSize: 12,
+                color: stopping ? C.running : C.tertiary,
+                flexShrink: 0,
+                marginRight: 6,
+              }}
+            >
+              {stopping ? 'Canceling agent…' : 'Stop agent'}
+            </text>
+          )}
+          {canStop && (
+            <div
+              testId="stop"
+              onClick={stopping ? undefined : onStop}
+              style={{
+                width: 26,
+                height: 26,
+                borderRadius: 13,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: stopping ? undefined : 'pointer',
+                opacity: stopping ? 0.5 : 1,
+                backgroundColor: C.danger,
+                hover: stopping ? undefined : { opacity: 0.85 },
+              }}
+            >
+              {stopping ? (
+                <StatusDot color="#FFFFFF" size={8} />
+              ) : (
+                <Icon name="square" size={11} color="#FFFFFF" />
+              )}
+            </div>
+          )}
           {usageMeter && <UsageRing meter={usageMeter} />}
           <RoundButton
             testId="attach"

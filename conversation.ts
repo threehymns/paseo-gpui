@@ -14,6 +14,7 @@ import type { PaseoAgentTimelineRefetchOptions, PaseoClient } from '@getpaseo/cl
 import { newAttachmentId, toSendImages, type ImageAttachment } from './attachments'
 import {
   applyTimelineItem,
+  applyTurnCanceled,
   buildTurns,
   errorMessage,
   sealTrailingTurns,
@@ -77,6 +78,7 @@ export type ConversationEvent =
   | { type: 'timeline'; item: TimelineItem; at?: number }
   | { type: 'turnCompleted'; at?: number; usage?: AgentUsage }
   | { type: 'turnFailed'; message: string }
+  | { type: 'turnCanceled'; reason?: string; at?: number }
   | { type: 'sendQueued'; text: string; images?: ImageAttachment[] }
   | { type: 'sendFailed'; error: unknown }
   | { type: 'sendUnqueued'; id: string }
@@ -207,6 +209,9 @@ export function reduceConversation(state: ConversationState, event: Conversation
         entries: [...state.entries, { item: { type: 'error', message: event.message } }],
         turns: applyTimelineItem(state.turns, { type: 'error', message: event.message }),
       }
+    case 'turnCanceled':
+      // Cancellation is its own outcome, not a failure — fold it as such.
+      return { ...state, turns: applyTurnCanceled(state.turns, { at: event.at ?? Date.now(), reason: event.reason }) }
     case 'sendQueued':
       return {
         ...state,
@@ -305,6 +310,10 @@ export function useAgentConversation(
             )
           } else if (event.type === 'turn_failed') {
             setState((prev) => reduceConversation(prev, { type: 'turnFailed', message: event.error }))
+          } else if (event.type === 'turn_canceled') {
+            setState((prev) =>
+              reduceConversation(prev, { type: 'turnCanceled', reason: event.reason, at: eventTime(timestamp) }),
+            )
           }
         })
       } catch (err) {

@@ -24,6 +24,7 @@ import {
   diffStats,
   reasoningLabel,
   sealTrailingReasoning,
+  applyTurnCanceled,
   sealTrailingTurns,
   workedForLabel,
   completionTimestamp,
@@ -40,7 +41,7 @@ const toolCall = (over: {
   callId?: string
   name?: string
   detail: unknown
-  status?: 'running' | 'completed' | 'failed'
+  status?: 'running' | 'completed' | 'failed' | 'canceled'
 }): TimelineItem =>
   ({
     type: 'tool_call',
@@ -363,6 +364,58 @@ describe('reasoning timing', () => {
     expect(sealTrailingReasoning(turns, 99_999)).toEqual(turns)
     const sealed = sealTrailingReasoning(buildTurns([timed({ type: 'reasoning', text: 'x' }, 1_000)]), 4_000)
     expect(sealTrailingReasoning(sealed, 99_999)).toEqual(sealed)
+  })
+})
+
+// ---- cancellation folding ---------------------------------------------------
+
+describe('cancellation folding', () => {
+  test('canceled tool calls fold to their own status, distinct from failed', () => {
+    const turns = applyTimelineItem(
+      [],
+      toolCall({ detail: { type: 'shell', command: 'npm test' }, status: 'canceled' }),
+    )
+    expect((turns[0] as { status: string }).status).toBe('canceled')
+    expect((turns[0] as { status: string }).status).not.toBe('failed')
+  })
+
+  test('a canceled update replaces the running call in place by callId', () => {
+    let turns = buildTurns([timed(toolCall({ detail: { type: 'shell', command: 'npm test' } }), 1_000)])
+    turns = applyTimelineItem(
+      turns,
+      toolCall({ detail: { type: 'shell', command: 'npm test' }, status: 'canceled' }),
+    )
+    expect(turns).toHaveLength(1)
+    expect(turns[0]!.kind).toBe('tool')
+    expect((turns[0] as { status: string }).status).toBe('canceled')
+  })
+
+  test('applyTurnCanceled appends its own outcome and seals trailing thinking', () => {
+    let turns = buildTurns([
+      timed({ type: 'reasoning', text: 'almost' }, 1_000),
+      timed({ type: 'reasoning', text: ' there' }, 4_000),
+    ])
+    turns = applyTurnCanceled(turns, { at: 60_000, reason: 'user requested' })
+    // The quiet gap before the cancel must not count as thinking.
+    expect((turns[0] as { durationMs?: number }).durationMs).toBe(3_000)
+    const canceled = turns[1] as { kind: string; reason?: string }
+    expect(canceled.kind).toBe('canceled')
+    expect(canceled.reason).toBe('user requested')
+    expect(canceled.kind).not.toBe('error')
+  })
+
+  test('a canceled outcome never merges into neighbouring turns', () => {
+    let turns = buildTurns([
+      timed({ type: 'assistant_message', text: 'part one' }, 1_000),
+      timed({ type: 'assistant_message', text: ' plus two' }, 2_000),
+    ])
+    turns = applyTurnCanceled(turns, { at: 3_000 })
+    expect(turns).toHaveLength(2)
+    expect((turns[0] as { source: string }).source).toBe('part one plus two')
+    expect(turns[1]!.kind).toBe('canceled')
+    // Each canceled-turn event folds its own row; none merge together.
+    const again = applyTurnCanceled(turns, { at: 4_000 })
+    expect(again.filter((turn) => turn.kind === 'canceled')).toHaveLength(2)
   })
 })
 
