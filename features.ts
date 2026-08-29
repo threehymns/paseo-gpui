@@ -41,7 +41,10 @@ export function useProviderFeatures(
         if (!stale) setFeatures(payload.error ? [] : toggleFeatures(payload.features))
       })
       .catch(() => {
-        if (!stale) setFeatures([])
+        if (!stale) {
+          fetchedRef.current = ''
+          setFeatures([])
+        }
       })
     return () => {
       stale = true

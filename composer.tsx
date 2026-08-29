@@ -2,12 +2,19 @@
  * The composer: draft textarea with chips, plus the workspace footer bar.
  */
 
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import React, { useMemo } from 'react'
 import { Icon, IconButton, StatusDot, type IconName } from './chrome'
 import { OptionPicker } from './pickers'
 import { basename } from './paseo'
+import type { Turn } from './paseo'
+import { changesTrack, tasksTrack } from './tracks'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@gpuix/react'
 import type { ImageAttachment, PastePayload } from './attachments'
 import type { ProviderNotice } from './live-config'
+import { type ContextMeter, type MeterTone } from './usage'
 import { C, CHAT_THEME, CONTENT_MAX_WIDTH } from './theme'
 
 const NOTICE_COLORS: Record<ProviderNotice['type'], string> = {
@@ -23,6 +30,155 @@ export function ConfigNotice({ notice }: { notice: ProviderNotice }) {
       <text style={{ fontSize: 12, color: NOTICE_COLORS[notice.type], width: CONTENT_MAX_WIDTH }}>
         {notice.message}
       </text>
+    </div>
+  )
+}
+
+// ---- tracks row -------------------------------------------------------------
+
+export function Pill({
+  testId,
+  onClick,
+  children,
+}: {
+  testId?: string
+  onClick?: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <div
+      testId={testId}
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        height: 26,
+        paddingLeft: 8,
+        paddingRight: 4,
+        borderRadius: 7,
+        backgroundColor: C.item,
+        flexShrink: 0,
+        ...(onClick ? { cursor: 'pointer' as const, hover: { backgroundColor: C.overlayStrong } } : {}),
+      }}
+      onClick={onClick}
+    >
+      {children}
+    </div>
+  )
+}
+
+/** A compact in-pill icon action; `busy` suspends it while its daemon call is in flight. */
+export function PillAction({
+  testId,
+  icon,
+  busy,
+  onClick,
+}: {
+  testId: string
+  icon: IconName
+  busy?: boolean
+  onClick?: () => void
+}) {
+  return (
+    <div
+      testId={testId}
+      style={{
+        width: 18,
+        height: 18,
+        borderRadius: 5,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        cursor: busy ? undefined : 'pointer',
+        opacity: busy ? 0.35 : 1,
+        hover: busy ? undefined : { backgroundColor: C.overlay },
+      }}
+      onClick={busy ? undefined : onClick}
+    >
+      <Icon name={icon} size={11} color={C.secondary} />
+    </div>
+  )
+}
+
+/**
+ * The tracks row above the composer: live work at a glance. The Tasks and
+ * DiffStat pills fold from the transcript's turns; the Subagents pill arrives
+ * as a slot reading the subagent store instead. The DiffStat pill renders only
+ * while a Changes surface exists (`onOpenChanges`); the whole row disappears
+ * when nothing has to say.
+ */
+export function TracksRow({
+  turns,
+  subagents,
+  onOpenChanges,
+}: {
+  turns: Turn[]
+  /** The Subagents pill element, rendered between Tasks and DiffStat. */
+  subagents?: React.ReactNode
+  /** Present only while a Changes surface exists to open. */
+  onOpenChanges?: () => void
+}) {
+  const tasks = tasksTrack(turns)
+  const changes = changesTrack(turns)
+
+  if (!tasks && !(changes && onOpenChanges) && !subagents) return null
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'row', justifyContent: 'center', paddingBottom: 4 }}>
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'row',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: 6,
+          width: CONTENT_MAX_WIDTH,
+          maxWidth: '100%',
+          paddingLeft: 10,
+          userSelect: 'none',
+        }}
+      >
+        {tasks && (
+          <Pill testId="tracks-tasks">
+            <Icon name="list" size={12} color={C.tertiary} />
+            <text style={{ fontSize: 12, fontWeight: 500, color: C.secondary, whiteSpace: 'nowrap', flexShrink: 0 }}>
+              {`${tasks.completed}/${tasks.total}`}
+            </text>
+            {tasks.active && (
+              <text
+                style={{
+                  fontSize: 12,
+                  color: C.accent,
+                  whiteSpace: 'nowrap',
+                  textOverflow: 'ellipsis',
+                  minWidth: 0,
+                  maxWidth: 220,
+                  marginRight: 4,
+                }}
+              >
+                {tasks.active}
+              </text>
+            )}
+          </Pill>
+        )}
+        {subagents}
+        {changes && onOpenChanges && (
+          <Pill testId="tracks-diffstat" onClick={onOpenChanges}>
+            <Icon name="gitBranch" size={12} color={C.tertiary} />
+            {changes.additions > 0 && (
+              <text style={{ fontSize: 12, fontWeight: 500, color: C.ok, whiteSpace: 'nowrap', flexShrink: 0 }}>
+                {`+\u2060${changes.additions}`}
+              </text>
+            )}
+            {changes.deletions > 0 && (
+              <text style={{ fontSize: 12, fontWeight: 500, color: C.danger, whiteSpace: 'nowrap', flexShrink: 0, marginRight: 4 }}>
+                {`-\u2060${changes.deletions}`}
+              </text>
+            )}
+          </Pill>
+        )}
+      </div>
     </div>
   )
 }
@@ -117,23 +273,120 @@ function RoundButton({
   )
 }
 
+const METER_COLORS: Record<MeterTone, string> = {
+  neutral: C.secondary,
+  amber: C.warn,
+  red: C.danger,
+}
+
+/**
+ * A ring gauge for the native `svg` element. The renderer takes `src` as a
+ * real filesystem path to an .svg file (raises ENOENT on inline markup) and
+ * paints it monochrome, tinting the whole shape with `style.color`. So the
+ * two-tone ring (faint track + colored arc) is two stacked layers, each its
+ * own file written to a scratch dir and colored via style: the track is the
+ * full circle, the arc covers `fraction` of it starting at 12 o'clock (the
+ * r=15.9155 trick makes the circumference exactly 100).
+ */
+
+const RING_SIZE = 36
+const RING_RADIUS = 15.9155
+const RING_STROKE = 4
+const RING_ROOT = path.join(tmpdir(), 'gpuix-chat-assets')
+
+function ringSvg(dasharray: string): string {
+  const r = RING_SIZE / 2
+  return [
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${RING_SIZE} ${RING_SIZE}">`,
+    `<circle cx="${r}" cy="${r}" r="${RING_RADIUS}" fill="none" stroke="#000" stroke-width="${RING_STROKE}"`,
+    dasharray ? ` stroke-linecap="round" stroke-dasharray="${dasharray}"` : '',
+    ` transform="rotate(-90 ${r} ${r})"/>`,
+    '</svg>',
+  ].join(' ')
+}
+
+/** Materialize an svg string as a real file so the native renderer can load it. */
+function ringAsset(content: string, key: string): string {
+  mkdirSync(RING_ROOT, { recursive: true })
+  const dest = path.join(RING_ROOT, `meter-ring-${key}.svg`)
+  writeFileSync(dest, content)
+  return dest
+}
+
+function meterRingAssets(fraction: number): { track: string; arc: string } {
+  const arcPct = Math.max(0, Math.min(1, fraction)) * 100
+  const track = ringAsset(ringSvg('100 0'), 'track')
+  const arc = ringAsset(ringSvg(`${arcPct} ${100 - arcPct}`), `arc-${Math.round(arcPct * 100)}`)
+  return { track, arc }
+}
+
+/** The context-window meter ring with its hover breakdown. */
+function UsageRing({ meter }: { meter: ContextMeter }) {
+  const color = METER_COLORS[meter.tone]
+  const assets = useMemo(() => meterRingAssets(meter.fraction), [meter.fraction])
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <div testId="context-meter" style={{ position: 'relative', width: 16, height: 16, cursor: 'default', display: 'flex' }}>
+          <svg src={assets.track} style={{ width: 16, height: 16, color: C.overlayStrong, position: 'absolute', inset: 0 }} />
+          <svg src={assets.arc} style={{ width: 16, height: 16, color, position: 'absolute', inset: 0 }} />
+        </div>
+      </TooltipTrigger>
+      <TooltipContent side="top" sideOffset={6}>
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 2,
+            padding: 8,
+            backgroundColor: C.raised,
+            borderWidth: 1,
+            borderColor: C.borderStrong,
+            borderRadius: 10,
+          }}
+        >
+          {meter.lines.map((line) => (
+            <text key={line} style={{ fontSize: 12, lineHeight: 16, color: C.secondary, whiteSpace: 'nowrap' }}>
+              {line}
+            </text>
+          ))}
+        </div>
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
 export function Composer({
   value,
   onChange,
   onSend,
+  onFocus,
+  onBlur,
   disabledReason,
   chips,
+  canStop,
+  stopping,
+  onStop,
   attachments = [],
   onRemoveAttachment,
   onAttach,
   onPastePayload,
   attachNotice,
+  usageMeter = null,
 }: {
   value: string
   onChange: (next: string) => void
   onSend: (text: string) => void
+  /** Composer engagement moments — attention clears on all of them. */
+  onFocus?: () => void
+  onBlur?: () => void
   disabledReason: string | null
   chips: React.ReactNode
+  /** True only while the open agent is running; shows the stop control. */
+  canStop?: boolean
+  /** True while the cancel request is in flight; clicks are held until it settles. */
+  stopping?: boolean
+  onStop?: () => void
   /** Staged image chips shown above the input. */
   attachments?: readonly ImageAttachment[]
   onRemoveAttachment?: (id: string) => void
@@ -145,6 +398,8 @@ export function Composer({
    */
   onPastePayload?: (payload: PastePayload) => void
   attachNotice?: { text: string; tone: 'warn' | 'danger' } | null
+  /** Context-window meter ring; hidden entirely when there is no usage data. */
+  usageMeter?: ContextMeter | null
 }) {
   const ready = value.trim().length > 0 && !disabledReason
   const send = (text: string) => {
@@ -220,6 +475,11 @@ export function Composer({
           }}
           onChange={(event) => onChange(event.value ?? '')}
           onSubmit={(event) => send(event.value ?? value)}
+          onKeyDown={(event) => {
+            if (event.key === 'escape' && canStop && !stopping) onStop?.()
+          }}
+          onFocus={onFocus}
+          onBlur={onBlur}
         />
         {attachNotice && (
           <text
@@ -261,6 +521,43 @@ export function Composer({
         >
           {chips}
           <div style={{ flexGrow: 1 }} />
+          {canStop && (
+            <text
+              style={{
+                fontSize: 12,
+                color: stopping ? C.running : C.tertiary,
+                flexShrink: 0,
+                marginRight: 6,
+              }}
+            >
+              {stopping ? 'Canceling agent…' : 'Stop agent'}
+            </text>
+          )}
+          {canStop && (
+            <div
+              testId="stop"
+              onClick={stopping ? undefined : onStop}
+              style={{
+                width: 26,
+                height: 26,
+                borderRadius: 13,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: stopping ? undefined : 'pointer',
+                opacity: stopping ? 0.5 : 1,
+                backgroundColor: C.danger,
+                hover: stopping ? undefined : { opacity: 0.85 },
+              }}
+            >
+              {stopping ? (
+                <StatusDot color="#FFFFFF" size={8} />
+              ) : (
+                <Icon name="square" size={11} color="#FFFFFF" />
+              )}
+            </div>
+          )}
+          {usageMeter && <UsageRing meter={usageMeter} />}
           <RoundButton
             testId="attach"
             icon="image"
