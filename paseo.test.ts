@@ -3,8 +3,11 @@ import {
   applyTimelineItem,
   buildTurns,
   applyAgentUpdate,
+  applyAgentPage,
   sortAgents,
   displayName,
+  isArchived,
+  activeAgentGone,
   relativeTime,
   statusBucket,
   statusGroups,
@@ -21,6 +24,11 @@ import {
   diffStats,
   reasoningLabel,
   sealTrailingReasoning,
+  applyTurnCanceled,
+  sealTrailingTurns,
+  workedForLabel,
+  completionTimestamp,
+  copyableText,
   toolDetailParts,
   compactionLabel,
   summarizeUsage,
@@ -37,7 +45,7 @@ const toolCall = (over: {
   callId?: string
   name?: string
   detail: unknown
-  status?: 'running' | 'completed' | 'failed'
+  status?: 'running' | 'completed' | 'failed' | 'canceled'
 }): TimelineItem =>
   ({
     type: 'tool_call',
@@ -157,6 +165,84 @@ describe('timeline mapping', () => {
       additions: 3,
       deletions: 2,
     })
+  })
+
+  test('assistant turns start at their first delta and keep it across merges', () => {
+    let turns = applyTimelineItem([], { type: 'assistant_message', text: 'Work' }, 5_000)
+    turns = applyTimelineItem(turns, { type: 'assistant_message', text: 'ing' }, 7_500)
+    const first = turns[0] as { kind: string; source: string; startedAt?: number }
+    expect(first.kind).toBe('assistant')
+    expect(first.source).toBe('Working')
+    expect(first.startedAt).toBe(5_000)
+    expect((first as { endedAt?: number }).endedAt).toBeUndefined()
+    expect(turns).toHaveLength(1)
+  })
+
+  test('the next appended item proves a working assistant turn finished', () => {
+    const turns = buildTurns([
+      timed({ type: 'assistant_message', text: 'On it.' }, 5_000),
+      timed({ type: 'user_message', text: 'thanks' }, 11_000),
+    ])
+    const said = turns[0] as { kind: string; endedAt?: number }
+    expect(said.kind).toBe('assistant')
+    expect(said.endedAt).toBe(11_000)
+  })
+
+  test('a fresh assistant segment seals the segment before it', () => {
+    let turns = applyTimelineItem([], { type: 'assistant_message', text: 'part one', messageId: 'm1' }, 1_000)
+    turns = applyTimelineItem(turns, toolCall({ detail: { type: 'shell', command: 'ls' } }), 2_000)
+    turns = applyTimelineItem(turns, { type: 'assistant_message', text: 'done', messageId: 'm2' }, 9_000)
+    const first = turns[0] as { kind: string; endedAt?: number }
+    const second = turns[2] as { kind: string; source: string; startedAt?: number; endedAt?: number }
+    expect(first.endedAt).toBe(2_000)
+    expect(second.source).toBe('done')
+    expect(second.startedAt).toBe(9_000)
+    expect(second.endedAt).toBeUndefined()
+  })
+
+  test('folding history leaves a trailing assistant turn unsealed, so a live delta can keep merging', () => {
+    const turns = buildTurns([
+      timed({ type: 'user_message', text: 'go' }, 1_000),
+      timed({ type: 'assistant_message', text: 'On it.' }, 2_000),
+      timed({ type: 'assistant_message', text: ' Done.' }, 8_000),
+    ])
+    const said = turns[1] as { kind: string; source: string; startedAt?: number; endedAt?: number }
+    expect(said.source).toBe('On it. Done.')
+    expect(said.startedAt).toBe(2_000)
+    // A reload is mid-stream and cannot know the agent finished: the tail stays
+    // open so the next live delta of the same message merges in, not splits.
+    expect(said.endedAt).toBeUndefined()
+  })
+
+  test('a live delta after a reload merges into the loaded turn instead of splitting', () => {
+    const loaded = buildTurns([
+      timed({ type: 'assistant_message', text: 'On it.', messageId: 'm1' }, 2_000),
+      timed({ type: 'assistant_message', text: ' still', messageId: 'm1' }, 7_000),
+    ])
+    const live = applyTimelineItem(loaded, { type: 'assistant_message', text: ' working.', messageId: 'm1' }, 9_000)
+    expect(live).toHaveLength(1)
+    const said = live[0] as { source: string; startedAt?: number; endedAt?: number }
+    expect(said.source).toBe('On it. still working.')
+    expect(said.startedAt).toBe(2_000)
+    expect(said.endedAt).toBeUndefined()
+  })
+
+  test('sealing a finished or absent assistant tail changes nothing', () => {
+    const turns = buildTurns([
+      timed({ type: 'assistant_message', text: 'hi' }, 1_000),
+      timed({ type: 'user_message', text: 'yo' }, 2_000),
+    ])
+    expect(sealTrailingTurns(turns, 99_999)).toEqual(turns)
+    expect(sealTrailingTurns([], 99_999)).toEqual([])
+  })
+
+  test('text arriving after the turn finished starts a fresh segment', () => {
+    let turns = applyTimelineItem([], { type: 'assistant_message', text: 'done', messageId: 'm1' }, 1_000)
+    turns = sealTrailingTurns(turns, 3_000)
+    turns = applyTimelineItem(turns, { type: 'assistant_message', text: 'one more thing', messageId: 'm1' }, 4_000)
+    expect(turns).toHaveLength(2)
+    expect((turns[0] as { source: string }).source).toBe('done')
+    expect((turns[1] as { source: string; startedAt?: number }).startedAt).toBe(4_000)
   })
 
   test('todo snapshots replace rather than append', () => {
@@ -356,10 +442,12 @@ describe('reasoning timing', () => {
   })
 
   test('replace-in-place updates do not seal a trailing block started after that call', () => {
-    let turns = buildTurns([
-      timed(toolCall({ callId: 'c1', detail: { type: 'shell', command: 'npm test' }, status: 'running' }), 1_000),
-      timed({ type: 'reasoning', text: 'watching tests' }, 2_000),
-    ])
+    let turns = applyTimelineItem(
+      [],
+      toolCall({ callId: 'c1', detail: { type: 'shell', command: 'npm test' }, status: 'running' }),
+      1_000,
+    )
+    turns = applyTimelineItem(turns, { type: 'reasoning', text: 'watching tests' }, 2_000)
     turns = applyTimelineItem(
       turns,
       toolCall({ callId: 'c1', detail: { type: 'shell', command: 'npm test', exitCode: 0 }, status: 'completed' }),
@@ -397,6 +485,91 @@ describe('reasoning timing', () => {
     expect(sealTrailingReasoning(turns, 99_999)).toEqual(turns)
     const sealed = sealTrailingReasoning(buildTurns([timed({ type: 'reasoning', text: 'x' }, 1_000)]), 4_000)
     expect(sealTrailingReasoning(sealed, 99_999)).toEqual(sealed)
+  })
+})
+
+// ---- cancellation folding ---------------------------------------------------
+
+describe('cancellation folding', () => {
+  test('canceled tool calls fold to their own status, distinct from failed', () => {
+    const turns = applyTimelineItem(
+      [],
+      toolCall({ detail: { type: 'shell', command: 'npm test' }, status: 'canceled' }),
+    )
+    expect((turns[0] as { status: string }).status).toBe('canceled')
+    expect((turns[0] as { status: string }).status).not.toBe('failed')
+  })
+
+  test('a canceled update replaces the running call in place by callId', () => {
+    let turns = buildTurns([timed(toolCall({ detail: { type: 'shell', command: 'npm test' } }), 1_000)])
+    turns = applyTimelineItem(
+      turns,
+      toolCall({ detail: { type: 'shell', command: 'npm test' }, status: 'canceled' }),
+    )
+    expect(turns).toHaveLength(1)
+    expect(turns[0]!.kind).toBe('tool')
+    expect((turns[0] as { status: string }).status).toBe('canceled')
+  })
+
+  test('applyTurnCanceled appends its own outcome and seals trailing thinking', () => {
+    let turns = buildTurns([
+      timed({ type: 'reasoning', text: 'almost' }, 1_000),
+      timed({ type: 'reasoning', text: ' there' }, 4_000),
+    ])
+    turns = applyTurnCanceled(turns, { at: 60_000, reason: 'user requested' })
+    // The quiet gap before the cancel must not count as thinking.
+    expect((turns[0] as { durationMs?: number }).durationMs).toBe(3_000)
+    const canceled = turns[1] as { kind: string; reason?: string }
+    expect(canceled.kind).toBe('canceled')
+    expect(canceled.reason).toBe('user requested')
+    expect(canceled.kind).not.toBe('error')
+  })
+
+  test('a canceled outcome never merges into neighbouring turns', () => {
+    let turns = buildTurns([
+      timed({ type: 'assistant_message', text: 'part one' }, 1_000),
+      timed({ type: 'assistant_message', text: ' plus two' }, 2_000),
+    ])
+    turns = applyTurnCanceled(turns, { at: 3_000 })
+    expect(turns).toHaveLength(2)
+    expect((turns[0] as { source: string }).source).toBe('part one plus two')
+    expect(turns[1]!.kind).toBe('canceled')
+    // Each canceled-turn event folds its own row; none merge together.
+    const again = applyTurnCanceled(turns, { at: 4_000 })
+    expect(again.filter((turn) => turn.kind === 'canceled')).toHaveLength(2)
+  })
+})
+
+// ---- assistant turn footers -------------------------------------------------
+
+describe('assistant turn footers', () => {
+  const working = { kind: 'assistant', source: 'hi', startedAt: 60_000 } as const
+  const done = { kind: 'assistant', source: 'hi', startedAt: 60_000, endedAt: 107_000 } as const
+
+  test('a working turn shows its elapsed time so far', () => {
+    expect(workedForLabel(working, 63_000)).toBe('3s')
+    expect(workedForLabel(working, 150_000)).toBe('1m 30s')
+    expect(workedForLabel(working, 7_800_000)).toBe('2h 9m')
+  })
+
+  test('a finished turn reports what it worked for', () => {
+    expect(workedForLabel(done, Infinity)).toBe('Worked for 47s')
+    expect(workedForLabel({ ...done, endedAt: 60_000 }, Infinity)).toBe('Worked for 0s')
+  })
+
+  test('turns without a recorded start show no footer label', () => {
+    expect(workedForLabel({ kind: 'assistant', source: 'hi' }, 1_000)).toBeUndefined()
+  })
+
+  test('completionTimestamp renders the finished-at clock time for hover', () => {
+    expect(completionTimestamp(107_000)).toMatch(/\d{1,2}:\d{2}/)
+  })
+
+  test('copyableText is the markdown source, and only when there is some', () => {
+    expect(copyableText(done)).toBe('hi')
+    expect(copyableText({ ...done, source: '   ' })).toBeUndefined()
+    expect(copyableText({ kind: 'user', text: 'hi' })).toBeUndefined()
+    expect(copyableText({ kind: 'reasoning', text: 'hmm' })).toBeUndefined()
   })
 })
 
@@ -561,6 +734,12 @@ describe('agent directory', () => {
   test('displayName prefers title over directory basename', () => {
     expect(displayName(entry({ title: 'Fix login' }))).toBe('Fix login')
     expect(displayName(entry({}))).toBe('storefront')
+    expect(displayName(entry({ title: '   ' }))).toBe('storefront')
+  })
+
+  test('isArchived reads the daemon archive timestamp', () => {
+    expect(isArchived(entry({}))).toBe(false)
+    expect(isArchived(entry({ archivedAt: '2026-08-24T09:00:00Z' }))).toBe(true)
   })
 
   test('applyAgentUpdate upserts and removes by id', () => {
@@ -574,8 +753,93 @@ describe('agent directory', () => {
     expect(removed).toHaveLength(2)
   })
 
+  describe('applyAgentPage', () => {
+    // A raise snapshot as a fetched page would carry it, and the same agent
+    // after the subscription delivered the daemon's truth-clear.
+    const raising = entry({
+      id: 'a1',
+      requiresAttention: true,
+      attentionReason: 'error',
+      updatedAt: '2026-08-24T11:00:00Z',
+    })
+    const cleared = entry({
+      id: 'a1',
+      requiresAttention: false,
+      attentionReason: null,
+      attentionTimestamp: null,
+      updatedAt: '2026-08-24T12:00:00Z',
+    })
+
+    test('an empty mirror takes the whole page', () => {
+      const page = [raising, entry({ id: 'b2' })]
+      expect(applyAgentPage([], page).map((e) => e.id)).toEqual(['a1', 'b2'])
+    })
+
+    test('a stale page snapshot never regresses an entry the subscription advanced', () => {
+      // Replaying the pre-clear raising snapshot must not resurrect attention
+      // the daemon already ended — that re-fires an OS notice.
+      const merged = applyAgentPage([cleared], [raising])
+      expect(merged).toHaveLength(1)
+      expect(merged[0]!.requiresAttention).toBe(false)
+      expect(merged[0]!.updatedAt).toBe('2026-08-24T12:00:00Z')
+    })
+
+    test('a newer page entry replaces an older mirror entry', () => {
+      const raisedAgain = entry({
+        id: 'a1',
+        requiresAttention: true,
+        attentionReason: 'finished',
+        updatedAt: '2026-08-24T12:00:00Z',
+      })
+      const merged = applyAgentPage([raising], [raisedAgain])
+      expect(merged).toHaveLength(1)
+      expect(merged[0]!.attentionReason).toBe('finished')
+      expect(merged[0]!.updatedAt).toBe('2026-08-24T12:00:00Z')
+    })
+
+    test('agents only the page knows are added to the mirror', () => {
+      const merged = applyAgentPage(
+        [entry({ id: 'old' })],
+        [entry({ id: 'fresh', updatedAt: '2026-08-24T13:00:00Z' })],
+      )
+      expect(merged.map((e) => e.id)).toEqual(['fresh', 'old'])
+    })
+  })
+
   test('relativeTime produces known shapes', () => {
     expect(relativeTime(list[0]!)).toMatch(/^now|\d+[mhd]|\w{3} \d{1,2}$/)
+  })
+})
+
+describe('activeAgentGone', () => {
+  const live = entry({ id: 'live' })
+
+  test('nothing is gone without a selection', () => {
+    expect(activeAgentGone(null, [], { connected: true, wasSeen: false })).toBe(false)
+  })
+
+  test('a disconnected daemon decides nothing', () => {
+    expect(activeAgentGone('live', [], { connected: false, wasSeen: true })).toBe(false)
+  })
+
+  test('an agent not yet seen by the directory gets grace', () => {
+    // A freshly created agent may be selected before its upsert arrives.
+    expect(activeAgentGone('fresh', [live], { connected: true, wasSeen: false })).toBe(false)
+    expect(activeAgentGone('fresh', [], { connected: true, wasSeen: false })).toBe(false)
+  })
+
+  test('a seen agent that vanished from the directory is gone', () => {
+    expect(activeAgentGone('live', [], { connected: true, wasSeen: true })).toBe(true)
+    expect(activeAgentGone('live', [entry({ id: 'other' })], { connected: true, wasSeen: true })).toBe(true)
+  })
+
+  test('a seen agent that was archived can no longer host the conversation', () => {
+    const archived = entry({ id: 'live', archivedAt: '2026-08-24T09:00:00Z' })
+    expect(activeAgentGone('live', [archived], { connected: true, wasSeen: true })).toBe(true)
+  })
+
+  test('a seen live agent stays hosted', () => {
+    expect(activeAgentGone('live', [live], { connected: true, wasSeen: true })).toBe(false)
   })
 })
 
