@@ -20,6 +20,7 @@ import {
   type ConnStatus,
   type DirectoryGroupMode,
 } from './paseo'
+import { directoryGrouping, showArchivedAgents, useAppState, type AppStore } from './app-state'
 import { C, SIDEBAR_WIDTH, TITLEBAR_HEIGHT, TRAFFIC_LIGHT_CLEARANCE } from './theme'
 
 function realAssetPath(virtualPath: string): string {
@@ -54,6 +55,8 @@ import iconWrench from './assets/icons/wrench.svg' with { type: 'file' }
 import iconSend from './assets/icons/arrow-up.svg' with { type: 'file' }
 import iconCheck from './assets/icons/check.svg' with { type: 'file' }
 import iconSquare from './assets/icons/square.svg' with { type: 'file' }
+import iconImage from './assets/icons/image.svg' with { type: 'file' }
+import iconX from './assets/icons/x.svg' with { type: 'file' }
 
 const ICONS = {
   compose: realAssetPath(iconCompose),
@@ -79,6 +82,8 @@ const ICONS = {
   send: realAssetPath(iconSend),
   check: realAssetPath(iconCheck),
   square: realAssetPath(iconSquare),
+  image: realAssetPath(iconImage),
+  x: realAssetPath(iconX),
 } as const
 
 export type IconName = keyof typeof ICONS
@@ -196,7 +201,7 @@ function SidebarAction({
   )
 }
 
-export type RowActionVerb = 'rename' | 'archive' | 'delete'
+export type RowActionVerb = 'rename' | 'archive' | 'delete' | 'detach'
 
 /** One row lifecycle call in flight; every action on that row stays disabled until it settles. */
 export interface RowActionRef {
@@ -529,6 +534,7 @@ export function Sidebar({
   onArchive,
   onDelete,
   onRename,
+  store,
 }: {
   agents: AgentEntry[]
   activeId: string | null
@@ -541,9 +547,11 @@ export function Sidebar({
   onArchive: (id: string) => void
   onDelete: (id: string) => void
   onRename: (id: string, name: string) => void
+  /** Persisted app state; the sidebar's view choices survive a restart. */
+  store: AppStore
 }) {
-  const [showArchived, setShowArchived] = useState(false)
-  const [groupMode, setGroupMode] = useState<DirectoryGroupMode>('status')
+  const [showArchived, setShowArchived] = useAppState(store, showArchivedAgents)
+  const [groupMode, setGroupMode] = useAppState(store, directoryGrouping)
   const groups = useMemo(
     () => (groupMode === 'project' ? projectGroups(agents, showArchived) : statusGroups(agents, showArchived)),
     [agents, showArchived, groupMode],
