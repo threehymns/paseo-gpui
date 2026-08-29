@@ -1,5 +1,6 @@
 /**
- * Live config chips: the model/thinking/mode triple for the active agent.
+ * Live config chips: the model/thinking/mode triple plus provider feature
+ * toggles for the active agent.
  *
  * Chip changes on a running agent go straight to the daemon's setters,
  * mirroring the pending-send pattern in conversation.ts: an applied value is
@@ -30,21 +31,27 @@ export interface DaemonTruth {
   modelValue: string | null
   thinkingId: string | null
   modeId: string | null
+  /** Live values per exposed provider feature, keyed by feature id. */
+  features: Record<string, unknown>
 }
 
 export interface LiveConfigState {
   /** Optimistically applied values holding until their daemon echo lands. */
   holds: Partial<Record<ConfigField, string>>
+  /** Same optimistic hold for On/Off feature toggles, keyed by feature id. */
+  featureHolds: Record<string, unknown>
   notice: ProviderNotice | null
 }
 
-export const initialLiveConfig: LiveConfigState = { holds: {}, notice: null }
+export const initialLiveConfig: LiveConfigState = { holds: {}, featureHolds: {}, notice: null }
 
 export type LiveConfigEvent =
   | { type: 'reset' }
   | { type: 'applied'; field: ConfigField; value: string }
   | { type: 'applyDone'; field: ConfigField; notice: ProviderNotice | null }
   | { type: 'applyFailed'; field: ConfigField; error: unknown }
+  | { type: 'featureApplied'; id: string; value: unknown }
+  | { type: 'featureFailed'; id: string; error: unknown }
   | { type: 'synced'; truth: DaemonTruth }
 
 function dropHold(holds: LiveConfigState['holds'], field: ConfigField): LiveConfigState['holds'] {
@@ -59,7 +66,7 @@ export function reduceLiveConfig(state: LiveConfigState, event: LiveConfigEvent)
     case 'reset':
       return initialLiveConfig
     case 'applied':
-      return { holds: { ...state.holds, [event.field]: event.value }, notice: null }
+      return { ...state, holds: { ...state.holds, [event.field]: event.value }, notice: null }
     case 'applyDone':
       return {
         ...state,
@@ -68,9 +75,17 @@ export function reduceLiveConfig(state: LiveConfigState, event: LiveConfigEvent)
       }
     case 'applyFailed':
       return {
+        ...state,
         holds: dropHold(state.holds, event.field),
         notice: { type: 'error', message: errorMessage(event.error) },
       }
+    case 'featureApplied':
+      return { ...state, featureHolds: { ...state.featureHolds, [event.id]: event.value }, notice: null }
+    case 'featureFailed': {
+      const featureHolds = { ...state.featureHolds }
+      delete featureHolds[event.id]
+      return { ...state, featureHolds, notice: { type: 'error', message: errorMessage(event.error) } }
+    }
     case 'synced': {
       const matches = (field: ConfigField, truthValue: string | null): boolean => {
         const held = state.holds[field]
@@ -80,7 +95,16 @@ export function reduceLiveConfig(state: LiveConfigState, event: LiveConfigEvent)
       if (matches('model', event.truth.modelValue)) holds = dropHold(holds, 'model')
       if (matches('thinking', event.truth.thinkingId)) holds = dropHold(holds, 'thinking')
       if (matches('mode', event.truth.modeId)) holds = dropHold(holds, 'mode')
-      return holds === state.holds ? state : { ...state, holds }
+      let featureHolds = state.featureHolds
+      for (const [id, held] of Object.entries(state.featureHolds)) {
+        if (event.truth.features[id] === held) {
+          if (featureHolds === state.featureHolds) featureHolds = { ...featureHolds }
+          delete featureHolds[id]
+        }
+      }
+      return holds === state.holds && featureHolds === state.featureHolds
+        ? state
+        : { ...state, holds, featureHolds }
     }
   }
 }
@@ -89,19 +113,25 @@ export function reduceLiveConfig(state: LiveConfigState, event: LiveConfigEvent)
 export function displayConfig(
   state: LiveConfigState,
   truth: DaemonTruth,
-): { modelValue: string; thinkingId: string | null; modeId: string | null } {
+): { modelValue: string; thinkingId: string | null; modeId: string | null; featureValues: Record<string, unknown> } {
   return {
     modelValue: state.holds.model ?? truth.modelValue ?? '',
     thinkingId: state.holds.thinking ?? truth.thinkingId ?? null,
     modeId: state.holds.mode ?? truth.modeId ?? null,
+    featureValues: { ...truth.features, ...state.featureHolds },
   }
 }
 
-export function liveTruth(entry: Pick<AgentEntry, 'provider' | 'model' | 'thinkingOptionId' | 'currentModeId'>): DaemonTruth {
+export function liveTruth(
+  entry: Pick<AgentEntry, 'provider' | 'model' | 'thinkingOptionId' | 'currentModeId' | 'features'>,
+): DaemonTruth {
+  const features: Record<string, unknown> = {}
+  for (const feature of entry.features ?? []) features[feature.id] = feature.value
   return {
     modelValue: entry.model ? `${entry.provider}/${entry.model}` : null,
     thinkingId: entry.thinkingOptionId ?? null,
     modeId: entry.currentModeId ?? null,
+    features,
   }
 }
 
@@ -150,11 +180,28 @@ export function useLiveAgentConfig(daemon: DaemonClient, agentId: string | null,
     [daemon, agentId],
   )
 
+  /** Flips one On/Off feature toggle with the same optimistic-hold lifecycle. */
+  const applyFeature = useCallback(
+    async (id: string, value: unknown) => {
+      if (!agentId) return
+      setState((prev) => reduceLiveConfig(prev, { type: 'featureApplied', id, value }))
+      try {
+        await daemon.setAgentFeature(agentId, id, value)
+      } catch (err) {
+        if (agentRef.current === agentId) {
+          setState((prev) => reduceLiveConfig(prev, { type: 'featureFailed', id, error: err }))
+        }
+      }
+    },
+    [daemon, agentId],
+  )
+
   return {
     ...state,
     config: displayConfig(state, truth),
     setModel: (value: string) => void apply('model', value),
     setThinking: (value: string) => void apply('thinking', value),
     setMode: (value: string) => void apply('mode', value),
+    setFeature: (id: string, value: unknown) => void applyFeature(id, value),
   }
 }

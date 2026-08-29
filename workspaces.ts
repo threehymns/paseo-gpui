@@ -1,0 +1,204 @@
+/**
+ * Workspace directory state.
+ *
+ * Workspace descriptors are first-class app state: one subscribed
+ * `workspaces.list({ subscribe })` call feeds a store that only the daemon's
+ * `workspace_update` stream writes. Everything here is pure; the hook glue
+ * lives in chat.tsx and the rendering in chrome.tsx.
+ */
+
+import {
+  sortAgents,
+  type AgentEntry,
+  type EmptyProjectDescriptor,
+  type WorkspaceDescriptor,
+  type WorkspaceUpdate,
+} from './paseo'
+
+// ---- store -----------------------------------------------------------------
+
+/**
+ * The whole workspace directory: live descriptors plus projects whose last
+ * workspace is gone but that still exist (rendered as empty groups).
+ */
+export interface WorkspaceStore {
+  workspaces: WorkspaceDescriptor[]
+  emptyProjects: EmptyProjectDescriptor[]
+}
+
+export const initialWorkspaceStore: WorkspaceStore = { workspaces: [], emptyProjects: [] }
+
+/** Epoch-ms activity of a descriptor; the epoch for descriptors without one. */
+export function workspaceActivityAt(descriptor: WorkspaceDescriptor): number {
+  const at = descriptor.activityAt ? Date.parse(descriptor.activityAt) : NaN
+  return Number.isFinite(at) ? at : 0
+}
+
+/**
+ * Directory order: pinned workspaces first (most recently pinned on top),
+ * then most recently active first.
+ */
+export function sortWorkspaces(descriptors: WorkspaceDescriptor[]): WorkspaceDescriptor[] {
+  return [...descriptors].sort((a, b) => {
+    const pinnedA = a.pinnedAt ? Date.parse(a.pinnedAt) : null
+    const pinnedB = b.pinnedAt ? Date.parse(b.pinnedAt) : null
+    if ((pinnedA != null) !== (pinnedB != null)) return pinnedA != null ? -1 : 1
+    if (pinnedA != null && pinnedB != null && pinnedA !== pinnedB) return pinnedB - pinnedA
+    return workspaceActivityAt(b) - workspaceActivityAt(a)
+  })
+}
+
+function withoutProject(projects: EmptyProjectDescriptor[], projectId: string): EmptyProjectDescriptor[] {
+  return projects.filter((project) => project.projectId !== projectId)
+}
+
+/**
+ * Folds one daemon update into the store. Upserts replace by id and pull the
+ * project out of the emptied list. Removes drop the workspace and carry the
+ * project aftermath: an `emptyProject` keeps the project rendered with no
+ * rows, a `removedProjectId` erases it outright.
+ */
+export function applyWorkspaceUpdate(store: WorkspaceStore, update: WorkspaceUpdate): WorkspaceStore {
+  if (update.kind === 'upsert') {
+    const rest = store.workspaces.filter((descriptor) => descriptor.id !== update.workspace.id)
+    return {
+      workspaces: sortWorkspaces([update.workspace, ...rest]),
+      emptyProjects: withoutProject(store.emptyProjects, update.workspace.projectId),
+    }
+  }
+  let workspaces = store.workspaces.filter((descriptor) => descriptor.id !== update.id)
+  let emptyProjects = store.emptyProjects
+  // A removed project takes any remaining descriptors of that project with it;
+  // their own remove events become no-ops.
+  if (update.removedProjectId) {
+    workspaces = workspaces.filter((descriptor) => descriptor.projectId !== update.removedProjectId)
+    emptyProjects = withoutProject(emptyProjects, update.removedProjectId)
+  }
+  if (update.emptyProject) {
+    emptyProjects = [
+      ...withoutProject(emptyProjects, update.emptyProject.projectId),
+      update.emptyProject,
+    ]
+  }
+  return { workspaces, emptyProjects }
+}
+
+// ---- view-model mapping ------------------------------------------------------
+
+/** The directory agents run in; falls back to the project root path. */
+export function workspaceDirectory(descriptor: WorkspaceDescriptor): string {
+  return descriptor.workspaceDirectory ?? descriptor.projectRootPath
+}
+
+/** True once the daemon has archived the workspace; archiving is one-way. */
+export function isArchivedWorkspace(descriptor: WorkspaceDescriptor): boolean {
+  return descriptor.archivingAt != null
+}
+
+/** Live workspaces only unless archived ones are revealed. */
+export function visibleWorkspaces(
+  descriptors: WorkspaceDescriptor[],
+  showArchived: boolean,
+): WorkspaceDescriptor[] {
+  return showArchived ? descriptors : descriptors.filter((descriptor) => !isArchivedWorkspace(descriptor))
+}
+
+export function projectName(project: {
+  projectDisplayName: string
+  projectCustomName?: string | null | undefined
+}): string {
+  const custom = project.projectCustomName?.trim()
+  return custom || project.projectDisplayName
+}
+
+/** Row label for a workspace: title override when set, else its name. */
+export function workspaceDisplayName(descriptor: WorkspaceDescriptor): string {
+  const title = descriptor.title?.trim()
+  if (title) return title
+  return descriptor.name
+}
+
+// ---- sidebar groups ----------------------------------------------------------
+
+/** One collapsible project group: zero or more workspace rows. */
+export interface WorkspaceProjectGroup {
+  projectId: string
+  name: string
+  rootPath: string
+  /** Most recently active first; empty for an emptied project. */
+  workspaces: WorkspaceDescriptor[]
+}
+
+function groupActivity(group: WorkspaceProjectGroup): number | null {
+  return group.workspaces.length > 0 ? workspaceActivityAt(group.workspaces[0]!) : null
+}
+
+/**
+ * Folds the store into collapsible project groups: each project with visible
+ * workspaces, ordered by its most recent activity, then emptied projects in
+ * name order so they still render. Rows inside a group stay recency-sorted.
+ */
+export function workspaceProjectGroups(store: WorkspaceStore, showArchived: boolean): WorkspaceProjectGroup[] {
+  const byProject = new Map<string, WorkspaceProjectGroup>()
+  for (const descriptor of visibleWorkspaces(store.workspaces, showArchived)) {
+    let group = byProject.get(descriptor.projectId)
+    if (!group) {
+      group = {
+        projectId: descriptor.projectId,
+        name: projectName(descriptor),
+        rootPath: descriptor.projectRootPath,
+        workspaces: [],
+      }
+      byProject.set(descriptor.projectId, group)
+    }
+    group.workspaces.push(descriptor)
+  }
+  const groups = [...byProject.values()].map((group) => ({ ...group, workspaces: sortWorkspaces(group.workspaces) }))
+  for (const project of store.emptyProjects) {
+    if (!byProject.has(project.projectId)) {
+      groups.push({
+        projectId: project.projectId,
+        name: projectName(project),
+        rootPath: project.projectRootPath,
+        workspaces: [],
+      })
+    }
+  }
+  groups.sort((a, b) => {
+    const activityA = groupActivity(a)
+    const activityB = groupActivity(b)
+    if (activityA != null && activityB != null) return activityB - activityA
+    if (activityA != null) return -1
+    if (activityB != null) return 1
+    return a.name.localeCompare(b.name)
+  })
+  return groups
+}
+
+// ---- opening a workspace -----------------------------------------------------
+
+/**
+ * Composer folder choices: every workspace's directory, plus emptied
+ * projects' roots, deduplicated.
+ */
+export function workspaceDirectoryChoices(store: WorkspaceStore): string[] {
+  const dirs = [
+    ...store.workspaces.map(workspaceDirectory),
+    ...store.emptyProjects.map((project) => project.projectRootPath),
+  ]
+  return [...new Set(dirs.filter(Boolean))]
+}
+
+/**
+ * The agents that belong to a workspace: matched by the agent's workspaceId,
+ * falling back to its working directory for agents predating workspaces.
+ */
+export function agentsOfWorkspace(agents: AgentEntry[], descriptor: WorkspaceDescriptor): AgentEntry[] {
+  const directory = workspaceDirectory(descriptor)
+  return agents.filter((agent) => agent.workspaceId === descriptor.id || agent.cwd === directory)
+}
+
+/** The timeline a workspace opens onto: its most recently active agent, if any. */
+export function mostRecentAgent(agents: AgentEntry[]): AgentEntry | null {
+  return sortAgents(agents)[0] ?? null
+}
