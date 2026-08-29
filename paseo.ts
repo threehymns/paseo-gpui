@@ -489,6 +489,22 @@ export function applyAgentUpdate(entries: AgentEntry[], update: PaseoAgentUpdate
   return sortAgents([update.agent, ...rest])
 }
 
+/**
+ * Folds a fetched directory page into the live mirror. Subscription updates
+ * keep the mirror fresh while a page is in flight, so a page fills gaps and
+ * refreshes stale rows but never regresses an entry the subscription already
+ * advanced — replaying an older snapshot must not resurrect state (such as
+ * attention) the daemon already ended.
+ */
+export function applyAgentPage(entries: AgentEntry[], page: AgentEntry[]): AgentEntry[] {
+  const byId = new Map(entries.map((candidate) => [candidate.id, candidate]))
+  for (const incoming of page) {
+    const current = byId.get(incoming.id)
+    if (!current || activityAt(incoming) > activityAt(current)) byId.set(incoming.id, incoming)
+  }
+  return sortAgents([...byId.values()])
+}
+
 export function basename(p: string): string {
   const parts = p.split('/')
   return parts[parts.length - 1] || p

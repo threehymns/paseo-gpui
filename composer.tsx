@@ -121,6 +121,8 @@ export function Composer({
   value,
   onChange,
   onSend,
+  onFocus,
+  onBlur,
   disabledReason,
   chips,
   attachments = [],
@@ -132,6 +134,9 @@ export function Composer({
   value: string
   onChange: (next: string) => void
   onSend: (text: string) => void
+  /** Composer engagement moments — attention clears on all of them. */
+  onFocus?: () => void
+  onBlur?: () => void
   disabledReason: string | null
   chips: React.ReactNode
   /** Staged image chips shown above the input. */
@@ -220,6 +225,8 @@ export function Composer({
           }}
           onChange={(event) => onChange(event.value ?? '')}
           onSubmit={(event) => send(event.value ?? value)}
+          onFocus={onFocus}
+          onBlur={onBlur}
         />
         {attachNotice && (
           <text

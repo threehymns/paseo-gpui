@@ -17,6 +17,7 @@ import type { PaseoAgentConfig, PaseoClient } from '@getpaseo/client'
 import type { DaemonClient } from '@getpaseo/client/internal/daemon-client'
 import {
   DAEMON_URL,
+  applyAgentPage,
   applyAgentUpdate,
   basename,
   createDaemonClient,
@@ -24,7 +25,6 @@ import {
   errorMessage,
   findModel,
   isArchived,
-  sortAgents,
   type AgentEntry,
   type ConnStatus,
   type ProviderEntry,
@@ -46,6 +46,7 @@ import { ModelPicker, OptionPicker, modeOptions, thinkingOptions } from './picke
 import { Composer, ConfigNotice, FooterBar } from './composer'
 import { useAgentConversation } from './conversation'
 import { useAgentPermissions } from './permissions'
+import { useAttention, type NotificationBridge } from './attention'
 import { useDraftConfig } from './draft-config'
 import { liveTruth, useLiveAgentConfig, type DaemonTruth, type ProviderNotice } from './live-config'
 
@@ -87,7 +88,10 @@ function useDaemon(): DaemonView {
       const filter = { includeArchived: true }
       await client.agents.list({ scope: 'active', filter, sort, subscribe: {} })
       const page = await client.agents.list({ scope: 'active', filter, sort })
-      if (!disposed) setAgents(sortAgents(page.entries.map((entry) => entry.agent)))
+      // Merge, never replace: subscription updates may have advanced entries
+      // while the page was in flight, and a wholesale swap would replay their
+      // older snapshots over fresher truth.
+      if (!disposed) setAgents((prev) => applyAgentPage(prev, page.entries.map((entry) => entry.agent)))
 
       const snapshot =
         (await client.providers.waitForReady({ timeoutMs: 30_000 }).catch(() => null)) ??
@@ -171,6 +175,11 @@ export function ChatApp() {
   })
   const turns = conversation.turns
   const permissions = useAgentPermissions(client, daemon, activeId)
+  // No OS notifier exists in @gpuix yet, so delivery silently no-ops; the
+  // payloads are ready for a runtime bridge — clicking one deep-links by
+  // re-selecting notice.payload.agentId.
+  const attentionBridge: NotificationBridge | null = null
+  const attention = useAttention({ agents, activeId, serverId: daemonHost(), bridge: attentionBridge })
   const activeEntry = agents.find((entry) => entry.id === activeId) ?? null
 
   // An agent that vanished from the directory (deleted) or was archived can no
@@ -265,6 +274,8 @@ export function ChatApp() {
   const send = async (raw: string) => {
     const text = raw.trim()
     if (!text || status !== 'connected') return
+    // Sending means the user is here: any attention on this agent can rest.
+    attention.engageComposer(activeId)
     const stagedImages = draftImages
     const outgoing = toSendImages(stagedImages)
     // Chips clear immediately; a failed send restores them next to the text.
@@ -498,6 +509,8 @@ export function ChatApp() {
             if (createError) setCreateError(null)
           }}
           onSend={send}
+          onFocus={() => attention.engageComposer(activeId)}
+          onBlur={() => attention.engageComposer(activeId)}
           disabledReason={disabledReason}
           chips={draftChips}
           attachments={draftImages}
