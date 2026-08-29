@@ -5,6 +5,10 @@
  * plus an error note when the source does not parse.
  */
 
+import { createHash } from 'node:crypto'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import React, { useMemo, useRef, useState } from 'react'
 import {
   fitView,
@@ -62,14 +66,21 @@ function MermaidOrFallback({ source }: { source: string }) {
 
 const TOOLBAR_HEIGHT = 34
 
+const MERMAID_ROOT = path.join(tmpdir(), 'gpuix-chat-assets')
+
+function mermaidAsset(svg: string): string {
+  const hash = createHash('sha1').update(svg).digest('hex').slice(0, 12)
+  const dest = path.join(MERMAID_ROOT, `mermaid-${hash}.svg`)
+  mkdirSync(MERMAID_ROOT, { recursive: true })
+  writeFileSync(dest, svg)
+  return dest
+}
+
 function DiagramViewer({ svg, width, height }: { svg: string; width: number; height: number }) {
   const [view, setView] = useState<ViewState>(() => fitView(width, height))
   const dragOrigin = useRef<{ x: number; y: number } | null>(null)
 
-  const src = useMemo(
-    () => `data:image/svg+xml;base64,${Buffer.from(svg, 'utf8').toString('base64')}`,
-    [svg],
-  )
+  const src = useMemo(() => mermaidAsset(svg), [svg])
 
   return (
     <div
