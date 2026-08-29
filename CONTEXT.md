@@ -86,6 +86,14 @@ permission < error < finished — supersedes an outstanding notice. Delivery
 goes through a runtime notification bridge and silently no-ops where none
 exists; clicking one deep-links by selecting its agent.
 
+**Context meter**:
+The ring right of the composer's input row showing how much of the selected
+model's context window the conversation uses. Fed by the daemon's usage
+reporting — live stream events first, the agent directory snapshot until one
+lands — and hidden entirely when no usable usage exists. Its fraction,
+threshold tone, and hover lines come from one pure projection.
+_Avoid_: token counter, usage widget
+
 **Workspace**:
 A directory an agent can run in, listed by the daemon. A **worktree** is a git
 worktree variant of one.
