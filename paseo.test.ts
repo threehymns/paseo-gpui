@@ -3,6 +3,7 @@ import {
   applyTimelineItem,
   buildTurns,
   applyAgentUpdate,
+  applyAgentPage,
   sortAgents,
   displayName,
   relativeTime,
@@ -192,7 +193,7 @@ describe('timeline mapping', () => {
     expect(second.endedAt).toBeUndefined()
   })
 
-  test('folding history seals the trailing turn at the last arrival, so reloads never fake a live clock', () => {
+  test('folding history leaves a trailing assistant turn unsealed, so a live delta can keep merging', () => {
     const turns = buildTurns([
       timed({ type: 'user_message', text: 'go' }, 1_000),
       timed({ type: 'assistant_message', text: 'On it.' }, 2_000),
@@ -201,7 +202,22 @@ describe('timeline mapping', () => {
     const said = turns[1] as { kind: string; source: string; startedAt?: number; endedAt?: number }
     expect(said.source).toBe('On it. Done.')
     expect(said.startedAt).toBe(2_000)
-    expect(said.endedAt).toBe(8_000)
+    // A reload is mid-stream and cannot know the agent finished: the tail stays
+    // open so the next live delta of the same message merges in, not splits.
+    expect(said.endedAt).toBeUndefined()
+  })
+
+  test('a live delta after a reload merges into the loaded turn instead of splitting', () => {
+    const loaded = buildTurns([
+      timed({ type: 'assistant_message', text: 'On it.', messageId: 'm1' }, 2_000),
+      timed({ type: 'assistant_message', text: ' still', messageId: 'm1' }, 7_000),
+    ])
+    const live = applyTimelineItem(loaded, { type: 'assistant_message', text: ' working.', messageId: 'm1' }, 9_000)
+    expect(live).toHaveLength(1)
+    const said = live[0] as { source: string; startedAt?: number; endedAt?: number }
+    expect(said.source).toBe('On it. still working.')
+    expect(said.startedAt).toBe(2_000)
+    expect(said.endedAt).toBeUndefined()
   })
 
   test('sealing a finished or absent assistant tail changes nothing', () => {
@@ -553,6 +569,59 @@ describe('agent directory', () => {
     expect(upserted[0]!.id).toBe('c')
     const removed = applyAgentUpdate(upserted, { kind: 'remove', agentId: 'c' })
     expect(removed).toHaveLength(2)
+  })
+
+  describe('applyAgentPage', () => {
+    // A raise snapshot as a fetched page would carry it, and the same agent
+    // after the subscription delivered the daemon's truth-clear.
+    const raising = entry({
+      id: 'a1',
+      requiresAttention: true,
+      attentionReason: 'error',
+      updatedAt: '2026-08-24T11:00:00Z',
+    })
+    const cleared = entry({
+      id: 'a1',
+      requiresAttention: false,
+      attentionReason: null,
+      attentionTimestamp: null,
+      updatedAt: '2026-08-24T12:00:00Z',
+    })
+
+    test('an empty mirror takes the whole page', () => {
+      const page = [raising, entry({ id: 'b2' })]
+      expect(applyAgentPage([], page).map((e) => e.id)).toEqual(['a1', 'b2'])
+    })
+
+    test('a stale page snapshot never regresses an entry the subscription advanced', () => {
+      // Replaying the pre-clear raising snapshot must not resurrect attention
+      // the daemon already ended — that re-fires an OS notice.
+      const merged = applyAgentPage([cleared], [raising])
+      expect(merged).toHaveLength(1)
+      expect(merged[0]!.requiresAttention).toBe(false)
+      expect(merged[0]!.updatedAt).toBe('2026-08-24T12:00:00Z')
+    })
+
+    test('a newer page entry replaces an older mirror entry', () => {
+      const raisedAgain = entry({
+        id: 'a1',
+        requiresAttention: true,
+        attentionReason: 'finished',
+        updatedAt: '2026-08-24T12:00:00Z',
+      })
+      const merged = applyAgentPage([raising], [raisedAgain])
+      expect(merged).toHaveLength(1)
+      expect(merged[0]!.attentionReason).toBe('finished')
+      expect(merged[0]!.updatedAt).toBe('2026-08-24T12:00:00Z')
+    })
+
+    test('agents only the page knows are added to the mirror', () => {
+      const merged = applyAgentPage(
+        [entry({ id: 'old' })],
+        [entry({ id: 'fresh', updatedAt: '2026-08-24T13:00:00Z' })],
+      )
+      expect(merged.map((e) => e.id)).toEqual(['fresh', 'old'])
+    })
   })
 
   test('relativeTime produces known shapes', () => {

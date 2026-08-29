@@ -17,6 +17,7 @@ import {
   buildTurns,
   errorMessage,
   sealTrailingTurns,
+  type AgentUsage,
   type TimelineEntry,
   type TimelineItem,
   type Turn,
@@ -36,6 +37,8 @@ export interface ConversationState {
   turns: Turn[]
   /** Optimistic sends awaiting their daemon echo, oldest first. */
   pending: PendingSend[]
+  /** Latest session usage the daemon reported, if any; null until then. */
+  usage: AgentUsage | null
   status: ConversationStatus
   error: string | null
 }
@@ -45,7 +48,7 @@ export type ConversationEvent =
   | { type: 'loaded'; items: TimelineEntry[] }
   | { type: 'loadFailed'; error: unknown }
   | { type: 'timeline'; item: TimelineItem; at?: number }
-  | { type: 'turnCompleted'; at?: number }
+  | { type: 'turnCompleted'; at?: number; usage?: AgentUsage }
   | { type: 'turnFailed'; message: string }
   | { type: 'sendQueued'; text: string; images?: ImageAttachment[] }
   | { type: 'sendFailed'; error: unknown }
@@ -54,6 +57,7 @@ export type ConversationEvent =
 export const initialConversation: ConversationState = {
   turns: [],
   pending: [],
+  usage: null,
   status: 'loading',
   error: null,
 }
@@ -95,7 +99,11 @@ export function reduceConversation(state: ConversationState, event: Conversation
     case 'turnCompleted':
       // Ends any still-open trailing thinking block or assistant turn with
       // nothing after it.
-      return { ...state, turns: sealTrailingTurns(state.turns, event.at ?? Date.now()) }
+      return {
+        ...state,
+        turns: sealTrailingTurns(state.turns, event.at ?? Date.now()),
+        usage: event.usage ?? state.usage,
+      }
     case 'turnFailed':
       return { ...state, turns: applyTimelineItem(state.turns, { type: 'error', message: event.message }) }
     case 'sendQueued':
@@ -171,7 +179,9 @@ export function useAgentConversation(
           if (event.type === 'timeline') {
             setState((prev) => reduceConversation(prev, { type: 'timeline', item: event.item, at: eventTime(timestamp) }))
           } else if (event.type === 'turn_completed') {
-            setState((prev) => reduceConversation(prev, { type: 'turnCompleted', at: eventTime(timestamp) }))
+            setState((prev) =>
+              reduceConversation(prev, { type: 'turnCompleted', at: eventTime(timestamp), usage: event.usage }),
+            )
           } else if (event.type === 'turn_failed') {
             setState((prev) => reduceConversation(prev, { type: 'turnFailed', message: event.error }))
           }
