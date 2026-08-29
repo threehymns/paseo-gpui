@@ -726,12 +726,17 @@ export const STATUS_BUCKET_LABELS: Record<StatusBucket, string> = {
   done: 'Done',
 }
 
+/** True while the agent holds an active turn (or is still spinning one up). */
+export function isAgentRunning(entry: AgentEntry): boolean {
+  return entry.status === 'running' || entry.status === 'initializing'
+}
+
 /** Maps an agent's snapshot to its directory bucket. Attention outranks status. */
 export function statusBucket(entry: AgentEntry): StatusBucket {
   if (entry.requiresAttention && entry.attentionReason === 'permission') return 'needs_input'
   if (entry.status === 'error') return 'failed'
   if (entry.requiresAttention && entry.attentionReason === 'finished') return 'review'
-  if (entry.status === 'running' || entry.status === 'initializing') return 'working'
+  if (isAgentRunning(entry)) return 'working'
   return 'done'
 }
 
