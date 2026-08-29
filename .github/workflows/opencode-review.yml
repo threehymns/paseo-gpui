@@ -53,7 +53,7 @@ jobs:
           # limited to this job's permissions block above.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          model: kilo/stealth/ox-alpha
+          model: kilo/minimax/minimax-m3:free
           prompt: |
             Review this pull request for bugs and spec fidelity. Do not modify any files; your final response is posted automatically as a PR comment.
 
