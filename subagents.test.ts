@@ -320,36 +320,36 @@ describe('timeline paging', () => {
   test('live pushes stream in order and stale sequence numbers drop', () => {
     let state = reduceSubagents(initialSubagents, {
       type: 'timelinePush',
-      push: { kind: 'timeline', parentAgentId: 'parent', subagentId: 'sub-1', provider: 'c', item: assistant('one'), timestamp: 't', seq: 1, epoch: 'e' },
+      push: { kind: 'timeline', parentAgentId: 'parent', subagentId: 'sub-1', provider: 'c', item: assistant('one'), timestamp: '2026-08-24T10:00:00Z', seq: 1, epoch: 'e' },
     })
     state = reduceSubagents(state, {
       type: 'timelinePush',
-      push: { kind: 'timeline', parentAgentId: 'parent', subagentId: 'sub-1', provider: 'c', item: assistant('two'), timestamp: 't', seq: 2, epoch: 'e' },
+      push: { kind: 'timeline', parentAgentId: 'parent', subagentId: 'sub-1', provider: 'c', item: assistant('two'), timestamp: '2026-08-24T10:00:01Z', seq: 2, epoch: 'e' },
     })
     state = reduceSubagents(state, {
       type: 'timelinePush',
-      push: { kind: 'timeline', parentAgentId: 'parent', subagentId: 'sub-1', provider: 'c', item: assistant('stale replay'), timestamp: 't', seq: 2, epoch: 'e' },
+      push: { kind: 'timeline', parentAgentId: 'parent', subagentId: 'sub-1', provider: 'c', item: assistant('stale replay'), timestamp: '2026-08-24T10:00:01Z', seq: 2, epoch: 'e' },
     })
     // Consecutive deltas merge (existing folding), and the stale replay at seq 2
-    // contributes nothing extra.
+    // contributes nothing extra. The turn's span starts at its first delta.
     expect(subagentTurns(state, 'parent', 'sub-1')).toEqual([
-      { kind: 'assistant', source: 'onetwo', messageId: undefined },
+      { kind: 'assistant', source: 'onetwo', messageId: undefined, startedAt: 1_787_565_600_000 },
     ])
   })
 
   test('pushes from a different epoch are dropped until a fresh page arrives', () => {
     let state = reduceSubagents(initialSubagents, {
       type: 'timelinePush',
-      push: { kind: 'timeline', parentAgentId: 'parent', subagentId: 'sub-1', provider: 'c', item: assistant('v1'), timestamp: 't', seq: 3, epoch: 'epoch-1' },
+      push: { kind: 'timeline', parentAgentId: 'parent', subagentId: 'sub-1', provider: 'c', item: assistant('v1'), timestamp: '2026-08-24T10:00:00Z', seq: 3, epoch: 'epoch-1' },
     })
     state = reduceSubagents(state, {
       type: 'timelinePush',
-      push: { kind: 'timeline', parentAgentId: 'parent', subagentId: 'sub-1', provider: 'c', item: assistant('v2-gen'), timestamp: 't', seq: 4, epoch: 'epoch-2' },
+      push: { kind: 'timeline', parentAgentId: 'parent', subagentId: 'sub-1', provider: 'c', item: assistant('v2-gen'), timestamp: '2026-08-24T10:00:05Z', seq: 4, epoch: 'epoch-2' },
     })
-    expect(subagentTurns(state, 'parent', 'sub-1')).toEqual([{ kind: 'assistant', source: 'v1', messageId: undefined }])
+    expect(subagentTurns(state, 'parent', 'sub-1')).toEqual([{ kind: 'assistant', source: 'v1', messageId: undefined, startedAt: 1_787_565_600_000 }])
     // A page from the new epoch re-syncs.
     state = reduceSubagents(state, { type: 'timelinePage', page: page({ epoch: 'epoch-2', rows: [{ seq: 4, item: assistant('v2-page') }], maxSeq: 4 }) })
-    expect(subagentTurns(state, 'parent', 'sub-1')).toEqual([{ kind: 'assistant', source: 'v2-page', messageId: undefined }])
+    expect(subagentTurns(state, 'parent', 'sub-1')).toEqual([{ kind: 'assistant', source: 'v2-page', messageId: undefined, startedAt: 1_787_565_600_000 }])
     expect(subagentHasOlder(state, 'parent', 'sub-1')).toBe(false)
   })
 })
@@ -378,7 +378,7 @@ describe('timeline timestamps', () => {
     const thinking = turns[0] as { kind: string; durationMs?: number }
     expect(thinking.kind).toBe('reasoning')
     expect(thinking.durationMs).toBe(3_000)
-    expect(turns[1]).toEqual({ kind: 'assistant', source: 'done', messageId: undefined })
+    expect(turns[1]).toEqual({ kind: 'assistant', source: 'done', messageId: undefined, startedAt: 1_787_565_605_000 })
   })
 
   test('a timeline push carries its timestamp into the fold', () => {
@@ -434,7 +434,7 @@ describe('terminal turns', () => {
     })
     const turns = subagentTurns(state, 'parent', 'sub-1')
     expect(turns).toHaveLength(2)
-    expect(turns[0]).toEqual({ kind: 'assistant', source: 'partial work', messageId: undefined })
+    expect(turns[0]).toEqual({ kind: 'assistant', source: 'partial work', messageId: undefined, startedAt: 1_787_565_600_000 })
     expect(turns[1]).toEqual({ kind: 'error', text: 'Subagent failed' })
   })
 
