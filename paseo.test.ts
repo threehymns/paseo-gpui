@@ -193,7 +193,7 @@ describe('timeline mapping', () => {
     expect(second.endedAt).toBeUndefined()
   })
 
-  test('folding history seals the trailing turn at the last arrival, so reloads never fake a live clock', () => {
+  test('folding history leaves a trailing assistant turn unsealed, so a live delta can keep merging', () => {
     const turns = buildTurns([
       timed({ type: 'user_message', text: 'go' }, 1_000),
       timed({ type: 'assistant_message', text: 'On it.' }, 2_000),
@@ -202,7 +202,22 @@ describe('timeline mapping', () => {
     const said = turns[1] as { kind: string; source: string; startedAt?: number; endedAt?: number }
     expect(said.source).toBe('On it. Done.')
     expect(said.startedAt).toBe(2_000)
-    expect(said.endedAt).toBe(8_000)
+    // A reload is mid-stream and cannot know the agent finished: the tail stays
+    // open so the next live delta of the same message merges in, not splits.
+    expect(said.endedAt).toBeUndefined()
+  })
+
+  test('a live delta after a reload merges into the loaded turn instead of splitting', () => {
+    const loaded = buildTurns([
+      timed({ type: 'assistant_message', text: 'On it.', messageId: 'm1' }, 2_000),
+      timed({ type: 'assistant_message', text: ' still', messageId: 'm1' }, 7_000),
+    ])
+    const live = applyTimelineItem(loaded, { type: 'assistant_message', text: ' working.', messageId: 'm1' }, 9_000)
+    expect(live).toHaveLength(1)
+    const said = live[0] as { source: string; startedAt?: number; endedAt?: number }
+    expect(said.source).toBe('On it. still working.')
+    expect(said.startedAt).toBe(2_000)
+    expect(said.endedAt).toBeUndefined()
   })
 
   test('sealing a finished or absent assistant tail changes nothing', () => {

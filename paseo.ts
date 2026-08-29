@@ -466,11 +466,12 @@ export interface TimelineEntry {
 }
 
 export function buildTurns(entries: TimelineEntry[]): Turn[] {
-  const folded = entries.reduce((turns, entry) => applyTimelineItem(turns, entry.item, entry.at), [] as Turn[])
-  // A fetched timeline has no completion markers: the tail finished whenever
-  // the last entry arrived. Sealing there keeps reloads from faking a live clock.
-  const lastAt = entries[entries.length - 1]?.at
-  return lastAt == null ? folded : sealTrailingTurns(folded, lastAt)
+  // No speculative seal here: a fetched timeline carries no completion marker,
+  // so the last entry's arrival cannot prove the turn finished. Sealing a
+  // still-streaming assistant turn would freeze its footer and split the next
+  // live delta of the same message into a second turn. Completion is sealed by
+  // the daemon's turn_completed event, not guessed from snapshot timing.
+  return entries.reduce((turns, entry) => applyTimelineItem(turns, entry.item, entry.at), [] as Turn[])
 }
 
 // ---- permission cards -------------------------------------------------------
