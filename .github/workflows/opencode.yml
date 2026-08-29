@@ -15,8 +15,13 @@ jobs:
         contains(github.event.comment.body, ' /opencode') ||
         startsWith(github.event.comment.body, '/opencode')
       ) &&
+      !endsWith(github.event.comment.user.login, '[bot]') &&
       contains(fromJson('["OWNER","MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
     runs-on: ubuntu-latest
+    timeout-minutes: 120
+    concurrency:
+      group: opencode-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: true
     permissions:
       id-token: write
       contents: write
@@ -33,5 +38,9 @@ jobs:
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           KILO_API_KEY: ${{ secrets.KILO_API_KEY }}
+          # Exposed only so the agent can use the gh CLI. The action ignores it
+          # unless use_github_token is true; scope is limited to the permissions
+          # block above.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          model: kilo/stealth/ox-alpha
+          model: kilo/minimax/minimax-m3:free

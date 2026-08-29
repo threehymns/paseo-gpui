@@ -16,7 +16,10 @@ import {
   type PaseoAgentStream,
   type PaseoAgentUpdate,
   type PaseoClient,
+  type PaseoProviderFeaturesResult,
   type PaseoProviderSnapshotResult,
+  type PaseoWorkspace,
+  type PaseoWorkspaceUpdate,
 } from '@getpaseo/client'
 import { DaemonClient } from '@getpaseo/client/internal/daemon-client'
 
@@ -64,11 +67,24 @@ export type AgentEntry = AgentDirectoryEntry['agent']
 export type ProviderEntry = PaseoProviderSnapshotResult['entries'][number]
 export type ProviderModel = NonNullable<ProviderEntry['models']>[number]
 export type ProviderMode = NonNullable<ProviderEntry['modes']>[number]
+export type WorkspaceDescriptor = PaseoWorkspace
+export type WorkspaceUpdate = PaseoWorkspaceUpdate
+export type EmptyProjectDescriptor = NonNullable<
+  Extract<WorkspaceUpdate, { kind: 'remove' }>['emptyProject']
+>
+
+/** One provider feature as the daemon describes it: an On/Off toggle or a select. */
+export type ProviderFeature = NonNullable<PaseoProviderFeaturesResult['features']>[number]
+export type ProviderFeatureToggle = Extract<ProviderFeature, { type: 'toggle' }>
+/** Same shape riding on agent snapshots, where it doubles as live truth. */
+export type AgentFeature = NonNullable<AgentEntry['features']>[number]
 
 type StreamEvent = PaseoAgentStream['event']
 export type TimelineItem = Extract<StreamEvent, { type: 'timeline' }>['item']
 type ToolCallItem = Extract<TimelineItem, { type: 'tool_call' }>
-type ToolDetail = ToolCallItem['detail']
+export type ToolCallDetail = ToolCallItem['detail']
+/** Token/cost accounting the daemon streams for one agent's session. */
+export type AgentUsage = NonNullable<AgentEntry['lastUsage']>
 
 // ---- permissions ------------------------------------------------------------
 
@@ -93,12 +109,58 @@ export type ToolName =
   | 'plan'
   | 'generic'
 
-export type ToolStatus = 'running' | 'ok' | 'failed'
+export type ToolStatus = 'running' | 'ok' | 'failed' | 'canceled'
+
+export type ReasoningTurn = {
+  kind: 'reasoning'
+  text: string
+  /** Epoch ms of the first delta; present only while the block is still open. */
+  startedAt?: number
+  /** Epoch ms of the most recent delta; present only while the block is still open. */
+  lastDeltaAt?: number
+  /** Frozen wall-clock length once thinking has ended; undefined while streaming. */
+  durationMs?: number
+}
+
+/** What a compaction divider shows, mirroring the daemon's compaction item. */
+export type CompactionTurn = {
+  kind: 'compaction'
+  status: 'loading' | 'completed'
+  trigger?: 'auto' | 'manual'
+  preTokens?: number
+}
+
+/** Usage for one finished turn, shown as a lightweight footer line. */
+export interface TurnUsage {
+  totalTokens: number
+  costUsd?: number
+}
+
+/**
+ * Usage as the daemon reports it on `usage_updated` / `turn_completed`.
+ * Token fields are additive (provider accounting varies; we sum what is given).
+ */
+export interface AgentUsage {
+  inputTokens?: number
+  cachedInputTokens?: number
+  outputTokens?: number
+  totalCostUsd?: number
+}
 
 export type Turn =
-  | { kind: 'user'; text: string }
-  | { kind: 'assistant'; source: string; messageId?: string }
-  | { kind: 'reasoning'; text: string }
+  | { kind: 'user'; text: string; queued?: boolean; queuedId?: string }
+  | {
+      kind: 'assistant'
+      source: string
+      messageId?: string
+      usage?: TurnUsage
+      /** Epoch ms of the first delta; present once any text has streamed in. */
+      startedAt?: number
+      /** Epoch ms proving the turn finished; absent while still working. */
+      endedAt?: number
+    }
+  | ReasoningTurn
+  | CompactionTurn
   | { kind: 'todo'; items: { text: string; completed: boolean; active: boolean }[] }
   | {
       kind: 'tool'
@@ -106,20 +168,67 @@ export type Turn =
       tool: ToolName
       title: string
       detail?: string
+      /** Structured detail from the daemon, expanded in place on activation. */
+      structured?: ToolCallDetail
       patch?: string
       status: ToolStatus
     }
   | { kind: 'error'; text: string }
+  | { kind: 'canceled'; reason?: string }
+
+function splitLines(text: string): string[] {
+  if (!text) return []
+  const normalized = text.endsWith('\r\n') ? text.slice(0, -2) : text.endsWith('\n') ? text.slice(0, -1) : text
+  return normalized === '' ? [''] : normalized.split(/\r?\n/)
+}
+
+/** Synthesizes a unified git patch for an edit replacement when the daemon omitted unifiedDiff. */
+export function formatEditDiff(filePath: string, oldString: string, newString: string): string {
+  const oldLines = splitLines(oldString)
+  const newLines = splitLines(newString)
+  const oldRange = oldLines.length === 0 ? '0,0' : `1,${oldLines.length}`
+  const newRange = newLines.length === 0 ? '0,0' : `1,${newLines.length}`
+  const header = `--- a/${filePath}\n+++ b/${filePath}\n@@ -${oldRange} +${newRange} @@`
+  const deleted = oldLines.map((l) => `-${l}`)
+  const added = newLines.map((l) => `+${l}`)
+  return [header, ...deleted, ...added].join('\n')
+}
+
+export interface DiffStats {
+  additions: number
+  deletions: number
+}
+
+/** Counts additions and deletions across all hunks in a unified git patch. */
+export function diffStats(patch: string | undefined): DiffStats | undefined {
+  if (!patch) return undefined
+  let additions = 0
+  let deletions = 0
+  for (const line of patch.split('\n')) {
+    if (line.startsWith('+') && !line.startsWith('+++')) {
+      additions++
+    } else if (line.startsWith('-') && !line.startsWith('---')) {
+      deletions++
+    }
+  }
+  return additions === 0 && deletions === 0 ? undefined : { additions, deletions }
+}
 
 function toolMeta(item: ToolCallItem): Pick<Turn & { kind: 'tool' }, 'tool' | 'title' | 'detail' | 'patch'> {
-  const d: ToolDetail | undefined = item.detail
+  const d: ToolCallDetail | undefined = item.detail
   switch (d?.type) {
     case 'shell':
       return { tool: 'bash', title: 'Bash', detail: d.command }
     case 'read':
       return { tool: 'read', title: 'Read', detail: d.filePath }
-    case 'edit':
-      return { tool: 'edit', title: 'Edit', detail: d.filePath, patch: d.unifiedDiff }
+    case 'edit': {
+      const patch =
+        d.unifiedDiff ??
+        (d.oldString != null || d.newString != null
+          ? formatEditDiff(d.filePath, d.oldString ?? '', d.newString ?? '')
+          : undefined)
+      return { tool: 'edit', title: 'Edit', detail: d.filePath, patch }
+    }
     case 'write':
       return { tool: 'write', title: 'Write', detail: d.filePath }
     case 'search':
@@ -147,36 +256,311 @@ function appendTurn(turns: Turn[], turn: Turn): Turn[] {
   return [...turns, turn]
 }
 
-/** Folds one timeline item into the transcript. Streaming deltas merge into the previous turn of their kind. */
-export function applyTimelineItem(turns: Turn[], item: TimelineItem): Turn[] {
+/**
+ * Freezes the wall-clock length of a still-streaming trailing reasoning block.
+ * A reasoning block is open until any later timeline item (or turn end) proves
+ * thinking has stopped; only the trailing block can be open. The length runs
+ * from the first to the last delta — a quiet gap before the next item does not
+ * count as thinking.
+ */
+export function sealTrailingReasoning(turns: Turn[], at: number): Turn[] {
+  const last = turns[turns.length - 1]
+  if (last?.kind !== 'reasoning' || last.durationMs != null) return turns
+  const startedAt = last.startedAt ?? at
+  const endedAt = last.lastDeltaAt ?? at
+  const sealed: ReasoningTurn = { kind: 'reasoning', text: last.text, durationMs: Math.max(0, endedAt - startedAt) }
+  return [...turns.slice(0, -1), sealed]
+}
+
+/**
+ * Freezes a still-working trailing assistant turn the same way: any later
+ * timeline item proves the turn finished, so its end is stamped at that item's
+ * arrival — not at whenever sealing happens to run.
+ */
+export function sealTrailingAssistant(turns: Turn[], at: number): Turn[] {
+  const last = turns[turns.length - 1]
+  if (last?.kind !== 'assistant' || last.endedAt != null || last.startedAt == null) return turns
+  return [...turns.slice(0, -1), { ...last, endedAt: at }]
+}
+
+/** Both trailing-tail seals; the tail is reasoning or assistant, never both. */
+export function sealTrailingTurns(turns: Turn[], at: number): Turn[] {
+  return sealTrailingAssistant(sealTrailingReasoning(turns, at), at)
+}
+
+/** Human-readable wall-clock length, e.g. "47s", "1m 30s", "2h 5m". */
+export function formatDuration(durationMs: number): string {
+  if (!Number.isFinite(durationMs) || durationMs < 0) return '0s'
+  const totalSeconds = durationMs / 1000
+  if (totalSeconds < 60) return `${Math.floor(totalSeconds)}s`
+  const totalMinutes = Math.floor(totalSeconds / 60)
+  if (totalMinutes < 60) {
+    const seconds = Math.floor(totalSeconds) % 60
+    return seconds === 0 ? `${totalMinutes}m` : `${totalMinutes}m ${seconds}s`
+  }
+  const hours = Math.floor(totalMinutes / 60)
+  const remMinutes = totalMinutes % 60
+  return remMinutes === 0 ? `${hours}h` : `${hours}h ${remMinutes}m`
+}
+
+/** Collapsed-row label for a reasoning block: live progress until sealed, then its frozen duration. */
+export function reasoningLabel(turn: ReasoningTurn): string {
+  return turn.durationMs == null ? 'Thinking…' : `Thought for ${formatDuration(turn.durationMs)}`
+}
+
+/**
+ * Divider label for a compaction turn, mirroring Paseo's own marker
+ * (message-compaction-label.ts): loading beats everything, then trigger,
+ * then the pre-compaction token count.
+ */
+export function compactionLabel(turn: CompactionTurn): string {
+  if (turn.status === 'loading') return 'Compacting...'
+  if (turn.trigger === 'auto') return 'Context automatically compacted'
+  if (turn.trigger === 'manual') return 'Context manually compacted'
+  if (turn.preTokens) return `Context compacted (${Math.round(turn.preTokens / 1000)}K tokens)`
+  return 'Context compacted'
+}
+
+/** Folds raw daemon usage into a footer summary; undefined when there is nothing to show. */
+export function summarizeUsage(usage: AgentUsage): TurnUsage | undefined {
+  const totalTokens = (usage.inputTokens ?? 0) + (usage.cachedInputTokens ?? 0) + (usage.outputTokens ?? 0)
+  if (totalTokens <= 0 && usage.totalCostUsd == null) return undefined
+  return { totalTokens, ...(usage.totalCostUsd != null ? { costUsd: usage.totalCostUsd } : {}) }
+}
+
+/**
+ * Attaches a finished-turn usage summary to the transcript's most recent
+ * assistant turn. Usage describes the model's whole turn including its tool
+ * loops, so later non-assistant rows do not redirect it; without an assistant
+ * turn there is nothing to attach to.
+ */
+export function attachTurnUsage(turns: Turn[], usage: AgentUsage): Turn[] {
+  const summary = summarizeUsage(usage)
+  if (!summary) return turns
+  const index = findLastIndex(turns, (t) => t.kind === 'assistant')
+  if (index < 0) return turns
+  const last = turns[index] as Turn & { kind: 'assistant' }
+  return [...turns.slice(0, index), { ...last, usage: summary }, ...turns.slice(index + 1)]
+}
+
+/** Compact token count in Paseo's own meter style, e.g. "900", "12k", "3m". */
+function formatTokenCount(tokens: number): string {
+  if (tokens >= 1_000_000) return `${Math.round(tokens / 1_000_000)}m`
+  if (tokens >= 1000) return `${Math.round(tokens / 1000)}k`
+  return `${Math.round(tokens)}`
+}
+
+/** Footer line for a finished turn's usage, e.g. "12k tokens · $0.0415". */
+export function formatTurnUsage(usage: TurnUsage): string {
+  const cost =
+    usage.costUsd != null
+      ? ` · $${usage.costUsd < 0.01 ? usage.costUsd.toFixed(4) : usage.costUsd.toFixed(2)}`
+      : ''
+  return `${formatTokenCount(usage.totalTokens)} tokens${cost}`
+}
+
+/**
+ * Folds the daemon's canceled-turn stream event into its own outcome,
+ * sealing any still-open trailing thinking block first. Cancellation is kept
+ * distinct from failures on purpose: nothing went wrong — the turn was stopped.
+ */
+export function applyTurnCanceled(turns: Turn[], options: { at?: number; reason?: string } = {}): Turn[] {
+  return appendTurn(sealTrailingReasoning(turns, options.at ?? Date.now()), { kind: 'canceled', reason: options.reason })
+}
+
+export type AssistantTurn = Extract<Turn, { kind: 'assistant' }>
+
+/**
+ * Footer label for an assistant turn. While it works, the elapsed time so far
+ * (`now` minus its start); once finished, "Worked for {duration}". Undefined —
+ * no footer at all — when the turn never recorded a start.
+ */
+export function workedForLabel(turn: AssistantTurn, now: number): string | undefined {
+  if (turn.startedAt == null) return undefined
+  if (turn.endedAt == null) return formatDuration(Math.max(0, now - turn.startedAt))
+  return `Worked for ${formatDuration(turn.endedAt - turn.startedAt)}`
+}
+
+/** Absolute clock time a finished turn completed; the hover swap for "Worked for". */
+export function completionTimestamp(endedAt: number): string {
+  return new Date(endedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}
+
+/** The markdown-rich content a copy button takes from a turn, if it produced any. */
+export function copyableText(turn: Turn): string | undefined {
+  const source = turn.kind === 'assistant' ? turn.source.trim() : undefined
+  return source || undefined
+}
+
+// ---- expanded tool detail ---------------------------------------------------
+
+/**
+ * One rendered piece of an expanded tool row: a short status/count line
+ * (`meta`) or a preformatted output/log block (`log`).
+ */
+export type ToolDetailPart =
+  | { type: 'meta'; text: string; tone?: 'ok' | 'danger' }
+  | { type: 'log'; label?: string; text: string }
+
+function plural(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`
+}
+
+function searchCountMeta(d: Extract<ToolCallDetail, { type: 'search' }>): ToolDetailPart | null {
+  if (d.toolName === 'web_search') {
+    const count = d.webResults?.length ?? d.numMatches
+    return count == null ? null : { type: 'meta', text: plural(count, 'result', 'results') }
+  }
+  if (d.numMatches != null && d.numFiles != null) {
+    return { type: 'meta', text: `${plural(d.numMatches, 'match', 'matches')} in ${plural(d.numFiles, 'file', 'files')}` }
+  }
+  if (d.numMatches != null) return { type: 'meta', text: plural(d.numMatches, 'match', 'matches') }
+  if (d.numFiles != null) return { type: 'meta', text: plural(d.numFiles, 'file', 'files') }
+  return null
+}
+
+/** Maps a tool call's structured detail to the sections shown when its row expands. Empty means not expandable. */
+export function toolDetailParts(detail: ToolCallDetail): ToolDetailPart[] {
+  const parts: ToolDetailPart[] = []
+  switch (detail.type) {
+    case 'shell': {
+      const output = detail.output?.trimEnd()
+      if (output) parts.push({ type: 'log', text: output })
+      if (detail.exitCode != null) {
+        parts.push({ type: 'meta', text: `exit ${detail.exitCode}`, tone: detail.exitCode === 0 ? 'ok' : 'danger' })
+      }
+      return parts
+    }
+    case 'search': {
+      const count = searchCountMeta(detail)
+      if (count) parts.push(count)
+      if (detail.toolName === 'web_search' && detail.webResults?.length) {
+        parts.push({
+          type: 'log',
+          label: 'results',
+          text: detail.webResults.map((r) => (r.title && r.title !== r.url ? `${r.title}\n  ${r.url}` : r.url)).join('\n'),
+        })
+      } else if (detail.filePaths?.length) {
+        parts.push({ type: 'log', label: 'paths', text: detail.filePaths.join('\n') })
+      }
+      return parts
+    }
+    case 'fetch': {
+      const statusText = [detail.code, detail.codeText].filter((v) => v != null).join(' ')
+      if (statusText) {
+        const ok = detail.code == null || (detail.code >= 200 && detail.code < 300)
+        parts.push({ type: 'meta', text: statusText, tone: ok ? 'ok' : 'danger' })
+      }
+      const result = detail.result?.trimEnd()
+      if (result) parts.push({ type: 'log', text: result })
+      return parts
+    }
+    case 'worktree_setup': {
+      for (const step of detail.commands) {
+        const exitSuffix = step.status === 'failed' && step.exitCode != null ? ` (exit ${step.exitCode})` : ''
+        const marker = step.status === 'completed' ? '✓' : step.status === 'failed' ? '✗' : '•'
+        const label = `${marker} ${step.command}${exitSuffix}`
+        if (step.status === 'completed') parts.push({ type: 'meta', text: label, tone: 'ok' })
+        else if (step.status === 'failed') parts.push({ type: 'meta', text: label, tone: 'danger' })
+        else parts.push({ type: 'meta', text: label })
+        const log = step.log.trimEnd()
+        if (log) parts.push({ type: 'log', text: log })
+      }
+      if (parts.length === 0) {
+        const log = detail.log.trimEnd()
+        if (log) parts.push({ type: 'log', text: log })
+      }
+      return parts
+    }
+    case 'sub_agent': {
+      const log = detail.log.trimEnd()
+      if (log) parts.push({ type: 'log', text: log })
+      for (const action of detail.actions ?? []) {
+        parts.push({ type: 'meta', text: action.summary ? `${action.toolName}: ${action.summary}` : action.toolName })
+      }
+      return parts
+    }
+    default:
+      return parts
+  }
+}
+
+/** Folds a daemon tool-call status onto its transcript ToolStatus; cancellation stays its own outcome. */
+const TOOL_STATUS_FOLD: Record<ToolCallItem['status'], ToolStatus> = {
+  running: 'running',
+  completed: 'ok',
+  failed: 'failed',
+  canceled: 'canceled',
+}
+
+/**
+ * Folds a snapshot-style item (todo, compaction): the newest item carries the
+ * state, so an adjacent turn of the same kind is replaced in place instead of
+ * stacking rows.
+ */
+function foldSnapshot(base: Turn[], kind: 'todo' | 'compaction', next: Turn): Turn[] {
+  const last = base[base.length - 1]
+  if (last?.kind === kind) return [...base.slice(0, -1), next]
+  return appendTurn(base, next)
+}
+
+/**
+ * Folds one timeline item into the transcript. Streaming deltas merge into the
+ * previous turn of their kind. `at` is the item's epoch-ms arrival time (live
+ * event timestamp or fetched entry timestamp); it times reasoning blocks.
+ *
+ * Appended items seal the trailing open reasoning block — anything arriving
+ * after it proves thinking has moved on. Items that replace an earlier turn
+ * in place do not.
+ */
+export function applyTimelineItem(turns: Turn[], item: TimelineItem, at: number = Date.now()): Turn[] {
   switch (item.type) {
     case 'user_message':
-      return appendTurn(turns, { kind: 'user', text: item.text })
+      return appendTurn(sealTrailingTurns(turns, at), { kind: 'user', text: item.text })
     case 'assistant_message': {
+      // Merge before sealing: a follow-up delta continues the turn, it does not
+      // end it — and a finished turn never absorbs later text.
       const last = turns[turns.length - 1]
       if (
         last?.kind === 'assistant' &&
+        last.endedAt == null &&
         (item.messageId == null || last.messageId == null || last.messageId === item.messageId)
       ) {
-        const merged: Turn = { kind: 'assistant', source: last.source + item.text, messageId: item.messageId ?? last.messageId }
+        const merged: Turn = {
+          kind: 'assistant',
+          source: last.source + item.text,
+          messageId: item.messageId ?? last.messageId,
+          usage: last.usage,
+          startedAt: last.startedAt ?? at,
+        }
         return [...turns.slice(0, -1), merged]
       }
-      return appendTurn(turns, { kind: 'assistant', source: item.text, messageId: item.messageId })
+      return appendTurn(sealTrailingTurns(turns, at), {
+        kind: 'assistant',
+        source: item.text,
+        messageId: item.messageId,
+        startedAt: at,
+      })
     }
     case 'reasoning': {
       const last = turns[turns.length - 1]
-      if (last?.kind === 'reasoning') {
-        return [...turns.slice(0, -1), { kind: 'reasoning', text: last.text + item.text }]
+      if (last?.kind === 'reasoning' && last.durationMs == null) {
+        const merged: ReasoningTurn = {
+          kind: 'reasoning',
+          text: last.text + item.text,
+          startedAt: last.startedAt ?? at,
+          lastDeltaAt: at,
+        }
+        return [...turns.slice(0, -1), merged]
       }
-      return appendTurn(turns, { kind: 'reasoning', text: item.text })
+      return appendTurn(turns, { kind: 'reasoning', text: item.text, startedAt: at, lastDeltaAt: at })
     }
     case 'tool_call': {
       const index = findLastIndex(turns, (t) => t.kind === 'tool' && t.callId === item.callId)
-      const status: ToolStatus =
-        item.status === 'running' ? 'running' : item.status === 'completed' ? 'ok' : 'failed'
-      const next: Turn = { kind: 'tool', callId: item.callId, ...toolMeta(item), status }
+      const status: ToolStatus = TOOL_STATUS_FOLD[item.status]
+      const next: Turn = { kind: 'tool', callId: item.callId, ...toolMeta(item), structured: item.detail, status }
       if (index >= 0) return [...turns.slice(0, index), next, ...turns.slice(index + 1)]
-      return appendTurn(turns, next)
+      return appendTurn(sealTrailingTurns(turns, at), next)
     }
     case 'todo': {
       const items = item.items.map((task, i) => ({
@@ -184,19 +568,35 @@ export function applyTimelineItem(turns: Turn[], item: TimelineItem): Turn[] {
         completed: task.completed || task.status === 'completed',
         active: task.status ? task.status === 'in_progress' : !task.completed && i === item.items.findIndex((t) => !t.completed),
       }))
-      const last = turns[turns.length - 1]
-      if (last?.kind === 'todo') return [...turns.slice(0, -1), { kind: 'todo', items }]
-      return appendTurn(turns, { kind: 'todo', items })
+      return foldSnapshot(sealTrailingTurns(turns, at), 'todo', { kind: 'todo', items })
     }
+    case 'compaction':
+      return foldSnapshot(sealTrailingTurns(turns, at), 'compaction', {
+        kind: 'compaction',
+        status: item.status,
+        trigger: item.trigger,
+        preTokens: item.preTokens,
+      })
     case 'error':
-      return appendTurn(turns, { kind: 'error', text: item.message })
+      return appendTurn(sealTrailingTurns(turns, at), { kind: 'error', text: item.message })
     default:
       return turns
   }
 }
 
-export function buildTurns(items: TimelineItem[]): Turn[] {
-  return items.reduce(applyTimelineItem, [] as Turn[])
+export interface TimelineEntry {
+  item: TimelineItem
+  /** Epoch-ms arrival time used to time reasoning blocks; falls back to now. */
+  at?: number
+}
+
+export function buildTurns(entries: TimelineEntry[]): Turn[] {
+  // No speculative seal here: a fetched timeline carries no completion marker,
+  // so the last entry's arrival cannot prove the turn finished. Sealing a
+  // still-streaming assistant turn would freeze its footer and split the next
+  // live delta of the same message into a second turn. Completion is sealed by
+  // the daemon's turn_completed event, not guessed from snapshot timing.
+  return entries.reduce((turns, entry) => applyTimelineItem(turns, entry.item, entry.at), [] as Turn[])
 }
 
 // ---- permission cards -------------------------------------------------------
@@ -281,6 +681,22 @@ export function applyAgentUpdate(entries: AgentEntry[], update: PaseoAgentUpdate
   return sortAgents([update.agent, ...rest])
 }
 
+/**
+ * Folds a fetched directory page into the live mirror. Subscription updates
+ * keep the mirror fresh while a page is in flight, so a page fills gaps and
+ * refreshes stale rows but never regresses an entry the subscription already
+ * advanced — replaying an older snapshot must not resurrect state (such as
+ * attention) the daemon already ended.
+ */
+export function applyAgentPage(entries: AgentEntry[], page: AgentEntry[]): AgentEntry[] {
+  const byId = new Map(entries.map((candidate) => [candidate.id, candidate]))
+  for (const incoming of page) {
+    const current = byId.get(incoming.id)
+    if (!current || activityAt(incoming) > activityAt(current)) byId.set(incoming.id, incoming)
+  }
+  return sortAgents([...byId.values()])
+}
+
 export function basename(p: string): string {
   const parts = p.split('/')
   return parts[parts.length - 1] || p
@@ -292,30 +708,123 @@ export function displayName(entry: AgentEntry): string {
   return basename(entry.cwd)
 }
 
+// ---- sidebar status groups --------------------------------------------------
+//
+// The directory groups by state bucket rather than date, mirroring Paseo's own
+// sidebar (packages/app, STATUS_BUCKET_ORDER): trouble first, then attention,
+// then live work, then finished.
+
+export type StatusBucket = 'needs_input' | 'failed' | 'review' | 'working' | 'done'
+
+export const STATUS_BUCKETS: readonly StatusBucket[] = ['needs_input', 'failed', 'review', 'working', 'done']
+
+export const STATUS_BUCKET_LABELS: Record<StatusBucket, string> = {
+  needs_input: 'Needs input',
+  failed: 'Failed',
+  review: 'Ready to review',
+  working: 'Working',
+  done: 'Done',
+}
+
+/** Maps an agent's snapshot to its directory bucket. Attention outranks status. */
+export function statusBucket(entry: AgentEntry): StatusBucket {
+  if (entry.requiresAttention && entry.attentionReason === 'permission') return 'needs_input'
+  if (entry.status === 'error') return 'failed'
+  if (entry.requiresAttention && entry.attentionReason === 'finished') return 'review'
+  if (entry.status === 'running' || entry.status === 'initializing') return 'working'
+  return 'done'
+}
+
+/** True once the daemon has archived the agent; archiving is one-way. */
+export function isArchived(entry: AgentEntry): boolean {
+  return entry.archivedAt != null
+}
+
+/**
+ * True when the selected agent can no longer host a conversation: it was
+ * deleted or archived. An agent the directory has never shown gets grace —
+ * a freshly created one may be selected before its upsert arrives.
+ */
+export function activeAgentGone(
+  activeId: string | null,
+  entries: AgentEntry[],
+  opts: { connected: boolean; wasSeen: boolean },
+): boolean {
+  if (activeId == null || !opts.connected || !opts.wasSeen) return false
+  return !entries.some((entry) => entry.id === activeId && !isArchived(entry))
+}
+
+/** Live agents only unless archived ones are revealed. */
+export function visibleAgents(entries: AgentEntry[], showArchived: boolean): AgentEntry[] {
+  return showArchived ? entries : entries.filter((entry) => !isArchived(entry))
+}
+
+/** Appends the trailing Archived group when one is revealed; both group modes share it. */
+function withArchivedTail(
+  groups: { name: string; items: AgentEntry[] }[],
+  sorted: AgentEntry[],
+  showArchived: boolean,
+): { name: string; items: AgentEntry[] }[] {
+  const archived = showArchived ? sorted.filter(isArchived) : []
+  if (archived.length > 0) groups.push({ name: 'Archived', items: archived })
+  return groups
+}
+
+/**
+ * Folds the directory into labeled groups for the sidebar: non-empty status
+ * buckets in Paseo's order, each recency-sorted, plus a trailing Archived
+ * group when one is revealed.
+ */
+export function statusGroups(
+  entries: AgentEntry[],
+  showArchived: boolean,
+): { name: string; items: AgentEntry[] }[] {
+  const sorted = sortAgents(visibleAgents(entries, showArchived))
+  const groups: { name: string; items: AgentEntry[] }[] = []
+  for (const bucket of STATUS_BUCKETS) {
+    const items = sorted.filter((entry) => !isArchived(entry) && statusBucket(entry) === bucket)
+    if (items.length > 0) groups.push({ name: STATUS_BUCKET_LABELS[bucket], items })
+  }
+  return withArchivedTail(groups, sorted, showArchived)
+}
+
+/** How the sidebar arranges the directory, chosen in its view menu. */
+export type DirectoryGroupMode = 'status' | 'project'
+
+/**
+ * Folds the directory into per-project groups named by working directory,
+ * most recently active project first, plus the shared Archived tail.
+ */
+export function projectGroups(
+  entries: AgentEntry[],
+  showArchived: boolean,
+): { name: string; items: AgentEntry[] }[] {
+  const sorted = sortAgents(visibleAgents(entries, showArchived))
+  const groups: { name: string; items: AgentEntry[] }[] = []
+  for (const entry of sorted) {
+    if (isArchived(entry)) continue
+    const name = basename(entry.cwd)
+    const last = groups[groups.length - 1]
+    if (last && last.name === name) last.items.push(entry)
+    else groups.push({ name, items: [entry] })
+  }
+  return withArchivedTail(groups, sorted, showArchived)
+}
+
 const DAY_MS = 86_400_000
 
-function startOfDay(ms: number): number {
-  const date = new Date(ms)
-  date.setHours(0, 0, 0, 0)
-  return date.getTime()
-}
-
-export function groupLabel(entry: AgentEntry): string {
-  const day = startOfDay(activityAt(entry))
-  const today = startOfDay(Date.now())
-  if (day === today) return 'Today'
-  if (day === today - DAY_MS) return 'Yesterday'
-  if (day > today - 7 * DAY_MS) return 'Previous 7 Days'
-  return 'Earlier'
-}
-
-export function relativeTime(entry: AgentEntry): string {
-  const delta = Math.max(0, Date.now() - activityAt(entry))
+/** Compact age of an epoch-ms timestamp, e.g. "now", "5m", "3h", "2d", "Aug 7". */
+export function relativeTimeAt(at: number): string {
+  const delta = Math.max(0, Date.now() - at)
   if (delta < 60_000) return 'now'
   if (delta < 3_600_000) return `${Math.floor(delta / 60_000)}m`
   if (delta < DAY_MS) return `${Math.floor(delta / 3_600_000)}h`
   if (delta < 30 * DAY_MS) return `${Math.floor(delta / DAY_MS)}d`
-  return new Date(activityAt(entry)).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  return new Date(at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}
+
+export function relativeTime(entry: AgentEntry): string {
+  return relativeTimeAt(activityAt(entry))
 }
 
 // ---- provider catalog ------------------------------------------------------

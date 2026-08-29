@@ -344,10 +344,10 @@ export function useSlashCommandMenu(input: UseSlashCommandMenuInput): SlashComma
   // resets the highlight to the best match.
   const [dismissed, setDismissed] = useState(false)
   const [selectedIndex, setSelectedIndex] = useState(-1)
-  const query = range?.query ?? ''
-  const previousQueryRef = useRef('')
-  if (previousQueryRef.current !== query) {
-    previousQueryRef.current = query
+  const tokenKey = range ? `${range.start}:${range.query}` : null
+  const previousTokenRef = useRef<string | null>(null)
+  if (previousTokenRef.current !== tokenKey) {
+    previousTokenRef.current = tokenKey
     setSelectedIndex(-1)
     if (dismissed) setDismissed(false)
   }
