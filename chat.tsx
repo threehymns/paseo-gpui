@@ -355,17 +355,20 @@ export function ChatApp() {
 
 const listRef = useRef<{ id: number } | null>(null)
   const { renderer } = useGpuix()
+  // Follow tracks the list actually rendered: the parent transcript normally,
+  // the open provider subagent's timeline while the viewer is up.
   const { following, onScroll, requestJump, jumpToTurn } = useTranscriptFollow({
     listRef,
-    turnCount: visibleTurns.length,
+    turnCount: shownTurns.length,
     // The final turn's identity, so a history page prepended above the viewport
     // (count grew, tail sat still) doesn't drag a following view back down.
-    tailSignature: visibleTurns.length > 0 ? JSON.stringify(visibleTurns.at(-1)) : undefined,
-    agentId: activeId,
+    tailSignature: shownTurns.length > 0 ? JSON.stringify(shownTurns.at(-1)) : undefined,
+    agentId: viewingSubagent ? viewingSubagent.parentAgentId : activeId,
     renderer,
     // HistoryHead occupies virtual-list slot 0 whenever older history does (or
-    // may) exist upstream, so every turn row is shifted down by one.
-    slotOffset: olderPages ? 1 : 0,
+    // may) exist upstream, so every turn row is shifted down by one. The
+    // subagent viewer pages history with its own head-free list.
+    slotOffset: viewingSubagent ? 0 : olderPages ? 1 : 0,
   })
 
   const send = async (raw: string) => {
@@ -607,6 +610,10 @@ const listRef = useRef<{ id: number } | null>(null)
               onRespond={undefined}
               onEditQueued={undefined}
               listRef={listRef}
+              detached={!following}
+              onScroll={onScroll}
+              onJumpToBottom={requestJump}
+              onJumpToTurn={jumpToTurn}
             />
           </>
         ) : (
