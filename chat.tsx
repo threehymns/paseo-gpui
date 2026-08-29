@@ -242,6 +242,13 @@ export function ChatApp() {
   useEffect(() => {
     setViewing(null)
   }, [activeId])
+  useEffect(() => {
+    // A provider subagent's timeline is garbage-collected the moment its
+    // descriptor leaves the directory; a viewer still pointed at it would sit
+    // on "Loading subagent…" forever. The row no longer being in the track
+    // proves it's gone, so fold the viewer back.
+    if (viewing?.kind === 'provider' && !viewingRow) setViewing(null)
+  }, [viewing, viewingRow])
   const subagentRows = useMemo(
     () => selectTrackRows(subagents.state, agents, activeId, subagents.enabled),
     [subagents.state, subagents.enabled, agents, activeId],
