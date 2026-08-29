@@ -55,6 +55,7 @@ import {
 import { FeatureToggles, ModelPicker, OptionPicker, modeOptions, thinkingOptions } from './pickers'
 import { Composer, ConfigNotice, FooterBar, TracksRow } from './composer'
 import { useAgentConversation } from './conversation'
+import { toMentionEntries, type MentionSource } from './mentions'
 import { useTranscriptFollow } from './follow'
 import { useAgentPermissions } from './permissions'
 import { nativeOpenFileBridge, requestOpenFile } from './open-file'
@@ -622,6 +623,27 @@ const listRef = useRef<{ id: number } | null>(null)
   const onModeChange = editingLive ? live.setMode : setDraftMode
   const onFeatureToggle = editingLive ? live.setFeature : setDraftFeature
 
+  // `@` completion lists the selected agent's workspace, or the chosen one for
+  // a new task. Daemon errors degrade to no suggestions inside the hook.
+  const mentionCwd = activeEntry?.cwd ?? cwd
+  const mentionSource = useMemo<MentionSource>(
+    () => ({
+      cwd: mentionCwd,
+      fetch: async (query) => {
+        const payload = await daemon.getDirectorySuggestions({
+          query,
+          cwd: mentionCwd,
+          limit: 24,
+          includeFiles: true,
+          includeDirectories: true,
+          matchMode: 'fuzzy',
+        })
+        return toMentionEntries(payload, mentionCwd)
+      },
+    }),
+    [daemon, mentionCwd],
+  )
+
   const draftChips = (
     <>
       <ModelPicker providers={chipProviders} value={modelValue} onChange={onModelChange} />
@@ -831,6 +853,7 @@ const listRef = useRef<{ id: number } | null>(null)
           onPastePayload={offerPaste}
           transientNotice={transientNotice}
           usageMeter={usageMeter}
+          mentionSource={mentionSource}
         />
         <FooterBar
           cwd={activeEntry?.cwd ?? cwd}

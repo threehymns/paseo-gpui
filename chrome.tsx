@@ -43,6 +43,7 @@ import iconPanelRight from './assets/icons/panel-right.svg' with { type: 'file' 
 import iconArrowLeft from './assets/icons/arrow-left.svg' with { type: 'file' }
 import iconArrowRight from './assets/icons/arrow-right.svg' with { type: 'file' }
 import iconFolder from './assets/icons/folder.svg' with { type: 'file' }
+import iconFile from './assets/icons/file.svg' with { type: 'file' }
 import iconSettings from './assets/icons/settings.svg' with { type: 'file' }
 import iconGitBranch from './assets/icons/git-branch.svg' with { type: 'file' }
 import iconLaptop from './assets/icons/laptop.svg' with { type: 'file' }
@@ -72,6 +73,7 @@ const ICONS = {
   arrowLeft: realAssetPath(iconArrowLeft),
   arrowRight: realAssetPath(iconArrowRight),
   folder: realAssetPath(iconFolder),
+  file: realAssetPath(iconFile),
   settings: realAssetPath(iconSettings),
   gitBranch: realAssetPath(iconGitBranch),
   laptop: realAssetPath(iconLaptop),
