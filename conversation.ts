@@ -92,6 +92,27 @@ function eventTime(timestamp?: string): number | undefined {
   return Number.isFinite(at) ? at : undefined
 }
 
+/**
+ * Prepending a page re-folds turns from the entry list, but completion state
+ * lives only in turns (a sealed reasoning block's duration, a finished
+ * assistant turn's endedAt) — the daemon's turn_completed is not a timeline
+ * entry, so the fold cannot reproduce it. The tail entry is unchanged by a
+ * prepend, so carry the previous tail's seal onto the re-folded tail.
+ */
+function restoreTailSeal(previous: Turn[], reFolded: Turn[]): Turn[] {
+  if (reFolded.length === 0) return reFolded
+  const old = previous[previous.length - 1]
+  const fresh = reFolded[reFolded.length - 1]
+  if (!old || !fresh || old.kind !== fresh.kind) return reFolded
+  if (old.kind === 'reasoning' && old.durationMs != null && fresh.durationMs == null) {
+    return [...reFolded.slice(0, -1), { ...fresh, durationMs: old.durationMs }]
+  }
+  if (old.kind === 'assistant' && old.endedAt != null && fresh.endedAt == null) {
+    return [...reFolded.slice(0, -1), { ...fresh, endedAt: old.endedAt }]
+  }
+  return reFolded
+}
+
 export function reduceConversation(state: ConversationState, event: ConversationEvent): ConversationState {
   switch (event.type) {
     case 'reset':
@@ -119,10 +140,12 @@ export function reduceConversation(state: ConversationState, event: Conversation
       // do not survive the re-fold.
       const { page } = event
       const entries = [...page.items, ...state.entries]
+      const reFolded = buildTurns(entries)
       return {
         ...state,
         entries,
-        turns: buildTurns(entries),
+        // The tail entry is unchanged by a prepend; keep its completion state.
+        turns: restoreTailSeal(state.turns, reFolded),
         // An empty page or a missing cursor means there is nothing reachable
         // to continue from — stop paging rather than wedge on a dead cursor.
         oldestCursor: page.oldestCursor ?? state.oldestCursor,
@@ -152,7 +175,14 @@ export function reduceConversation(state: ConversationState, event: Conversation
       // Ends any still-open trailing thinking block with nothing after it.
       return { ...state, turns: sealTrailingReasoning(state.turns, event.at ?? Date.now()) }
     case 'turnFailed':
-      return { ...state, turns: applyTimelineItem(state.turns, { type: 'error', message: event.message }) }
+      // Record the daemon-reported failure in the entry list too so it survives
+      // a later history-page re-fold; only locally synthesized failures
+      // (sendFailed) stay out of persistence.
+      return {
+        ...state,
+        entries: [...state.entries, { item: { type: 'error', message: event.message } }],
+        turns: applyTimelineItem(state.turns, { type: 'error', message: event.message }),
+      }
     case 'sendQueued':
       return { ...state, pending: [...state.pending, event.text] }
     case 'sendFailed':

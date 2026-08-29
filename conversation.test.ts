@@ -294,4 +294,32 @@ describe('history paging', () => {
     expect(visible.at(-1)).toEqual({ kind: 'user', text: 'hello' })
     expect(visible.filter((turn) => turn.kind === 'user')).toHaveLength(2)
   })
+
+  test('a turn_completed-sealed trailing reasoning tail is not resurrected open by a re-fold', () => {
+    let state = run([
+      loadedPage([at(reasoning('thinking'), 400), at(assistant('answer'), 500)], {
+        hasOlder: true,
+        oldestCursor: cursor(10),
+      }),
+    ])
+    // The turn ends on reasoning; turn_completed (not a timeline entry) seals it.
+    state = reduceConversation(state, { type: 'timeline', item: reasoning(' tail'), at: 600 })
+    state = reduceConversation(state, { type: 'turnCompleted', at: 700 })
+    const before = state.turns.at(-1) as { kind: string; durationMs?: number }
+    expect(before.kind).toBe('reasoning')
+    expect(before.durationMs).toBeDefined()
+    // Prepending a page re-folds entries; the seal must carry across.
+    state = reduceConversation(state, appendPage([at(user('older'), 50)]))
+    const after = state.turns.at(-1) as { kind: string; durationMs?: number }
+    expect(after.kind).toBe('reasoning')
+    expect(after.durationMs).toBe(before.durationMs)
+  })
+
+  test('a turn_failed error card survives a history-page re-fold', () => {
+    let state = run([loadedPage([at(user('q'), 200)], { hasOlder: true, oldestCursor: cursor(10) })])
+    state = reduceConversation(state, { type: 'turnFailed', message: 'model overloaded' })
+    expect(state.turns.at(-1)).toEqual({ kind: 'error', text: 'model overloaded' })
+    state = reduceConversation(state, appendPage([at(user('older'), 50)]))
+    expect(state.turns.at(-1)).toEqual({ kind: 'error', text: 'model overloaded' })
+  })
 })
