@@ -17,6 +17,8 @@ import {
   type PaseoAgentUpdate,
   type PaseoClient,
   type PaseoProviderSnapshotResult,
+  type PaseoWorkspace,
+  type PaseoWorkspaceUpdate,
 } from '@getpaseo/client'
 import { DaemonClient } from '@getpaseo/client/internal/daemon-client'
 
@@ -64,6 +66,11 @@ export type AgentEntry = AgentDirectoryEntry['agent']
 export type ProviderEntry = PaseoProviderSnapshotResult['entries'][number]
 export type ProviderModel = NonNullable<ProviderEntry['models']>[number]
 export type ProviderMode = NonNullable<ProviderEntry['modes']>[number]
+export type WorkspaceDescriptor = PaseoWorkspace
+export type WorkspaceUpdate = PaseoWorkspaceUpdate
+export type EmptyProjectDescriptor = NonNullable<
+  Extract<WorkspaceUpdate, { kind: 'remove' }>['emptyProject']
+>
 
 type StreamEvent = PaseoAgentStream['event']
 export type TimelineItem = Extract<StreamEvent, { type: 'timeline' }>['item']
@@ -799,13 +806,18 @@ export function projectGroups(
 
 const DAY_MS = 86_400_000
 
-export function relativeTime(entry: AgentEntry): string {
-  const delta = Math.max(0, Date.now() - activityAt(entry))
+/** Compact age of an epoch-ms timestamp, e.g. "now", "5m", "3h", "2d", "Aug 7". */
+export function relativeTimeAt(at: number): string {
+  const delta = Math.max(0, Date.now() - at)
   if (delta < 60_000) return 'now'
   if (delta < 3_600_000) return `${Math.floor(delta / 60_000)}m`
   if (delta < DAY_MS) return `${Math.floor(delta / 3_600_000)}h`
   if (delta < 30 * DAY_MS) return `${Math.floor(delta / DAY_MS)}d`
-  return new Date(activityAt(entry)).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  return new Date(at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}
+
+export function relativeTime(entry: AgentEntry): string {
+  return relativeTimeAt(activityAt(entry))
 }
 
 // ---- provider catalog ------------------------------------------------------

@@ -30,7 +30,18 @@ import {
   type AgentEntry,
   type ConnStatus,
   type ProviderEntry,
+  type WorkspaceDescriptor,
 } from './paseo'
+import {
+  agentsOfWorkspace,
+  applyWorkspaceUpdate,
+  initialWorkspaceStore,
+  mostRecentAgent,
+  sortWorkspaces,
+  workspaceDirectoryChoices,
+  workspaceDirectory,
+  type WorkspaceStore,
+} from './workspaces'
 import {
   planAttachments,
   planPaste,
@@ -87,6 +98,8 @@ interface DaemonView {
   error: string | null
   agents: AgentEntry[]
   providers: ProviderEntry[]
+  /** The workspace directory; written only by the daemon's subscription. */
+  workspaces: WorkspaceStore
 }
 
 function useDaemon(): DaemonView {
@@ -95,6 +108,7 @@ function useDaemon(): DaemonView {
   const [error, setError] = useState<string | null>(null)
   const [agents, setAgents] = useState<AgentEntry[]>([])
   const [providers, setProviders] = useState<ProviderEntry[]>([])
+  const [workspaces, setWorkspaces] = useState<WorkspaceStore>(initialWorkspaceStore)
 
   useEffect(() => {
     let disposed = false
@@ -112,14 +126,46 @@ function useDaemon(): DaemonView {
       )
       // Archived entries ride along so the sidebar toggle can reveal them;
       // visibility is decided at render time.
-      const sort = [{ key: 'updated_at' as const, direction: 'desc' as const }]
+      const agentSort = [{ key: 'updated_at' as const, direction: 'desc' as const }]
       const filter = { includeArchived: true }
-      await client.agents.list({ scope: 'active', filter, sort, subscribe: {} })
-      const page = await client.agents.list({ scope: 'active', filter, sort })
+      await client.agents.list({ scope: 'active', filter, sort: agentSort, subscribe: {} })
+      const page = await client.agents.list({ scope: 'active', filter, sort: agentSort })
       // Merge, never replace: subscription updates may have advanced entries
       // while the page was in flight, and a wholesale swap would replay their
       // older snapshots over fresher truth.
       if (!disposed) setAgents((prev) => applyAgentPage(prev, page.entries.map((entry) => entry.agent)))
+
+      // One subscribed feed owns the whole workspace store: upserts, removes,
+      // emptied and removed projects all flow through it. The UI never writes.
+      unsubs.push(
+        client.workspaces.subscribe((update) =>
+          setWorkspaces((prev) => applyWorkspaceUpdate(prev, update)),
+        ),
+      )
+      const workspaceSort = [{ key: 'activity_at' as const, direction: 'desc' as const }]
+      await client.workspaces.list({ sort: workspaceSort, subscribe: {} })
+      const descriptors: WorkspaceDescriptor[] = []
+      let cursor: string | undefined
+      do {
+        const workspacePage = await client.workspaces.list({
+          sort: workspaceSort,
+          page: { limit: 200, ...(cursor ? { cursor } : {}) },
+        })
+        descriptors.push(...workspacePage.entries)
+        cursor = workspacePage.pageInfo.nextCursor ?? undefined
+      } while (cursor && !disposed)
+      // Fold the paged snapshot in as upserts rather than replacing the store:
+      // removes and emptied-project events that streamed during pagination
+      // would otherwise be silently discarded.
+      if (!disposed) {
+        setWorkspaces((prev) => {
+          let next = prev
+          for (const descriptor of sortWorkspaces(descriptors)) {
+            next = applyWorkspaceUpdate(next, { kind: 'upsert', workspace: descriptor })
+          }
+          return next
+        })
+      }
 
       const snapshot =
         (await client.providers.waitForReady({ timeoutMs: 30_000 }).catch(() => null)) ??
@@ -159,7 +205,7 @@ function useDaemon(): DaemonView {
     }
   }, [])
 
-  return { client, daemon, status, error, agents, providers }
+  return { client, daemon, status, error, agents, providers, workspaces }
 }
 
 // ---- app -------------------------------------------------------------------
@@ -180,10 +226,11 @@ async function openImagePicker(): Promise<IncomingImage[] | null> {
 const createStateStore = () => createAppStore(fileStateStorage(defaultStatePath()))
 
 export function ChatApp() {
-  const { client, daemon, status, error, agents, providers } = useDaemon()
+  const { client, daemon, status, error, agents, providers, workspaces } = useDaemon()
   const [store] = useState(createStateStore)
 
   const [activeId, setActiveId] = useState<string | null>(null)
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState(false)
   const [draft, setDraft] = useState('')
   const [draftImages, setDraftImages] = useState<ImageAttachment[]>([])
@@ -197,7 +244,6 @@ export function ChatApp() {
     useDraftConfig(providers)
   const seed = pendingSeed && pendingSeed.agentId === activeId ? pendingSeed : null
   const [cwd, setCwd] = useState(process.cwd())
-  const [cwdOptions, setCwdOptions] = useState<string[]>([])
   const [worktree, setWorktree] = useState('local')
 
   const conversation = useAgentConversation(client, activeId, {
@@ -254,10 +300,34 @@ export function ChatApp() {
       setBusyRows((prev) => prev.filter((row) => row.verb !== verb || row.id !== id))
     }
   }
-  const archiveAgentRow = (id: string) => runRowAction('archive', id, () => daemon.archiveAgent(id))
-  const deleteAgentRow = (id: string) => runRowAction('delete', id, () => daemon.deleteAgent(id))
-  const renameAgentRow = (id: string, name: string) =>
-    runRowAction('rename', id, () => daemon.updateAgent(id, { name }))
+  const archiveWorkspaceRow = (id: string) => runRowAction('archive', id, () => daemon.archiveWorkspace(id))
+  const renameWorkspaceRow = (id: string, name: string) =>
+    runRowAction('rename', id, () => daemon.setWorkspaceTitle(id, name))
+
+  /**
+   * Opening a workspace opens its conversation: its most recently active agent
+   * becomes the shown timeline; a workspace with no agents falls back to the
+   * composer's new-task state seeded to that workspace's directory.
+   */
+  const openWorkspace = (id: string) => {
+    setSelectedWorkspaceId(id)
+    setCreateError(null)
+    const descriptor = workspaces.workspaces.find((candidate) => candidate.id === id)
+    if (!descriptor) {
+      setActiveId(null)
+      return
+    }
+    const agent = mostRecentAgent(agentsOfWorkspace(agents, descriptor).filter((a) => !isArchived(a)))
+    if (agent) {
+      setActiveId(agent.id)
+    } else {
+      // Seeding means the send lands in the workspace as it is — never a new
+      // worktree on top of it.
+      setActiveId(null)
+      setCwd(workspaceDirectory(descriptor))
+      setWorktree('local')
+    }
+  }
 
   // The composer's stop control: enabled only while the open agent runs. From
   // click until the cancellation is confirmed — the agent leaving running via
@@ -344,6 +414,9 @@ export function ChatApp() {
     [providers, modelValue],
   )
 
+  // Composer folder choices come straight from the workspace store.
+  const cwdOptions = useMemo(() => workspaceDirectoryChoices(workspaces), [workspaces])
+
   // The meter reads the live stream's usage, falling back to the directory
   // snapshot until the first event lands; the window size falls back to the
   // selected model's catalog value when usage omits it.
@@ -359,30 +432,6 @@ export function ChatApp() {
       }),
     [sessionUsage, modelDef],
   )
-
-  useEffect(() => {
-    if (status !== 'connected') return
-    let disposed = false
-    ;(async () => {
-      try {
-        const page = await client.workspaces.list()
-        if (disposed) return
-        const dirs = [
-          ...new Set(
-            page.entries
-              .map((workspace) => workspace.workspaceDirectory ?? workspace.projectRootPath)
-              .filter((dir): dir is string => Boolean(dir)),
-          ),
-        ]
-        if (dirs.length > 0) setCwdOptions(dirs)
-      } catch {
-        /* workspace listing is best-effort */
-      }
-    })()
-    return () => {
-      disposed = true
-    }
-  }, [client, status])
 
   // The transcript area shows the parent conversation, or a provider
   // subagent's read-only timeline while it is open.
@@ -584,20 +633,20 @@ const listRef = useRef<{ id: number } | null>(null)
         }}
       >
         <Sidebar
-          agents={agents}
-          activeId={activeId}
-          onSelect={(id) => {
-            setActiveId(id)
+          store={workspaces}
+          activeWorkspaceId={selectedWorkspaceId}
+          onSelect={openWorkspace}
+          onNewTask={() => {
+            setActiveId(null)
+            setSelectedWorkspaceId(null)
             setCreateError(null)
           }}
-          onNewTask={() => setActiveId(null)}
           onCollapse={() => setCollapsed(true)}
           status={status}
           busyRows={busyRows}
-          onArchive={archiveAgentRow}
-          onDelete={deleteAgentRow}
-          onRename={renameAgentRow}
-          store={store}
+          onArchive={archiveWorkspaceRow}
+          onRename={renameWorkspaceRow}
+          appStore={store}
         />
         <div style={{ width: 1, height: '100%', flexShrink: 0, backgroundColor: C.sidebarBorder }} />
       </motion.div>
