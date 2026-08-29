@@ -8,7 +8,8 @@ import { SafeMdxRenderer } from 'safe-mdx'
 import { mdxParse } from 'safe-mdx/parse'
 import type { Root } from 'mdast'
 import type { StyleDesc } from '@gpuix/react'
-import { C, CHAT_THEME } from './theme'
+import { MermaidFence } from './mermaid-viewer'
+import { C } from './theme'
 
 type MdxChildren = { children?: React.ReactNode }
 
@@ -239,14 +240,7 @@ export function SafeMdxContent({ source }: { source: string }) {
         components={SAFE_MDX_COMPONENTS}
         renderNode={(node) => {
           if (node.type !== 'code') return undefined
-          return (
-            <code
-              code={node.value}
-              language={node.lang ?? undefined}
-              showLineNumbers
-              theme={CHAT_THEME}
-            />
-          )
+          return <MermaidFence value={node.value} lang={node.lang ?? undefined} />
         }}
       />
     </div>

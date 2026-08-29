@@ -24,6 +24,7 @@ import {
   workspaceProjectGroups,
   type WorkspaceStore,
 } from './workspaces'
+import { showArchivedAgents, useAppState, type AppStore } from './app-state'
 import { C, SIDEBAR_WIDTH, TITLEBAR_HEIGHT, TRAFFIC_LIGHT_CLEARANCE } from './theme'
 
 function realAssetPath(virtualPath: string): string {
@@ -57,8 +58,11 @@ import iconSparkle from './assets/icons/sparkle.svg' with { type: 'file' }
 import iconWrench from './assets/icons/wrench.svg' with { type: 'file' }
 import iconSend from './assets/icons/arrow-up.svg' with { type: 'file' }
 import iconCheck from './assets/icons/check.svg' with { type: 'file' }
+import iconScissors from './assets/icons/scissors.svg' with { type: 'file' }
+import iconSquare from './assets/icons/square.svg' with { type: 'file' }
 import iconImage from './assets/icons/image.svg' with { type: 'file' }
 import iconX from './assets/icons/x.svg' with { type: 'file' }
+import iconRotateCcw from './assets/icons/rotate-ccw.svg' with { type: 'file' }
 
 const ICONS = {
   compose: realAssetPath(iconCompose),
@@ -83,8 +87,11 @@ const ICONS = {
   wrench: realAssetPath(iconWrench),
   send: realAssetPath(iconSend),
   check: realAssetPath(iconCheck),
+  scissors: realAssetPath(iconScissors),
+  square: realAssetPath(iconSquare),
   image: realAssetPath(iconImage),
   x: realAssetPath(iconX),
+  rotateCcw: realAssetPath(iconRotateCcw),
 } as const
 
 export type IconName = keyof typeof ICONS
@@ -202,7 +209,7 @@ function SidebarAction({
   )
 }
 
-export type RowActionVerb = 'rename' | 'archive'
+export type RowActionVerb = 'rename' | 'archive' | 'delete' | 'detach'
 
 /** One row lifecycle call in flight; every action on that row stays disabled until it settles. */
 export interface RowActionRef {
@@ -468,11 +475,11 @@ function WorkspaceRow({
                 )}
               </SelectContent>
             </Select>
-          ) : (
+          ) : workspaceActivityAt(descriptor) > 0 ? (
             <text style={{ fontSize: 12.5, color: C.ghost, flexShrink: 0 }}>
               {relativeTimeAt(workspaceActivityAt(descriptor))}
             </text>
-          )}
+          ) : null}
         </div>
       )}
       <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 5, paddingLeft: 13 }}>
@@ -565,7 +572,7 @@ function ProjectGroupHeader({
 }
 
 export function Sidebar({
-  store,
+  workspaces,
   activeWorkspaceId,
   onSelect,
   onNewTask,
@@ -574,9 +581,10 @@ export function Sidebar({
   busyRows,
   onArchive,
   onRename,
+  appStore,
 }: {
   /** The whole workspace directory, written only by the daemon subscription. */
-  store: WorkspaceStore
+  workspaces: WorkspaceStore
   activeWorkspaceId: string | null
   onSelect: (id: string) => void
   onNewTask: () => void
@@ -586,11 +594,13 @@ export function Sidebar({
   busyRows: RowActionRef[]
   onArchive: (id: string) => void
   onRename: (id: string, name: string) => void
+  /** Persisted app state; the sidebar's view choices survive a restart. */
+  appStore: AppStore
 }) {
-  const [showArchived, setShowArchived] = useState(false)
+  const [showArchived, setShowArchived] = useAppState(appStore, showArchivedAgents)
   // Collapse state is view state; the store itself stays daemon-written.
   const [collapsedProjects, setCollapsedProjects] = useState<ReadonlySet<string>>(new Set())
-  const groups = useMemo(() => workspaceProjectGroups(store, showArchived), [store, showArchived])
+  const groups = useMemo(() => workspaceProjectGroups(workspaces, showArchived), [workspaces, showArchived])
   const toggleProject = (projectId: string) => {
     setCollapsedProjects((prev) => {
       const next = new Set(prev)
