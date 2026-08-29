@@ -45,6 +45,7 @@ import { Transcript } from './transcript'
 import { ModelPicker, OptionPicker, modeOptions, thinkingOptions } from './pickers'
 import { Composer, ConfigNotice, FooterBar } from './composer'
 import { useAgentConversation } from './conversation'
+import { useTranscriptFollow } from './follow'
 import { useAgentPermissions } from './permissions'
 import { useAttention, type NotificationBridge } from './attention'
 import { useDraftConfig } from './draft-config'
@@ -280,18 +281,13 @@ export function ChatApp() {
   const visibleTurns = turns
 
   const listRef = useRef<{ id: number } | null>(null)
-  const skipScroll = useRef(true)
   const { renderer } = useGpuix()
-
-  useEffect(() => {
-    if (skipScroll.current) {
-      skipScroll.current = false
-      return
-    }
-    const id = listRef.current?.id
-    if (id == null || !renderer?.scrollToItem) return
-    renderer.scrollToItem(id, visibleTurns.length - 1)
-  }, [renderer, visibleTurns.length])
+  const { following, onScroll, requestJump, jumpToTurn } = useTranscriptFollow({
+    listRef,
+    turnCount: visibleTurns.length,
+    agentId: activeId,
+    renderer,
+  })
 
   const send = async (raw: string) => {
     const text = raw.trim()
@@ -515,6 +511,10 @@ export function ChatApp() {
             onRespond={permissions.respond}
             onEditQueued={editQueued}
             listRef={listRef}
+            detached={!following}
+            onScroll={onScroll}
+            onJumpToBottom={requestJump}
+            onJumpToTurn={jumpToTurn}
           />
         )}
         {createError && (

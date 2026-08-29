@@ -53,6 +53,18 @@ _Avoid_: closed, ended
 The ordered turns shown for one agent, including optimistic sends not yet
 echoed by the daemon.
 
+**Following**:
+The attached scroll state in which incoming turns pull the transcript to its
+tail. Scrolling up **detaches** it: streaming no longer moves the viewport and
+a floating jump button appears. Jumping (button click) or wheeling down until
+the list pins at its end re-attaches.
+_Avoid_: auto-scroll, stick-to-bottom
+
+**Outline rail**:
+The tick strip along the transcript's right edge, one tick per user turn;
+hovering previews the prompt, clicking scrolls that row into view.
+_Avoid_: minimap, scrollbar
+
 **Pending send**:
 A user text queued optimistically before the daemon echoes it back. Echoes
 settle the queue head that matches, first-in-first-out.
