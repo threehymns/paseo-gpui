@@ -160,3 +160,18 @@ only by the daemon's update stream (upserts, removes, emptied and removed
 projects). Opening a workspace shows its most recently active agent's
 timeline; a workspace with no agents falls back to the composer's new-task
 state seeded to that workspace's directory.
+
+**Action registry**:
+The shared catalog of runnable actions (id, title, section, run, enabled):
+static commands plus live contributions mirroring the agent directory,
+workspace list, and provider catalog. Contributions register in batches and
+retire through their disposer when their inputs change. The command palette
+consumes it today; keybindings and settings rebinding reuse the same catalog.
+_Avoid_: command list, menu items
+
+**Command palette**:
+The ⌘K/Ctrl+K overlay over the action registry, searched across fixed
+sections (Actions, Workspaces, Agents, Model, Reasoning, Access). Typing
+fuzzy-filters and ranks within each section; arrows wrap; Enter runs;
+Esc or clicking outside closes. Its handlers exist only while it is mounted.
+_Avoid_: spotlight, quick open
