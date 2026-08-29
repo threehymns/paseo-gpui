@@ -65,8 +65,7 @@ jobs:
           git fetch -q --depth=500 prrepo "$head_sha" || git fetch -q prrepo "$head_sha"
 
           # Watermark: the commit the last completed bot review examined.
-          watermark="$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
-            --jq '[.[] | select(.user.login | endswith("[bot]"))] | last | .commit_id // empty')"
+          watermark="$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/reviews" | jq -r '[.[] | select(.user.login | endswith("[bot]"))] | last | .commit_id // empty')"
 
           mode="whole"
           if [[ -n "$watermark" ]] && git merge-base --is-ancestor "$watermark" "$head_sha" 2>/dev/null; then
@@ -85,7 +84,7 @@ jobs:
               count="$(git rev-list --count "$watermark..$head_sha")"
               echo "INCREMENTAL SCOPE: review ONLY these $count commit(s), new since the last completed review ($watermark):"
               echo '```'
-              git log --format='- %h %s' --no-merges "$watermark..$head_sha" | head -50
+              git log --format='- %h %.80s' --no-merges -n 50 "$watermark..$head_sha" | sed 's/`//g'
               echo '```'
               echo "Build the delta diff yourself, e.g.: git diff $watermark..$head_sha. Code outside these commits is out of scope."
               echo "Prior findings already appear in the <pull_request_reviews> context: do not re-report one that is still unfixed and untouched by these commits; re-report only when these commits regress it, worsen it, or modify its code path. If every prior finding is resolved or out of scope and you find nothing new, report that plainly."
