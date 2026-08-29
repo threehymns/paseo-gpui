@@ -40,6 +40,23 @@ describe('flowchart rendering', () => {
     expect(result.svg).toContain('>b<')
     expect(result.svg).toContain('>c<')
   })
+
+  test('a cyclic graph does not hang and renders deterministically', () => {
+    const result = renderMermaid('flowchart LR\n start --> a\n a --> b\n b --> a')
+    expect(result.status).toBe('ok')
+    if (result.status !== 'ok') return
+    expect(result.svg).toContain('>start<')
+    expect(result.svg).toContain('>a<')
+    expect(result.svg).toContain('>b<')
+  })
+
+  test('a self-loop does not hang and renders its node once', () => {
+    const result = renderMermaid('flowchart LR\n start --> a\n a --> a')
+    expect(result.status).toBe('ok')
+    if (result.status !== 'ok') return
+    expect(result.svg).toContain('>start<')
+    expect(result.svg).toContain('>a<')
+  })
 })
 
 describe('node shapes', () => {

@@ -277,8 +277,9 @@ interface PlacedNode extends FlowNode {
 }
 
 /**
- * Longest-path layering over a breadth-first order; cycles settle at the depth
- * of their deepest settled neighbour plus one.
+ * Longest-path layering over a breadth-first order; each node is processed
+ * exactly once so cycles and self-loops settle deterministically instead of
+ * growing depth without bound.
  */
 function layerDepths(nodes: FlowNode[], edges: FlowEdge[]): Map<string, number> {
   const depth = new Map<string, number>(nodes.map((node) => [node.id, 0]))
@@ -289,15 +290,14 @@ function layerDepths(nodes: FlowNode[], edges: FlowEdge[]): Map<string, number> 
     pushTo(incoming, edge.to, edge)
   }
   const queue = nodes.filter((node) => !incoming.has(node.id)).map((node) => node.id)
-  const queued = new Set(queue)
+  const processed = new Set(queue)
   while (queue.length > 0) {
     const id = queue.shift()!
-    queued.delete(id)
     const nextDepth = depth.get(id)! + 1
     for (const edge of outgoing.get(id) ?? []) {
       if ((depth.get(edge.to) ?? 0) < nextDepth) depth.set(edge.to, nextDepth)
-      if (!queued.has(edge.to)) {
-        queued.add(edge.to)
+      if (!processed.has(edge.to)) {
+        processed.add(edge.to)
         queue.push(edge.to)
       }
     }
