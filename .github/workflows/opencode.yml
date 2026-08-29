@@ -15,6 +15,7 @@ jobs:
         contains(github.event.comment.body, ' /opencode') ||
         startsWith(github.event.comment.body, '/opencode')
       ) &&
+      !endsWith(github.event.comment.user.login, '[bot]') &&
       contains(fromJson('["OWNER","MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
     runs-on: ubuntu-latest
     timeout-minutes: 120

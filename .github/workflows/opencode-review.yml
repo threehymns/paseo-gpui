@@ -1,8 +1,14 @@
 name: opencode-review
 
-# Automatic: every pull_request event (except bot-actor synchronizations).
+# Automatic: every pull_request event (except bot actors).
 # Manual: comment "/review" on a PR. Extra text after "/review" is passed to
 # the reviewer as notes; the review methodology itself stays fixed here.
+#
+# Bot-authored comments never trigger anything here. Their comments re-enter
+# this workflow (the reviewer posts its verdict as a comment), so the job
+# gate must reject them AND concurrency must live at job level: a workflow-
+# level group engages even when every job skips, so a bot verdict comment
+# used to cancel the very review run that posted it.
 
 on:
   pull_request:
@@ -10,20 +16,20 @@ on:
   issue_comment:
     types: [created]
 
-concurrency:
-  group: opencode-review-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: true
-
 jobs:
   review:
     if: |
-      (github.event_name == 'pull_request' && github.actor != 'opencode-agent[bot]') ||
+      (github.event_name == 'pull_request' && !endsWith(github.actor, '[bot]')) ||
       (
         github.event_name == 'issue_comment' &&
         github.event.issue.pull_request != null &&
+        !endsWith(github.event.comment.user.login, '[bot]') &&
         startsWith(github.event.comment.body, '/review') &&
         contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
       )
+    concurrency:
+      group: opencode-review-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
