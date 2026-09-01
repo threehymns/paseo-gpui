@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test'
 import {
-  MAX_VISIT_HISTORY,
   canGoBack,
   canGoForward,
   emptyVisitHistory,
@@ -63,13 +62,5 @@ describe('visit history', () => {
     expect(cut.index).toBe(1)
     const atEnd = h('a')
     expect(truncateForward(atEnd)).toBe(atEnd)
-  })
-
-  test('the stack stays small: the oldest visit evicts past the cap', () => {
-    let history = emptyVisitHistory
-    for (let i = 0; i < MAX_VISIT_HISTORY + 5; i++) history = visitAgent(history, `agent-${i}`)
-    expect(history.stack.length).toBe(MAX_VISIT_HISTORY)
-    expect(history.stack[0]).toBe('agent-5')
-    expect(history.stack.at(-1)).toBe(`agent-${MAX_VISIT_HISTORY + 4}`)
   })
 })

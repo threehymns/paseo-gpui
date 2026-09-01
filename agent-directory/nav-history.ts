@@ -7,9 +7,6 @@
  * thin React adapter.
  */
 
-/** How many visits the stack remembers before the oldest falls off. */
-export const MAX_VISIT_HISTORY = 50
-
 export interface VisitHistory {
   readonly stack: readonly string[]
   /** Cursor into `stack`; -1 means nothing visited yet. */
@@ -28,14 +25,12 @@ export function canGoForward(history: VisitHistory): boolean {
 
 /**
  * Records a visit. Revisiting the current entry is a no-op; otherwise the
- * forward entries die (there is no phantom future) and the visit is appended,
- * evicting the oldest visit once the cap is reached.
+ * forward entries die (there is no phantom future) and the visit is appended.
  */
 export function visitAgent(history: VisitHistory, agentId: string): VisitHistory {
   if (history.stack[history.index] === agentId) return history
-  const kept = history.stack.slice(0, history.index + 1)
-  kept.push(agentId)
-  const stack = kept.length > MAX_VISIT_HISTORY ? kept.slice(kept.length - MAX_VISIT_HISTORY) : kept
+  const stack = history.stack.slice(0, history.index + 1)
+  stack.push(agentId)
   return { stack, index: stack.length - 1 }
 }
 
