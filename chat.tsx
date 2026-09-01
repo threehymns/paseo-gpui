@@ -48,6 +48,16 @@ import {
   type WorkspaceStore,
 } from './agent-directory/workspaces'
 import {
+  canGoBack,
+  canGoForward,
+  emptyVisitHistory,
+  goBack,
+  goForward,
+  truncateForward,
+  visitAgent,
+  type VisitHistory,
+} from './agent-directory/nav-history'
+import {
   planAttachments,
   planPaste,
   removeAttachment,
@@ -245,6 +255,28 @@ export function ChatApp() {
   const [store] = useState(createStateStore)
 
   const [activeId, setActiveId] = useState<string | null>(null)
+  // Visited-agent history behind the chrome's back/forward arrows: opening an
+  // agent records the visit, back/forward only move the cursor. An explicit
+  // extension of Paseo's own navigation model (no upstream visited-history
+  // stack exists); see ticket #21's parity note.
+  const [visitHistory, setVisitHistory] = useState<VisitHistory>(emptyVisitHistory)
+  /** Opening an agent records the visit and truncates any forward entries. */
+  const visit = (id: string) => {
+    setActiveId(id)
+    setVisitHistory((prev) => visitAgent(prev, id))
+  }
+  const navBack = () => {
+    const next = goBack(visitHistory)
+    if (next === visitHistory) return
+    setVisitHistory(next)
+    setActiveId(next.stack[next.index])
+  }
+  const navForward = () => {
+    const next = goForward(visitHistory)
+    if (next === visitHistory) return
+    setVisitHistory(next)
+    setActiveId(next.stack[next.index])
+  }
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState(false)
   const [draft, setDraft] = useState('')
@@ -357,7 +389,7 @@ export function ChatApp() {
     }
     const agent = mostRecentAgent(agentsOfWorkspace(agents, descriptor).filter((a) => !isArchived(a)))
     if (agent) {
-      setActiveId(agent.id)
+      visit(agent.id)
     } else {
       // Seeding means the send lands in the workspace as it is — never a new
       // worktree on top of it.
@@ -419,7 +451,7 @@ export function ChatApp() {
 
   const viewSubagent = (target: OpenSubagent) => {
     if (target.kind === 'managed') {
-      setActiveId(target.id)
+      visit(target.id)
       return
     }
     subagents.openTimeline(target.parentAgentId, target.id)
@@ -595,7 +627,7 @@ const listRef = useRef<{ id: number } | null>(null)
         ...(worktree === 'worktree' ? { git: { createWorktree: true } } : {}),
       })
       setPendingSeed({ agentId: handle.id, text, images: stagedImages })
-      setActiveId(handle.id)
+      visit(handle.id)
     } catch (err) {
       setCreateError(errorMessage(err))
       restoreDraft(text, stagedImages)
@@ -765,7 +797,7 @@ const listRef = useRef<{ id: number } | null>(null)
         keywords: STATUS_BUCKET_LABELS[statusBucket(entry)],
         checked: entry.id === activeId,
         run: () => {
-          setActiveId(entry.id)
+          visit(entry.id)
           setCreateError(null)
           setPaletteOpen(false)
         },
@@ -910,7 +942,7 @@ const listRef = useRef<{ id: number } | null>(null)
           activeAgentId={activeId}
           onSelect={openWorkspace}
           onOpenAgent={(id) => {
-            setActiveId(id)
+            visit(id)
             setCreateError(null)
           }}
           onDeleteAgent={deleteAgentRow}
@@ -925,6 +957,9 @@ const listRef = useRef<{ id: number } | null>(null)
           onArchive={archiveWorkspaceRow}
           onRename={renameWorkspaceRow}
           appStore={store}
+          navState={{ canBack: canGoBack(visitHistory), canForward: canGoForward(visitHistory) }}
+          onNavBack={navBack}
+          onNavForward={navForward}
         />
         <div style={{ width: 1, height: '100%', flexShrink: 0, backgroundColor: C.sidebarBorder }} />
       </motion.div>
@@ -949,6 +984,9 @@ const listRef = useRef<{ id: number } | null>(null)
           onRename={renameAgentRow}
           onArchive={archiveAgentRow}
           onDelete={deleteAgentRow}
+          navState={{ canBack: canGoBack(visitHistory), canForward: canGoForward(visitHistory) }}
+          onNavBack={navBack}
+          onNavForward={navForward}
         />
         {activeEntry && checkoutOn && (
           <CheckoutPanel
@@ -1086,7 +1124,11 @@ const listRef = useRef<{ id: number } | null>(null)
           cwd={activeEntry?.cwd ?? cwd}
           cwdLocked={Boolean(activeEntry)}
           cwdOptions={[process.cwd(), ...cwdOptions]}
-          onCwdChange={setCwd}
+          onCwdChange={(dir) => {
+            setCwd(dir)
+            // A fresh directory selection mid-stack leaves no phantom future.
+            setVisitHistory(truncateForward)
+          }}
           worktree={worktree}
           onWorktreeChange={setWorktree}
           statusColor={

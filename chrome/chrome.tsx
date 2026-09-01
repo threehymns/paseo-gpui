@@ -57,8 +57,8 @@ import iconArrowLeft from '../assets/icons/arrow-left.svg' with { type: 'file' }
 import iconArrowRight from '../assets/icons/arrow-right.svg' with { type: 'file' }
 import iconFolder from '../assets/icons/folder.svg' with { type: 'file' }
 import iconFile from '../assets/icons/file.svg' with { type: 'file' }
-import iconSettings from '../assets/icons/settings.svg' with { type: 'file' }
 import iconGitBranch from '../assets/icons/git-branch.svg' with { type: 'file' }
+
 import iconLaptop from '../assets/icons/laptop.svg' with { type: 'file' }
 import iconLock from '../assets/icons/lock.svg' with { type: 'file' }
 import iconList from '../assets/icons/list.svg' with { type: 'file' }
@@ -87,7 +87,6 @@ const ICONS = {
   arrowRight: realAssetPath(iconArrowRight),
   folder: realAssetPath(iconFolder),
   file: realAssetPath(iconFile),
-  settings: realAssetPath(iconSettings),
   gitBranch: realAssetPath(iconGitBranch),
   laptop: realAssetPath(iconLaptop),
   lock: realAssetPath(iconLock),
@@ -698,6 +697,9 @@ export function Sidebar({
   onArchive,
   onRename,
   appStore,
+  navState,
+  onNavBack,
+  onNavForward,
 }: {
   /** The whole workspace directory, written only by the daemon subscription. */
   workspaces: WorkspaceStore
@@ -718,6 +720,10 @@ export function Sidebar({
   onRename: (id: string, name: string) => void
   /** Persisted app state; the sidebar's view choices survive a restart. */
   appStore: AppStore
+  /** The visited-agent history's edges, driving the nav arrows' enablement. */
+  navState: { canBack: boolean; canForward: boolean }
+  onNavBack: () => void
+  onNavForward: () => void
 }) {
   const [showArchived, setShowArchived] = useAppState(appStore, showArchivedWorkspaces)
   const [showArchivedAgents, setShowArchivedAgents] = useAppState(appStore, showArchivedAgents)
@@ -760,17 +766,8 @@ export function Sidebar({
       >
         <div style={{ width: TRAFFIC_LIGHT_CLEARANCE, height: '100%', flexShrink: 0 }} />
         <IconButton icon="sidebar" size={16} testId="sidebar-collapse" onClick={onCollapse} />
-        <div
-          style={{
-            display: 'flex',
-            flexDirection: 'row',
-            alignItems: 'center',
-            gap: 2,
-            marginLeft: 6,
-          }}
-        >
-          <IconButton icon="arrowLeft" dimmed />
-          <IconButton icon="arrowRight" dimmed />
+        <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 2, marginLeft: 6 }}>
+          <NavArrows {...navState} onBack={onNavBack} onForward={onNavForward} />
         </div>
       </div>
 
@@ -879,8 +876,40 @@ export function Sidebar({
         <text style={{ fontSize: 12, color: C.tertiary, flexGrow: 1, minWidth: 0 }}>
           {daemonHost()}
         </text>
-        <IconButton icon="settings" />
       </div>
+    </div>
+  )
+}
+
+/**
+ * The chrome's back/forward arrows over the visited-agent history: enabled
+ * exactly when the stack has an entry behind/ahead, never decorative.
+ */
+export function NavArrows({
+  canBack,
+  canForward,
+  onBack,
+  onForward,
+}: {
+  canBack: boolean
+  canForward: boolean
+  onBack: () => void
+  onForward: () => void
+}) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 2 }}>
+      <IconButton
+        icon="arrowLeft"
+        testId="nav-back"
+        dimmed={!canBack}
+        onClick={canBack ? onBack : undefined}
+      />
+      <IconButton
+        icon="arrowRight"
+        testId="nav-forward"
+        dimmed={!canForward}
+        onClick={canForward ? onForward : undefined}
+      />
     </div>
   )
 }
@@ -928,6 +957,9 @@ export function Header({
   onRename,
   onArchive,
   onDelete,
+  navState,
+  onNavBack,
+  onNavForward,
 }: {
   collapsed: boolean
   onExpand: () => void
@@ -941,6 +973,10 @@ export function Header({
   onRename: (id: string, name: string) => void
   onArchive: (id: string) => void
   onDelete: (id: string) => void
+  /** The visited-agent history's edges, driving the nav arrows' enablement. */
+  navState: { canBack: boolean; canForward: boolean }
+  onNavBack: () => void
+  onNavForward: () => void
 }) {
   const [hover, setHover] = useState(false)
   const [renaming, setRenaming] = useState(false)
@@ -993,10 +1029,7 @@ export function Header({
           <div style={{ width: TRAFFIC_LIGHT_CLEARANCE - 8, height: '100%', flexShrink: 0 }} />
           <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6 }}>
             <IconButton icon="sidebar" testId="sidebar-expand" onClick={onExpand} />
-            <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 2 }}>
-              <IconButton icon="arrowLeft" dimmed />
-              <IconButton icon="arrowRight" dimmed />
-            </div>
+            <NavArrows {...navState} onBack={onNavBack} onForward={onNavForward} />
           </div>
         </>
       )}
@@ -1121,7 +1154,6 @@ export function Header({
         </Select>
       )}
       <div style={{ flexGrow: 1 }} />
-      <IconButton icon="panelRight" />
     </div>
   )
 }
