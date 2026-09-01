@@ -11,11 +11,19 @@ import { Select, SelectContent, SelectItem, SelectTrigger } from '@gpuix/react'
 import {
   DAEMON_URL,
   basename,
+  displayName,
+  isArchived,
+  relativeTime,
   relativeTimeAt,
   type AgentEntry,
   type ConnStatus,
   type WorkspaceDescriptor,
 } from '../daemon/paseo'
+import {
+  archivedAgents,
+  normalizeRename,
+  rowActionInFlight,
+} from '../agent-directory/lifecycle'
 import {
   isArchivedWorkspace,
   workspaceActivityAt,
@@ -24,7 +32,12 @@ import {
   workspaceProjectGroups,
   type WorkspaceStore,
 } from '../agent-directory/workspaces'
-import { showArchivedAgents, useAppState, type AppStore } from '../app-state'
+import {
+  showArchivedAgents,
+  showArchivedWorkspaces,
+  useAppState,
+  type AppStore,
+} from '../app-state'
 import { C, SIDEBAR_WIDTH, TITLEBAR_HEIGHT, TRAFFIC_LIGHT_CLEARANCE } from './theme'
 
 function realAssetPath(virtualPath: string): string {
@@ -284,12 +297,17 @@ function ViewSection({ label }: { label: string }) {
 function ViewPreferencesMenu({
   showArchived,
   onShowArchivedChange,
+  showArchivedAgents,
+  onShowArchivedAgentsChange,
 }: {
   showArchived: boolean
   onShowArchivedChange: (show: boolean) => void
+  showArchivedAgents: boolean
+  onShowArchivedAgentsChange: (show: boolean) => void
 }) {
   const runChoice = (choice: string) => {
     if (choice === 'show:archived') onShowArchivedChange(!showArchived)
+    if (choice === 'show:archived-agents') onShowArchivedAgentsChange(!showArchivedAgents)
   }
 
   return (
@@ -315,6 +333,9 @@ function ViewPreferencesMenu({
         <ViewSection label="Show" />
         <SelectItem value="show:archived" textValue="Archived workspaces">
           <ViewOption icon="archive" label="Archived workspaces" selected={showArchived} />
+        </SelectItem>
+        <SelectItem value="show:archived-agents" textValue="Archived agents">
+          <ViewOption icon="archive" label="Archived agents" selected={showArchivedAgents} />
         </SelectItem>
       </SelectContent>
     </Select>
@@ -529,6 +550,95 @@ function MenuAction({ label, tone, disabled }: { label: string; tone?: 'danger';
   )
 }
 
+/**
+ * One revealed archived agent: dimmed so it reads as retired, still openable,
+ * with a menu holding its remaining lifecycle action (delete).
+ */
+function ArchivedAgentRow({
+  entry,
+  active,
+  busy,
+  onOpen,
+  onDelete,
+}: {
+  entry: AgentEntry
+  /** True while this agent's conversation is the one open. */
+  active: boolean
+  /** True while any lifecycle action on this agent is in flight. */
+  busy: boolean
+  onOpen: (id: string) => void
+  onDelete: (id: string) => void
+}) {
+  const [hover, setHover] = useState(false)
+  return (
+    <div
+      testId="archived-agent-row"
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        paddingLeft: 8,
+        paddingRight: 4,
+        paddingTop: 5,
+        paddingBottom: 5,
+        borderRadius: 7,
+        cursor: 'pointer',
+        opacity: active ? 0.8 : 0.55,
+        backgroundColor: active ? C.item : '#00000000',
+        hover: { backgroundColor: C.item },
+      }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      onClick={() => onOpen(entry.id)}
+    >
+      <Icon name="archive" size={12.5} color={C.tertiary} />
+      <text
+        style={{
+          fontSize: 13,
+          lineHeight: 17,
+          color: C.tertiary,
+          whiteSpace: 'nowrap',
+          textOverflow: 'ellipsis',
+          minWidth: 0,
+          flexGrow: 1,
+        }}
+      >
+        {displayName(entry)}
+      </text>
+      {hover ? (
+        <Select value="" onValueChange={() => onDelete(entry.id)}>
+          <SelectTrigger
+            testId="archived-agent-row-menu"
+            style={(state) => ({
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: 20,
+              height: 20,
+              flexShrink: 0,
+              borderRadius: 5,
+              cursor: 'pointer',
+              backgroundColor: state.open ? C.overlayStrong : '#00000000',
+            })}
+          >
+            <Icon name="ellipsis" size={14} color={C.secondary} />
+          </SelectTrigger>
+          <SelectContent side="right" sideOffset={2} style={{ minWidth: 168 }}>
+            <SelectItem value="delete" textValue="Delete">
+              <MenuAction label="Delete" tone="danger" disabled={busy} />
+            </SelectItem>
+          </SelectContent>
+        </Select>
+      ) : (
+        <text style={{ fontSize: 12.5, color: C.ghost, flexShrink: 0 }}>
+          {relativeTime(entry)}
+        </text>
+      )}
+    </div>
+  )
+}
+
 /** One collapsible project group header: chevron, name, click toggles its rows. */
 function ProjectGroupHeader({
   name,
@@ -575,8 +685,12 @@ function ProjectGroupHeader({
 
 export function Sidebar({
   workspaces,
+  agents,
   activeWorkspaceId,
+  activeAgentId,
   onSelect,
+  onOpenAgent,
+  onDeleteAgent,
   onNewTask,
   onCollapse,
   status,
@@ -587,8 +701,14 @@ export function Sidebar({
 }: {
   /** The whole workspace directory, written only by the daemon subscription. */
   workspaces: WorkspaceStore
+  /** The whole agent directory, written only by the daemon subscription. */
+  agents: AgentEntry[]
   activeWorkspaceId: string | null
+  /** The open conversation, highlighted inside the archived reveal. */
+  activeAgentId: string | null
   onSelect: (id: string) => void
+  onOpenAgent: (id: string) => void
+  onDeleteAgent: (id: string) => void
   onNewTask: () => void
   onCollapse: () => void
   status: ConnStatus
@@ -599,10 +719,15 @@ export function Sidebar({
   /** Persisted app state; the sidebar's view choices survive a restart. */
   appStore: AppStore
 }) {
-  const [showArchived, setShowArchived] = useAppState(appStore, showArchivedAgents)
+  const [showArchived, setShowArchived] = useAppState(appStore, showArchivedWorkspaces)
+  const [showArchivedAgents, setShowArchivedAgents] = useAppState(appStore, showArchivedAgents)
   // Collapse state is view state; the store itself stays daemon-written.
   const [collapsedProjects, setCollapsedProjects] = useState<ReadonlySet<string>>(new Set())
   const groups = useMemo(() => workspaceProjectGroups(workspaces, showArchived), [workspaces, showArchived])
+  const archived = useMemo(
+    () => (showArchivedAgents ? archivedAgents(agents) : []),
+    [agents, showArchivedAgents],
+  )
   const toggleProject = (projectId: string) => {
     setCollapsedProjects((prev) => {
       const next = new Set(prev)
@@ -668,7 +793,12 @@ export function Sidebar({
         <text style={{ fontSize: 13, fontWeight: 500, color: C.secondary, flexGrow: 1, minWidth: 0 }}>
           Workspaces
         </text>
-        <ViewPreferencesMenu showArchived={showArchived} onShowArchivedChange={setShowArchived} />
+        <ViewPreferencesMenu
+          showArchived={showArchived}
+          onShowArchivedChange={setShowArchived}
+          showArchivedAgents={showArchivedAgents}
+          onShowArchivedAgentsChange={setShowArchivedAgents}
+        />
       </div>
 
       <div
@@ -711,6 +841,21 @@ export function Sidebar({
             <text style={{ fontSize: 12.5, lineHeight: 17, color: C.tertiary }}>
               No workspaces yet. Start one from the composer.
             </text>
+          </div>
+        )}
+        {archived.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', paddingBottom: 10 }}>
+            <ProjectGroupHeader name="Archived" collapsed={false} onToggle={() => {}} />
+            {archived.map((entry) => (
+              <ArchivedAgentRow
+                key={entry.id}
+                entry={entry}
+                busy={rowActionInFlight(busyRows, entry.id)}
+                active={entry.id === activeAgentId}
+                onOpen={onOpenAgent}
+                onDelete={onDeleteAgent}
+              />
+            ))}
           </div>
         )}
       </div>
@@ -779,6 +924,10 @@ export function Header({
   entry,
   stopping,
   onStop,
+  busy,
+  onRename,
+  onArchive,
+  onDelete,
 }: {
   collapsed: boolean
   onExpand: () => void
@@ -787,7 +936,42 @@ export function Header({
   /** True while a cancel request is in flight; the control reflects it until the daemon confirms. */
   stopping?: boolean
   onStop?: () => void
+  /** True while any lifecycle action on this agent is in flight. */
+  busy: boolean
+  onRename: (id: string, name: string) => void
+  onArchive: (id: string) => void
+  onDelete: (id: string) => void
 }) {
+  const [hover, setHover] = useState(false)
+  const [renaming, setRenaming] = useState(false)
+  const [nameDraft, setNameDraft] = useState('')
+  const archived = entry ? isArchived(entry) : false
+
+  const startRename = () => {
+    if (!entry) return
+    setNameDraft(displayName(entry))
+    setRenaming(true)
+  }
+
+  /**
+   * Empty or unchanged drafts cancel; anything else goes to the daemon. Runs at
+   * most once per edit — blur after commit or cancel is ignored.
+   */
+  const commitRename = () => {
+    if (!renaming || !entry) return
+    setRenaming(false)
+    const next = normalizeRename(nameDraft, displayName(entry))
+    if (busy || next == null) return
+    onRename(entry.id, next)
+  }
+
+  const runAction = (action: RowActionVerb) => {
+    if (!entry || busy) return
+    if (action === 'rename') startRename()
+    else if (action === 'archive') onArchive(entry.id)
+    else if (action === 'delete') onDelete(entry.id)
+  }
+
   return (
     <div
       style={{
@@ -801,6 +985,8 @@ export function Header({
         paddingRight: 14,
         userSelect: 'none',
       }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
     >
       {collapsed && (
         <>
@@ -814,19 +1000,47 @@ export function Header({
           </div>
         </>
       )}
-      <text
-        style={{
-          fontSize: 13,
-          fontWeight: 500,
-          color: C.text,
-          whiteSpace: 'nowrap',
-          textOverflow: 'ellipsis',
-          minWidth: 0,
-          flexShrink: 1,
-        }}
-      >
-        {title}
-      </text>
+      {renaming ? (
+        <input
+          value={nameDraft}
+          placeholder="Agent name"
+          autoFocus
+          testId="agent-rename"
+          style={{
+            flexGrow: 0,
+            flexShrink: 1,
+            minWidth: 120,
+            maxWidth: 320,
+            height: 22,
+            fontSize: 13,
+            fontWeight: 500,
+            color: C.text,
+            backgroundColor: '#00000000',
+            borderWidth: 0,
+            padding: 0,
+          }}
+          onChange={(event) => setNameDraft(event.value ?? '')}
+          onSubmit={commitRename}
+          onBlur={commitRename}
+          onKeyDown={(event) => {
+            if (event.key === 'escape') setRenaming(false)
+          }}
+        />
+      ) : (
+        <text
+          style={{
+            fontSize: 13,
+            fontWeight: 500,
+            color: C.text,
+            whiteSpace: 'nowrap',
+            textOverflow: 'ellipsis',
+            minWidth: 0,
+            flexShrink: 1,
+          }}
+        >
+          {title}
+        </text>
+      )}
       {entry?.requiresAttention && entry.attentionReason === 'permission' && (
         <div
           style={{
@@ -872,6 +1086,39 @@ export function Header({
             {stopping ? <StatusDot color="#FFFFFF" size={7} /> : <Icon name="square" size={9} color="#FFFFFF" />}
           </div>
         </>
+      )}
+      {entry && hover && !renaming && (
+        <Select value="" onValueChange={(action) => runAction(action as RowActionVerb)}>
+          <SelectTrigger
+            testId="agent-header-menu"
+            style={(state) => ({
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: 20,
+              height: 20,
+              flexShrink: 0,
+              borderRadius: 5,
+              cursor: 'pointer',
+              backgroundColor: state.open ? C.overlayStrong : '#00000000',
+            })}
+          >
+            <Icon name="ellipsis" size={14} color={C.secondary} />
+          </SelectTrigger>
+          <SelectContent side="bottom" align="start" sideOffset={2} style={{ minWidth: 168 }}>
+            <SelectItem value="rename" textValue="Rename">
+              <MenuAction label="Rename" disabled={busy} />
+            </SelectItem>
+            {!archived && (
+              <SelectItem value="archive" textValue="Archive">
+                <MenuAction label="Archive" disabled={busy} />
+              </SelectItem>
+            )}
+            <SelectItem value="delete" textValue="Delete">
+              <MenuAction label="Delete" tone="danger" disabled={busy} />
+            </SelectItem>
+          </SelectContent>
+        </Select>
       )}
       <div style={{ flexGrow: 1 }} />
       <IconButton icon="panelRight" />

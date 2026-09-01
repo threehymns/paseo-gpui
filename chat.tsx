@@ -57,6 +57,7 @@ import {
   type IncomingImage,
   type PastePayload,
 } from './composer/attachments'
+import { agentLifecycle, rowActionInFlight } from './agent-directory/lifecycle'
 import { C, CONTENT_MAX_WIDTH, SIDEBAR_WIDTH } from './chrome/theme'
 import { Sidebar, Header, CenterMessage, agentStatusColor, daemonHost, type RowActionRef, type RowActionVerb } from './chrome/chrome'
 import { Transcript } from './conversation/transcript'
@@ -101,7 +102,7 @@ import {
   SubagentViewerBar,
   type OpenSubagent,
 } from './tracks/tracks-panel'
-import { createAppStore, defaultStatePath, fileStateStorage } from './app-state'
+import { createAppStore, defaultStatePath, fileStateStorage, showArchivedAgents, useAppState } from './app-state'
 
 // ---- daemon hooks ----------------------------------------------------------
 
@@ -332,6 +333,14 @@ export function ChatApp() {
   const archiveWorkspaceRow = (id: string) => runRowAction('archive', id, () => daemon.archiveWorkspace(id))
   const renameWorkspaceRow = (id: string, name: string) =>
     runRowAction('rename', id, () => daemon.setWorkspaceTitle(id, name))
+
+  // Agent lifecycle (archive, delete, rename): thin wrappers over the daemon
+  // client whose promises drive the in-flight disabling; the directory itself
+  // is only ever written by the subscription.
+  const lifecycle = useMemo(() => agentLifecycle(daemon), [daemon])
+  const archiveAgentRow = (id: string) => runRowAction('archive', id, () => lifecycle.archive(id))
+  const deleteAgentRow = (id: string) => runRowAction('delete', id, () => lifecycle.remove(id))
+  const renameAgentRow = (id: string, name: string) => runRowAction('rename', id, () => lifecycle.rename(id, name))
 
   /**
    * Opening a workspace opens its conversation: its most recently active agent
@@ -742,10 +751,13 @@ const listRef = useRef<{ id: number } | null>(null)
     ],
     [],
   )
+  // Persisted view choice: archived agents surface in the palette only when
+  // the sidebar's reveal toggle is on (same key the sidebar writes).
+  const [showArchived] = useAppState(store, showArchivedAgents)
   useContributeActions(
     registry,
     () =>
-      visibleAgents(agents, false).map((entry) => ({
+      visibleAgents(agents, showArchived).map((entry) => ({
         id: `agent.${entry.id}`,
         title: displayName(entry),
         section: 'agents' as const,
@@ -758,7 +770,7 @@ const listRef = useRef<{ id: number } | null>(null)
           setPaletteOpen(false)
         },
       })),
-    [agents, activeId],
+    [agents, activeId, showArchived],
   )
   useContributeActions(
     registry,
@@ -893,8 +905,15 @@ const listRef = useRef<{ id: number } | null>(null)
       >
         <Sidebar
           workspaces={workspaces}
+          agents={agents}
           activeWorkspaceId={selectedWorkspaceId}
+          activeAgentId={activeId}
           onSelect={openWorkspace}
+          onOpenAgent={(id) => {
+            setActiveId(id)
+            setCreateError(null)
+          }}
+          onDeleteAgent={deleteAgentRow}
           onNewTask={() => {
             setActiveId(null)
             setSelectedWorkspaceId(null)
@@ -926,6 +945,10 @@ const listRef = useRef<{ id: number } | null>(null)
           entry={activeEntry}
           stopping={stopping}
           onStop={() => void stopAgent()}
+          busy={activeId != null && rowActionInFlight(busyRows, activeId)}
+          onRename={renameAgentRow}
+          onArchive={archiveAgentRow}
+          onDelete={deleteAgentRow}
         />
         {activeEntry && checkoutOn && (
           <CheckoutPanel

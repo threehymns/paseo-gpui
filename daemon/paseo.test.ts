@@ -833,9 +833,11 @@ describe('activeAgentGone', () => {
     expect(activeAgentGone('live', [entry({ id: 'other' })], { connected: true, wasSeen: true })).toBe(true)
   })
 
-  test('a seen agent that was archived can no longer host the conversation', () => {
+  test('a seen agent that was archived still hosts the conversation', () => {
+    // Archiving hides the agent from the default directory, but the reveal
+    // toggle opens it again — only removal ends a selection.
     const archived = entry({ id: 'live', archivedAt: '2026-08-24T09:00:00Z' })
-    expect(activeAgentGone('live', [archived], { connected: true, wasSeen: true })).toBe(true)
+    expect(activeAgentGone('live', [archived], { connected: true, wasSeen: true })).toBe(false)
   })
 
   test('a seen live agent stays hosted', () => {
