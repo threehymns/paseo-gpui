@@ -924,6 +924,8 @@ const listRef = useRef<{ id: number } | null>(null)
           onExpand={() => setCollapsed(false)}
           title={title}
           entry={activeEntry}
+          stopping={stopping}
+          onStop={() => void stopAgent()}
         />
         {activeEntry && checkoutOn && (
           <CheckoutPanel
