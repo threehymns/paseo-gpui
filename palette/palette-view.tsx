@@ -10,8 +10,8 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { clampSelection, flattenGroups, moveSelection, searchActions } from './palette'
 import type { ActionRegistry, RegisteredAction } from './actions'
-import { Icon } from './chrome'
-import { C } from './theme'
+import { Icon } from '../chrome/chrome'
+import { C } from '../chrome/theme'
 
 /**
  * Keeps a batch of contributed actions in the registry for as long as `deps`

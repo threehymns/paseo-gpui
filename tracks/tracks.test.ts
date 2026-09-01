@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { applyTimelineItem, buildTurns, type TimelineEntry, type TimelineItem } from './paseo'
+import { applyTimelineItem, buildTurns, type TimelineEntry, type TimelineItem } from '../daemon/paseo'
 import { changesTrack, tasksTrack } from './tracks'
 
 const timed = (item: TimelineItem, at?: number): TimelineEntry => ({ item, at })

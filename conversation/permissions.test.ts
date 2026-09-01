@@ -10,7 +10,7 @@ import {
   type PermissionsEvent,
   type PermissionsState,
 } from './permissions'
-import type { PermissionRequest } from './paseo'
+import type { PermissionRequest } from '../daemon/paseo'
 
 const agentA = 'agent-aaa'
 const agentB = 'agent-bbb'

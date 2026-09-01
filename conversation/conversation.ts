@@ -11,7 +11,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PaseoAgentSendOptions, PaseoAgentTimelineRefetchOptions, PaseoClient } from '@getpaseo/client'
-import { newAttachmentId, toSendImages, type ImageAttachment } from './attachments'
+import { newAttachmentId, toSendImages, type ImageAttachment } from '../composer/attachments'
 import {
   applyTimelineItem,
   applyTurnCanceled,
@@ -23,7 +23,7 @@ import {
   type TimelineEntry,
   type TimelineItem,
   type Turn,
-} from './paseo'
+} from '../daemon/paseo'
 
 export type ConversationStatus = 'loading' | 'ready' | 'error'
 

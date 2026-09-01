@@ -6,9 +6,9 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useGpuix } from '@gpuix/react'
 import type { EventPayload } from '@gpuix/native'
-import { Icon, IconButton, StatusDot, type IconName } from './chrome'
-import { SafeMdxContent } from './mdx'
-import { resolveWorkspaceFile } from './open-file'
+import { Icon, IconButton, StatusDot, type IconName } from '../chrome/chrome'
+import { SafeMdxContent } from '../chrome/mdx'
+import { resolveWorkspaceFile } from '../chrome/open-file'
 import {
   compactionLabel,
   completionTimestamp,
@@ -29,9 +29,9 @@ import {
   type ToolDetailPart,
   type ToolName,
   type Turn,
-} from './paseo'
+} from '../daemon/paseo'
 import { permissionActions, permissionPlanMarkdown, type PermissionEntry } from './permissions'
-import { C, CHAT_THEME, CONTENT_MAX_WIDTH } from './theme'
+import { C, CHAT_THEME, CONTENT_MAX_WIDTH } from '../chrome/theme'
 
 const TOOL_ICONS: Record<ToolName, IconName> = {
   bash: 'wrench',

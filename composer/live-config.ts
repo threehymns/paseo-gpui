@@ -18,7 +18,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { DaemonClient } from '@getpaseo/client/internal/daemon-client'
-import { errorMessage, splitModelValue, type AgentEntry } from './paseo'
+import { errorMessage, splitModelValue, type AgentEntry } from '../daemon/paseo'
 
 type SetAgentMode = DaemonClient['setAgentMode']
 /** A provider notice returned by a config setter. */

@@ -11,9 +11,9 @@ import {
   SelectTrigger,
   type StyleDesc,
 } from '@gpuix/react'
-import { Icon, type IconName } from './chrome'
-import { modelChoices, type ProviderEntry, type ProviderFeatureToggle, type ProviderMode, type ProviderModel } from './paseo'
-import { C } from './theme'
+import { Icon, type IconName } from '../chrome/chrome'
+import { modelChoices, type ProviderEntry, type ProviderFeatureToggle, type ProviderMode, type ProviderModel } from '../daemon/paseo'
+import { C } from '../chrome/theme'
 
 const MENU = {
   minWidth: 220,

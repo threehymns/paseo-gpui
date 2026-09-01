@@ -7,12 +7,12 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import React, { useMemo, useRef, useState } from 'react'
-import { Icon, IconButton, StatusDot, type IconName } from './chrome'
+import { Icon, IconButton, StatusDot, type IconName } from '../chrome/chrome'
 import { OptionPicker } from './pickers'
-import { basename } from './paseo'
+import { basename } from '../daemon/paseo'
 import { useMentionCompletions, type MentionEntry, type MentionSource } from './mentions'
-import type { Turn } from './paseo'
-import { changesTrack, tasksTrack } from './tracks'
+import type { Turn } from '../daemon/paseo'
+import { changesTrack, tasksTrack } from '../tracks/tracks'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@gpuix/react'
 import type { ImageAttachment, PastePayload } from './attachments'
 import type { ProviderNotice } from './live-config'
@@ -25,7 +25,7 @@ import {
   type SlashCommand,
 } from './slash-commands'
 import { type ContextMeter, type MeterTone } from './usage'
-import { C, CHAT_THEME, CONTENT_MAX_WIDTH } from './theme'
+import { C, CHAT_THEME, CONTENT_MAX_WIDTH } from '../chrome/theme'
 
 const NOTICE_COLORS: Record<ProviderNotice['type'], string> = {
   info: C.secondary,

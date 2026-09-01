@@ -11,8 +11,8 @@
  */
 
 import React, { useEffect, useState } from 'react'
-import { Icon, StatusDot, type RowActionRef } from './chrome'
-import { Pill, PillAction } from './composer'
+import { Icon, StatusDot, type RowActionRef } from '../chrome/chrome'
+import { Pill, PillAction } from '../composer/composer'
 import {
   subagentLabel,
   subagentRowColor,
@@ -20,7 +20,7 @@ import {
   trackLabel,
   type SubagentRow,
 } from './subagents'
-import { C } from './theme'
+import { C } from '../chrome/theme'
 
 export type OpenSubagent = {
   kind: SubagentRow['kind']

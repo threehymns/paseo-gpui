@@ -14,7 +14,7 @@ import {
   workspaceProjectGroups,
   type WorkspaceStore,
 } from './workspaces'
-import { relativeTimeAt, sortAgents, type AgentEntry, type EmptyProjectDescriptor, type WorkspaceDescriptor } from './paseo'
+import { relativeTimeAt, sortAgents, type AgentEntry, type EmptyProjectDescriptor, type WorkspaceDescriptor } from '../daemon/paseo'
 
 function workspace(over: Partial<WorkspaceDescriptor>): WorkspaceDescriptor {
   return {

@@ -12,7 +12,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { compareMatchScores, scoreTextFields } from '@getpaseo/protocol/search/text-match'
-import { errorMessage, splitModelValue } from './paseo'
+import { errorMessage, splitModelValue } from '../daemon/paseo'
 import type { DraftConfig } from './draft-config'
 
 export type SlashCommandKind = 'command' | 'skill'

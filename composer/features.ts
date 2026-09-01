@@ -11,7 +11,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { DaemonClient } from '@getpaseo/client/internal/daemon-client'
-import type { AgentFeature, ProviderFeatureToggle } from './paseo'
+import type { AgentFeature, ProviderFeatureToggle } from '../daemon/paseo'
 
 /** On/Off toggles only; select features are out of scope for the chip. */
 export function toggleFeatures(features: AgentFeature[] | undefined | null): ProviderFeatureToggle[] {

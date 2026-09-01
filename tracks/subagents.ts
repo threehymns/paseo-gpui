@@ -22,8 +22,8 @@ import type {
   SessionOutboundMessage,
 } from '@getpaseo/protocol/messages'
 import { getParentAgentIdFromLabels } from '@getpaseo/protocol/agent-labels'
-import { buildTurns, type AgentEntry, type TimelineItem, type Turn } from './paseo'
-import { C } from './theme'
+import { buildTurns, type AgentEntry, type TimelineItem, type Turn } from '../daemon/paseo'
+import { C } from '../chrome/theme'
 
 export type { ProviderSubagentDescriptorPayload }
 

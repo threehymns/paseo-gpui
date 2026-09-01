@@ -13,7 +13,7 @@ import {
   type EmptyProjectDescriptor,
   type WorkspaceDescriptor,
   type WorkspaceUpdate,
-} from './paseo'
+} from '../daemon/paseo'
 
 // ---- store -----------------------------------------------------------------
 

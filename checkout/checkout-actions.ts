@@ -9,7 +9,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { errorMessage } from './paseo'
+import { errorMessage } from '../daemon/paseo'
 import { invalidate, ALL_INVALIDATION_TOPICS } from './invalidation'
 
 export interface CheckoutAction {

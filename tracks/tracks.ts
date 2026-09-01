@@ -9,7 +9,7 @@
  * to show — a hidden pill, never a dead one.
  */
 
-import { diffStats, type DiffStats, type Turn } from './paseo'
+import { diffStats, type DiffStats, type Turn } from '../daemon/paseo'
 
 /** Summary of the latest todo snapshot on the timeline. */
 export interface TasksTrack {

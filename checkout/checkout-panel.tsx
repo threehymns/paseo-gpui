@@ -8,10 +8,10 @@
  */
 
 import React from 'react'
-import { Icon, IconButton, StatusDot } from './chrome'
+import { Icon, IconButton, StatusDot } from '../chrome/chrome'
 import { branchLabel, canRefresh, formatAheadBehind, type CheckoutEntry, type RepoStatus } from './checkout'
 import type { RepoActionQueue } from './checkout-actions'
-import { C } from './theme'
+import { C } from '../chrome/theme'
 
 export function CheckoutPanel({
   entry,
