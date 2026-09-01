@@ -82,6 +82,7 @@ export function memoryStorage(): StateStorage {
 
 export function createAppStore(storage: StateStorage): AppStore {
   const values: Record<string, unknown> = { ...storage.readAll() }
+  adoptLegacyKeys(values, storage)
   const listeners = new Set<() => void>()
 
   return {
@@ -123,9 +124,14 @@ export const directoryGrouping: StateKey<(typeof GROUP_MODES)[number]> = {
   validate: oneOf(GROUP_MODES),
 }
 
-/** Whether archived workspaces stay revealed in the sidebar. */
+/**
+ * Whether archived workspaces stay revealed in the sidebar. Lives on its own
+ * key: `directory.showArchived` used to be the archived-AGENTS toggle, and
+ * reusing it here let existing installs' stored value silently feed this
+ * toggle instead (see keyMigrations).
+ */
 export const showArchivedWorkspaces: StateKey<boolean> = {
-  name: 'directory.showArchived',
+  name: 'directory.showArchivedWorkspaces',
   fallback: false,
   validate: (raw) => (typeof raw === 'boolean' ? raw : undefined),
 }
@@ -135,6 +141,56 @@ export const showArchivedAgents: StateKey<boolean> = {
   name: 'directory.showArchivedAgents',
   fallback: false,
   validate: (raw) => (typeof raw === 'boolean' ? raw : undefined),
+}
+
+// ---- storage-key migrations -------------------------------------------------
+//
+// One-time renames, applied when a store is created and persisted immediately,
+// so existing installs keep their saved preference instead of it silently
+// feeding a different toggle.
+
+interface KeyMigration {
+  from: string
+  to: string
+  validate: (raw: unknown) => unknown
+}
+
+function keyMigrations(): KeyMigration[] {
+  return [
+    {
+      // `directory.showArchived` was the archived-AGENTS reveal toggle before
+      // the archived-workspaces toggle needed its own key; the branch had
+      // reassigned the old key to workspaces, which let existing installs'
+      // stored agents preference silently drive the wrong toggle. The
+      // migration adopts the stored boolean into the agents key and retires
+      // the legacy key, so both toggles start from their own truth.
+      from: 'directory.showArchived',
+      to: showArchivedAgents.name,
+      validate: (raw) => (typeof raw === 'boolean' ? raw : undefined),
+    },
+  ]
+}
+
+/** Applies every migration once; a first run has nothing to adopt. */
+function adoptLegacyKeys(values: Record<string, unknown>, storage: StateStorage): void {
+  let changed = false
+  for (const migration of keyMigrations()) {
+    // Skip when the target already holds a current-shape value: a later
+    // install's own choice must never be overwritten by the legacy key.
+    if (migration.validate(values[migration.to]) !== undefined) continue
+    const adopted = migration.validate(values[migration.from])
+    if (adopted === undefined) continue
+    values[migration.to] = adopted
+    delete values[migration.from]
+    changed = true
+  }
+  if (!changed) return
+  try {
+    storage.writeAll({ ...values })
+  } catch {
+    // The in-memory adoption still holds for this session; the migration
+    // simply retries on the next launch.
+  }
 }
 
 // ---- React adapter ----------------------------------------------------------

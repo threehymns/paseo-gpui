@@ -737,6 +737,14 @@ describe('agent directory', () => {
     expect(displayName(entry({ title: '   ' }))).toBe('storefront')
   })
 
+  test('a user-set rename lands as title, so displayName shows it', () => {
+    // The SDK has no separate name field: updateAgent({ name }) is stored as
+    // the agent's title daemon-side, arriving here via the subscription.
+    expect(displayName(entry({ title: 'Hand-set name', cwd: '/home/me/dev/storefront' }))).toBe(
+      'Hand-set name',
+    )
+  })
+
   test('isArchived reads the daemon archive timestamp', () => {
     expect(isArchived(entry({}))).toBe(false)
     expect(isArchived(entry({ archivedAt: '2026-08-24T09:00:00Z' }))).toBe(true)

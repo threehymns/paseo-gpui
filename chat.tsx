@@ -770,6 +770,8 @@ const listRef = useRef<{ id: number } | null>(null)
         keywords: 'compose new agent',
         run: () => {
           setActiveId(null)
+          // Same rule as the sidebar's New Task: no phantom future survives.
+          setVisitHistory(truncateForward)
           setCreateError(null)
           setPaletteOpen(false)
         },
@@ -948,6 +950,9 @@ const listRef = useRef<{ id: number } | null>(null)
           onDeleteAgent={deleteAgentRow}
           onNewTask={() => {
             setActiveId(null)
+            // Starting a new task is a fresh edge, not a forward jump: drop any
+            // phantom future the visited stack was still holding.
+            setVisitHistory(truncateForward)
             setSelectedWorkspaceId(null)
             setCreateError(null)
           }}

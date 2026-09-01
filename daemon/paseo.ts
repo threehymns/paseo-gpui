@@ -702,6 +702,12 @@ export function basename(p: string): string {
   return parts[parts.length - 1] || p
 }
 
+/**
+ * Row label for an agent entry. The daemon has no separate name field: a
+ * user rename sent as `updateAgent({ name })` is stored as the agent's
+ * `title` server-side (updateAgentCommand maps name -> title), so preferring
+ * title over the cwd basename already shows the user-set name.
+ */
 export function displayName(entry: AgentEntry): string {
   const title = entry.title?.trim()
   if (title) return title
