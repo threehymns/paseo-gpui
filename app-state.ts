@@ -123,9 +123,16 @@ export const directoryGrouping: StateKey<(typeof GROUP_MODES)[number]> = {
   validate: oneOf(GROUP_MODES),
 }
 
-/** Whether archived agents stay revealed in the directory. */
-export const showArchivedAgents: StateKey<boolean> = {
+/** Whether archived workspaces stay revealed in the sidebar. */
+export const showArchivedWorkspaces: StateKey<boolean> = {
   name: 'directory.showArchived',
+  fallback: false,
+  validate: (raw) => (typeof raw === 'boolean' ? raw : undefined),
+}
+
+/** Whether archived agents stay revealed in the sidebar. */
+export const showArchivedAgents: StateKey<boolean> = {
+  name: 'directory.showArchivedAgents',
   fallback: false,
   validate: (raw) => (typeof raw === 'boolean' ? raw : undefined),
 }
