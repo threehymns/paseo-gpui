@@ -777,11 +777,16 @@ export function Header({
   onExpand,
   title,
   entry,
+  stopping,
+  onStop,
 }: {
   collapsed: boolean
   onExpand: () => void
   title: string
   entry: AgentEntry | null
+  /** True while a cancel request is in flight; the control reflects it until the daemon confirms. */
+  stopping?: boolean
+  onStop?: () => void
 }) {
   return (
     <div
@@ -842,9 +847,31 @@ export function Header({
         </div>
       )}
       {entry?.status === 'running' && !entry.requiresAttention && (
-        <text style={{ fontSize: 12, fontWeight: 500, color: C.running, flexShrink: 0 }}>
-          Working…
-        </text>
+        <>
+          <text style={{ fontSize: 12, fontWeight: 500, color: C.running, flexShrink: 0 }}>
+            Working…
+          </text>
+          <div
+            testId="header-stop"
+            title="Stop agent"
+            onClick={stopping ? undefined : onStop}
+            style={{
+              width: 20,
+              height: 20,
+              borderRadius: 10,
+              flexShrink: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: stopping ? undefined : 'pointer',
+              opacity: stopping ? 0.5 : 1,
+              backgroundColor: C.danger,
+              hover: stopping ? undefined : { opacity: 0.85 },
+            }}
+          >
+            {stopping ? <StatusDot color="#FFFFFF" size={7} /> : <Icon name="square" size={9} color="#FFFFFF" />}
+          </div>
+        </>
       )}
       <div style={{ flexGrow: 1 }} />
       <IconButton icon="panelRight" />
