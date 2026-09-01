@@ -6,8 +6,8 @@ import {
   type ConversationEvent,
   type ConversationState,
 } from './conversation'
-import type { TimelineEntry, TimelineItem } from './paseo'
-import type { ImageAttachment } from './attachments'
+import type { TimelineEntry, TimelineItem } from '../daemon/paseo'
+import type { ImageAttachment } from '../composer/attachments'
 
 const user = (text: string): TimelineItem => ({ type: 'user_message', text })
 const assistant = (text: string, messageId?: string): TimelineItem =>

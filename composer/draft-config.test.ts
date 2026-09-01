@@ -7,7 +7,7 @@ import {
   reduceDraftConfig,
   type DraftConfig,
 } from './draft-config'
-import type { ProviderEntry, ProviderFeature } from './paseo'
+import type { ProviderEntry, ProviderFeature } from '../daemon/paseo'
 
 const featureCatalog: ProviderFeature[] = [
   { type: 'toggle', id: 'memory', label: 'Memory', value: true },

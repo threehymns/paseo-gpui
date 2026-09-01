@@ -22,7 +22,7 @@ import {
   type ProviderFeature,
   type ProviderMode,
   type ProviderModel,
-} from './paseo'
+} from '../daemon/paseo'
 
 export interface DraftConfig {
   modelValue: string

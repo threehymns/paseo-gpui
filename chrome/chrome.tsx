@@ -15,7 +15,7 @@ import {
   type AgentEntry,
   type ConnStatus,
   type WorkspaceDescriptor,
-} from './paseo'
+} from '../daemon/paseo'
 import {
   isArchivedWorkspace,
   workspaceActivityAt,
@@ -23,8 +23,8 @@ import {
   workspaceDirectory,
   workspaceProjectGroups,
   type WorkspaceStore,
-} from './workspaces'
-import { showArchivedAgents, useAppState, type AppStore } from './app-state'
+} from '../agent-directory/workspaces'
+import { showArchivedAgents, useAppState, type AppStore } from '../app-state'
 import { C, SIDEBAR_WIDTH, TITLEBAR_HEIGHT, TRAFFIC_LIGHT_CLEARANCE } from './theme'
 
 function realAssetPath(virtualPath: string): string {
@@ -36,34 +36,34 @@ function realAssetPath(virtualPath: string): string {
   return dest
 }
 
-import iconCompose from './assets/icons/compose.svg' with { type: 'file' }
-import iconSearch from './assets/icons/search.svg' with { type: 'file' }
-import iconSidebar from './assets/icons/panel-left.svg' with { type: 'file' }
-import iconPanelRight from './assets/icons/panel-right.svg' with { type: 'file' }
-import iconArrowLeft from './assets/icons/arrow-left.svg' with { type: 'file' }
-import iconArrowRight from './assets/icons/arrow-right.svg' with { type: 'file' }
-import iconFolder from './assets/icons/folder.svg' with { type: 'file' }
-import iconFile from './assets/icons/file.svg' with { type: 'file' }
-import iconSettings from './assets/icons/settings.svg' with { type: 'file' }
-import iconGitBranch from './assets/icons/git-branch.svg' with { type: 'file' }
-import iconLaptop from './assets/icons/laptop.svg' with { type: 'file' }
-import iconLock from './assets/icons/lock.svg' with { type: 'file' }
-import iconList from './assets/icons/list.svg' with { type: 'file' }
-import iconZap from './assets/icons/zap.svg' with { type: 'file' }
-import iconPencil from './assets/icons/pencil.svg' with { type: 'file' }
-import iconChevronDown from './assets/icons/chevron-down.svg' with { type: 'file' }
-import iconEllipsis from './assets/icons/ellipsis.svg' with { type: 'file' }
-import iconArchive from './assets/icons/archive.svg' with { type: 'file' }
-import iconListFilter from './assets/icons/list-filter.svg' with { type: 'file' }
-import iconSparkle from './assets/icons/sparkle.svg' with { type: 'file' }
-import iconWrench from './assets/icons/wrench.svg' with { type: 'file' }
-import iconSend from './assets/icons/arrow-up.svg' with { type: 'file' }
-import iconCheck from './assets/icons/check.svg' with { type: 'file' }
-import iconScissors from './assets/icons/scissors.svg' with { type: 'file' }
-import iconSquare from './assets/icons/square.svg' with { type: 'file' }
-import iconImage from './assets/icons/image.svg' with { type: 'file' }
-import iconX from './assets/icons/x.svg' with { type: 'file' }
-import iconRotateCcw from './assets/icons/rotate-ccw.svg' with { type: 'file' }
+import iconCompose from '../assets/icons/compose.svg' with { type: 'file' }
+import iconSearch from '../assets/icons/search.svg' with { type: 'file' }
+import iconSidebar from '../assets/icons/panel-left.svg' with { type: 'file' }
+import iconPanelRight from '../assets/icons/panel-right.svg' with { type: 'file' }
+import iconArrowLeft from '../assets/icons/arrow-left.svg' with { type: 'file' }
+import iconArrowRight from '../assets/icons/arrow-right.svg' with { type: 'file' }
+import iconFolder from '../assets/icons/folder.svg' with { type: 'file' }
+import iconFile from '../assets/icons/file.svg' with { type: 'file' }
+import iconSettings from '../assets/icons/settings.svg' with { type: 'file' }
+import iconGitBranch from '../assets/icons/git-branch.svg' with { type: 'file' }
+import iconLaptop from '../assets/icons/laptop.svg' with { type: 'file' }
+import iconLock from '../assets/icons/lock.svg' with { type: 'file' }
+import iconList from '../assets/icons/list.svg' with { type: 'file' }
+import iconZap from '../assets/icons/zap.svg' with { type: 'file' }
+import iconPencil from '../assets/icons/pencil.svg' with { type: 'file' }
+import iconChevronDown from '../assets/icons/chevron-down.svg' with { type: 'file' }
+import iconEllipsis from '../assets/icons/ellipsis.svg' with { type: 'file' }
+import iconArchive from '../assets/icons/archive.svg' with { type: 'file' }
+import iconListFilter from '../assets/icons/list-filter.svg' with { type: 'file' }
+import iconSparkle from '../assets/icons/sparkle.svg' with { type: 'file' }
+import iconWrench from '../assets/icons/wrench.svg' with { type: 'file' }
+import iconSend from '../assets/icons/arrow-up.svg' with { type: 'file' }
+import iconCheck from '../assets/icons/check.svg' with { type: 'file' }
+import iconScissors from '../assets/icons/scissors.svg' with { type: 'file' }
+import iconSquare from '../assets/icons/square.svg' with { type: 'file' }
+import iconImage from '../assets/icons/image.svg' with { type: 'file' }
+import iconX from '../assets/icons/x.svg' with { type: 'file' }
+import iconRotateCcw from '../assets/icons/rotate-ccw.svg' with { type: 'file' }
 
 const ICONS = {
   compose: realAssetPath(iconCompose),

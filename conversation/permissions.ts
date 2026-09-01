@@ -13,7 +13,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { PaseoClient } from '@getpaseo/client'
 import type { DaemonClient } from '@getpaseo/client/internal/daemon-client'
-import type { PermissionRequest, PermissionResponse } from './paseo'
+import type { PermissionRequest, PermissionResponse } from '../daemon/paseo'
 
 export interface PermissionEntry {
   agentId: string

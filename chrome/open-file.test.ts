@@ -122,9 +122,9 @@ describe('workspace file resolution', () => {
   test('the default existence check probes the real filesystem', () => {
     // A file that certainly exists next to this test, resolved against this
     // repo root; and one that certainly does not.
-    expect(resolveWorkspaceFile(import.meta.dir, 'package.json')).toMatchObject({
+    expect(resolveWorkspaceFile(import.meta.dir, 'open-file.ts')).toMatchObject({
       kind: 'file',
-      absolutePath: `${import.meta.dir}/package.json`,
+      absolutePath: `${import.meta.dir}/open-file.ts`,
     })
     expect(resolveWorkspaceFile(import.meta.dir, 'no/such/file.zzz')).toEqual({ kind: 'plain' })
   })

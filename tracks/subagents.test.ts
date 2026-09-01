@@ -20,7 +20,7 @@ import {
   type ProviderSubagentDescriptorPayload,
   type SubagentTimeline,
 } from './subagents'
-import type { AgentEntry, TimelineItem } from './paseo'
+import type { AgentEntry, TimelineItem } from '../daemon/paseo'
 
 // ---- fixtures ----------------------------------------------------------------
 

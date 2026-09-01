@@ -36,7 +36,7 @@ import {
   type ConnStatus,
   type ProviderEntry,
   type WorkspaceDescriptor,
-} from './paseo'
+} from './daemon/paseo'
 import {
   agentsOfWorkspace,
   applyWorkspaceUpdate,
@@ -46,7 +46,7 @@ import {
   workspaceDirectoryChoices,
   workspaceDirectory,
   type WorkspaceStore,
-} from './workspaces'
+} from './agent-directory/workspaces'
 import {
   planAttachments,
   planPaste,
@@ -56,36 +56,36 @@ import {
   type ImageAttachment,
   type IncomingImage,
   type PastePayload,
-} from './attachments'
-import { C, CONTENT_MAX_WIDTH, SIDEBAR_WIDTH } from './theme'
-import { Sidebar, Header, CenterMessage, agentStatusColor, daemonHost, type RowActionRef, type RowActionVerb } from './chrome'
-import { Transcript } from './transcript'
-import { FeatureToggles, ModelPicker, OptionPicker, modeOptions, thinkingOptions } from './pickers'
-import { Composer, ConfigNotice, FooterBar, TracksRow } from './composer'
-import { useAgentConversation } from './conversation'
-import { toMentionEntries, type MentionSource } from './mentions'
-import { useTranscriptFollow } from './follow'
-import { useAgentPermissions } from './permissions'
-import { nativeOpenFileBridge, requestOpenFile } from './open-file'
-import { useAttention, type NotificationBridge } from './attention'
-import { useDraftConfig } from './draft-config'
-import { toggleFeatures, useProviderFeatures } from './features'
+} from './composer/attachments'
+import { C, CONTENT_MAX_WIDTH, SIDEBAR_WIDTH } from './chrome/theme'
+import { Sidebar, Header, CenterMessage, agentStatusColor, daemonHost, type RowActionRef, type RowActionVerb } from './chrome/chrome'
+import { Transcript } from './conversation/transcript'
+import { FeatureToggles, ModelPicker, OptionPicker, modeOptions, thinkingOptions } from './composer/pickers'
+import { Composer, ConfigNotice, FooterBar, TracksRow } from './composer/composer'
+import { useAgentConversation } from './conversation/conversation'
+import { toMentionEntries, type MentionSource } from './composer/mentions'
+import { useTranscriptFollow } from './conversation/follow'
+import { useAgentPermissions } from './conversation/permissions'
+import { nativeOpenFileBridge, requestOpenFile } from './chrome/open-file'
+import { useAttention, type NotificationBridge } from './conversation/attention'
+import { useDraftConfig } from './composer/draft-config'
+import { toggleFeatures, useProviderFeatures } from './composer/features'
 import {
   checkoutEnabled,
   repoKeyOf,
   useCheckoutStatus,
   useDaemonFeatures,
-} from './checkout'
-import { useCheckoutActions } from './checkout-actions'
-import { CheckoutPanel } from './checkout-panel'
-import { contextMeter } from './usage'
-import { liveTruth, useLiveAgentConfig, type DaemonTruth, type ProviderNotice } from './live-config'
-import { resolveSendIntent, type SendGesture } from './send-intent'
-import { ActionRegistry } from './actions'
-import { isPaletteToggle } from './palette'
-import { CommandPaletteView, useContributeActions } from './palette-view'
-import { dispatchWindowEvent, useWindowEvent } from './global-events'
-import type { ComposerCommands } from './composer'
+} from './checkout/checkout'
+import { useCheckoutActions } from './checkout/checkout-actions'
+import { CheckoutPanel } from './checkout/checkout-panel'
+import { contextMeter } from './composer/usage'
+import { liveTruth, useLiveAgentConfig, type DaemonTruth, type ProviderNotice } from './composer/live-config'
+import { resolveSendIntent, type SendGesture } from './composer/send-intent'
+import { ActionRegistry } from './palette/actions'
+import { isPaletteToggle } from './palette/palette'
+import { CommandPaletteView, useContributeActions } from './palette/palette-view'
+import { dispatchWindowEvent, useWindowEvent } from './chrome/global-events'
+import type { ComposerCommands } from './composer/composer'
 import {
   providerSubagentsEnabled,
   selectTrackRows,
@@ -94,13 +94,13 @@ import {
   subagentRowColor,
   subagentTurns,
   useSubagents,
-} from './subagents'
+} from './tracks/subagents'
 import {
   SubagentLoadOlder,
   SubagentPill,
   SubagentViewerBar,
   type OpenSubagent,
-} from './tracks-panel'
+} from './tracks/tracks-panel'
 import { createAppStore, defaultStatePath, fileStateStorage } from './app-state'
 
 // ---- daemon hooks ----------------------------------------------------------

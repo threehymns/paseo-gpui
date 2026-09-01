@@ -8,7 +8,7 @@ import {
   type LiveConfigEvent,
   type LiveConfigState,
 } from './live-config'
-import type { AgentEntry } from './paseo'
+import type { AgentEntry } from '../daemon/paseo'
 
 const truth: DaemonTruth = {
   modelValue: 'claude-code/sonnet-4.6',

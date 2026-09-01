@@ -15,7 +15,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { displayName, type AgentEntry } from './paseo'
+import { displayName, type AgentEntry } from '../daemon/paseo'
 
 export type AttentionReason = 'permission' | 'error' | 'finished'
 
