@@ -57,6 +57,9 @@ import {
   type IncomingImage,
   type PastePayload,
 } from './attachments'
+import { C, CONTENT_MAX_WIDTH, SIDEBAR_WIDTH } from './theme'
+import { Sidebar, Header, CenterMessage, agentStatusColor, daemonHost, type RowActionRef, type RowActionVerb } from './chrome'
+import { Transcript } from './transcript'
 import { FeatureToggles, ModelPicker, OptionPicker, modeOptions, thinkingOptions } from './pickers'
 import { Composer, ConfigNotice, FooterBar, TracksRow } from './composer'
 import { useAgentConversation } from './conversation'
@@ -385,13 +388,6 @@ export function ChatApp() {
   useEffect(() => {
     setViewing(null)
   }, [activeId])
-  useEffect(() => {
-    // A provider subagent's timeline is garbage-collected the moment its
-    // descriptor leaves the directory; a viewer still pointed at it would sit
-    // on "Loading subagent…" forever. The row no longer being in the track
-    // proves it's gone, so fold the viewer back.
-    if (viewing?.kind === 'provider' && !viewingRow) setViewing(null)
-  }, [viewing, viewingRow])
   const subagentRows = useMemo(
     () => selectTrackRows(subagents.state, agents, activeId, subagents.enabled),
     [subagents.state, subagents.enabled, agents, activeId],
@@ -399,6 +395,13 @@ export function ChatApp() {
   const viewingRow = viewing
     ? subagentRows.find((row) => row.kind === viewing.kind && row.id === viewing.id) ?? null
     : null
+  useEffect(() => {
+    // A provider subagent's timeline is garbage-collected the moment its
+    // descriptor leaves the directory; a viewer still pointed at it would sit
+    // on "Loading subagent…" forever. The row no longer being in the track
+    // proves it's gone, so fold the viewer back.
+    if (viewing?.kind === 'provider' && !viewingRow) setViewing(null)
+  }, [viewing, viewingRow])
   const viewingSubagent = viewing?.kind === 'provider' ? viewing : null
   const providerTurns =
     viewingSubagent
@@ -889,7 +892,7 @@ const listRef = useRef<{ id: number } | null>(null)
         }}
       >
         <Sidebar
-          store={workspaces}
+          workspaces={workspaces}
           activeWorkspaceId={selectedWorkspaceId}
           onSelect={openWorkspace}
           onNewTask={() => {
