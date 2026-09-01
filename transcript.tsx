@@ -3,7 +3,7 @@
  * pending permission cards appended after the conversation.
  */
 
-import React, { memo, useCallback, useMemo, useRef, useState } from 'react'
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useGpuix } from '@gpuix/react'
 import type { EventPayload } from '@gpuix/native'
 import { Icon, IconButton, StatusDot, type IconName } from './chrome'
