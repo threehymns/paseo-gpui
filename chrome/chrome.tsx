@@ -15,15 +15,11 @@ import {
   isArchived,
   relativeTime,
   relativeTimeAt,
+  sortAgents,
   type AgentEntry,
   type ConnStatus,
   type WorkspaceDescriptor,
 } from '../daemon/paseo'
-import {
-  archivedAgents,
-  normalizeRename,
-  rowActionInFlight,
-} from '../agent-directory/lifecycle'
 import {
   isArchivedWorkspace,
   workspaceActivityAt,
@@ -580,7 +576,7 @@ function OverflowMenu({
 
 /**
  * One revealed archived agent: dimmed so it reads as retired, still openable,
- * with a menu holding its remaining lifecycle action (delete).
+ * with a delete control as its one remaining lifecycle action.
  */
 function ArchivedAgentRow({
   entry,
@@ -635,15 +631,13 @@ function ArchivedAgentRow({
         {displayName(entry)}
       </text>
       {hover ? (
-        <OverflowMenu
-          testId="archived-agent-row-menu"
-          side="right"
-          onAction={() => onDelete(entry.id)}
-        >
-          <SelectItem value="delete" textValue="Delete">
-            <MenuAction label="Delete" tone="danger" disabled={busy} />
-          </SelectItem>
-        </OverflowMenu>
+        <IconButton
+          icon="x"
+          size={12}
+          testId="archived-agent-row-delete"
+          dimmed={busy}
+          onClick={busy ? undefined : () => onDelete(entry.id)}
+        />
       ) : (
         <text style={{ fontSize: 12.5, color: C.ghost, flexShrink: 0 }}>
           {relativeTime(entry)}
@@ -751,7 +745,7 @@ export function Sidebar({
   const ARCHIVED_GROUP_ID = '__archived__'
   const groups = useMemo(() => workspaceProjectGroups(workspaces, showArchived), [workspaces, showArchived])
   const archived = useMemo(
-    () => (revealArchivedAgents ? archivedAgents(agents) : []),
+    () => (revealArchivedAgents ? sortAgents(agents.filter(isArchived)) : []),
     [agents, revealArchivedAgents],
   )
   const toggleProject = (projectId: string) => {
@@ -872,7 +866,7 @@ export function Sidebar({
                 <ArchivedAgentRow
                   key={entry.id}
                   entry={entry}
-                  busy={rowActionInFlight(busyRows, entry.id)}
+                  busy={busyRows.some((row) => row.id === entry.id)}
                   active={entry.id === activeAgentId}
                   onOpen={onOpenAgent}
                   onDelete={onDeleteAgent}
@@ -1021,8 +1015,9 @@ export function Header({
   const commitRename = () => {
     if (!renaming || !entry) return
     setRenaming(false)
-    const next = normalizeRename(nameDraft, displayName(entry))
-    if (busy || next == null) return
+    // An empty or unchanged draft means cancel, not a daemon call.
+    const next = nameDraft.trim()
+    if (busy || next.length === 0 || next === displayName(entry)) return
     onRename(entry.id, next)
   }
 

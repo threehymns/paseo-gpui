@@ -67,7 +67,6 @@ import {
   type IncomingImage,
   type PastePayload,
 } from './composer/attachments'
-import { agentLifecycle, rowActionInFlight } from './agent-directory/lifecycle'
 import { C, CONTENT_MAX_WIDTH, SIDEBAR_WIDTH } from './chrome/theme'
 import { Sidebar, Header, CenterMessage, agentStatusColor, daemonHost, type RowActionRef, type RowActionVerb } from './chrome/chrome'
 import { Transcript } from './conversation/transcript'
@@ -265,18 +264,13 @@ export function ChatApp() {
     setActiveId(id)
     setVisitHistory((prev) => visitAgent(prev, id))
   }
-  const navBack = () => {
-    const next = goBack(visitHistory)
+  const nav = (delta: 1 | -1) => {
+    const next = delta < 0 ? goBack(visitHistory) : goForward(visitHistory)
     if (next === visitHistory) return
     setVisitHistory(next)
     setActiveId(next.stack[next.index])
   }
-  const navForward = () => {
-    const next = goForward(visitHistory)
-    if (next === visitHistory) return
-    setVisitHistory(next)
-    setActiveId(next.stack[next.index])
-  }
+  const navState = { canBack: canGoBack(visitHistory), canForward: canGoForward(visitHistory) }
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState(false)
   const [draft, setDraft] = useState('')
@@ -366,13 +360,13 @@ export function ChatApp() {
   const renameWorkspaceRow = (id: string, name: string) =>
     runRowAction('rename', id, () => daemon.setWorkspaceTitle(id, name))
 
-  // Agent lifecycle (archive, delete, rename): thin wrappers over the daemon
-  // client whose promises drive the in-flight disabling; the directory itself
-  // is only ever written by the subscription.
-  const lifecycle = useMemo(() => agentLifecycle(daemon), [daemon])
-  const archiveAgentRow = (id: string) => runRowAction('archive', id, () => lifecycle.archive(id))
-  const deleteAgentRow = (id: string) => runRowAction('delete', id, () => lifecycle.remove(id))
-  const renameAgentRow = (id: string, name: string) => runRowAction('rename', id, () => lifecycle.rename(id, name))
+  // Agent lifecycle (archive, delete, rename): the promises drive the
+  // in-flight disabling; the directory itself is only ever written by the
+  // subscription.
+  const archiveAgentRow = (id: string) => runRowAction('archive', id, () => daemon.archiveAgent(id))
+  const deleteAgentRow = (id: string) => runRowAction('delete', id, () => daemon.deleteAgent(id))
+  const renameAgentRow = (id: string, name: string) =>
+    runRowAction('rename', id, () => daemon.updateAgent(id, { name: name.trim() }))
 
   /**
    * Opening a workspace opens its conversation: its most recently active agent
@@ -962,9 +956,9 @@ const listRef = useRef<{ id: number } | null>(null)
           onArchive={archiveWorkspaceRow}
           onRename={renameWorkspaceRow}
           appStore={store}
-          navState={{ canBack: canGoBack(visitHistory), canForward: canGoForward(visitHistory) }}
-          onNavBack={navBack}
-          onNavForward={navForward}
+          navState={navState}
+          onNavBack={() => nav(-1)}
+          onNavForward={() => nav(1)}
         />
         <div style={{ width: 1, height: '100%', flexShrink: 0, backgroundColor: C.sidebarBorder }} />
       </motion.div>
@@ -985,13 +979,13 @@ const listRef = useRef<{ id: number } | null>(null)
           entry={activeEntry}
           stopping={stopping}
           onStop={() => void stopAgent()}
-          busy={activeId != null && rowActionInFlight(busyRows, activeId)}
+          busy={activeId != null && busyRows.some((row) => row.id === activeId)}
           onRename={renameAgentRow}
           onArchive={archiveAgentRow}
           onDelete={deleteAgentRow}
-          navState={{ canBack: canGoBack(visitHistory), canForward: canGoForward(visitHistory) }}
-          onNavBack={navBack}
-          onNavForward={navForward}
+          navState={navState}
+          onNavBack={() => nav(-1)}
+          onNavForward={() => nav(1)}
         />
         {activeEntry && checkoutOn && (
           <CheckoutPanel
