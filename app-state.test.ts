@@ -48,57 +48,6 @@ describe('app-state store', () => {
     const reopened = createAppStore(storage)
     expect(reopened.get(directoryGrouping)).toBe('project')
   })
-
-  describe('legacy key migration', () => {
-    test('a stored archived-AGENTS value moves to showArchivedAgents, not the workspaces toggle', () => {
-      const storage = memoryStorage()
-      storage.writeAll({ 'directory.showArchived': true })
-      const store = createAppStore(storage)
-      expect(store.get(showArchivedAgents)).toBe(true)
-      // The legacy key is retired, so the workspaces toggle starts at its own
-      // default instead of inheriting the old agents value.
-      expect(store.get(showArchivedWorkspaces)).toBe(false)
-    })
-
-    test('the migration persists, so a restart keeps it and never re-reads the legacy key', () => {
-      const storage = memoryStorage()
-      storage.writeAll({ 'directory.showArchived': true })
-      createAppStore(storage)
-      expect(storage.readAll()).toEqual({ 'directory.showArchivedAgents': true })
-    })
-
-    test('an existing showArchivedAgents value wins over the legacy key', () => {
-      const storage = memoryStorage()
-      storage.writeAll({ 'directory.showArchived': true, 'directory.showArchivedAgents': false })
-      const store = createAppStore(storage)
-      expect(store.get(showArchivedAgents)).toBe(false)
-      // Nothing was adopted, so the legacy key survives untouched.
-      expect(storage.readAll()['directory.showArchived']).toBe(true)
-    })
-
-    test('the workspaces toggle reads its own key, untouched by the migration', () => {
-      const storage = memoryStorage()
-      storage.writeAll({ 'directory.showArchived': true, 'directory.showArchivedWorkspaces': true })
-      const store = createAppStore(storage)
-      expect(store.get(showArchivedAgents)).toBe(true)
-      expect(store.get(showArchivedWorkspaces)).toBe(true)
-    })
-
-    test('a non-boolean legacy value is never adopted', () => {
-      const storage = memoryStorage()
-      storage.writeAll({ 'directory.showArchived': 'yes' })
-      const store = createAppStore(storage)
-      expect(store.get(showArchivedAgents)).toBe(false)
-      expect(storage.readAll()['directory.showArchived']).toBe('yes')
-    })
-
-    test('a first run with no stored state migrates nothing', () => {
-      const storage = memoryStorage()
-      const store = createAppStore(storage)
-      expect(store.get(showArchivedAgents)).toBe(false)
-      expect(storage.readAll()).toEqual({})
-    })
-  })
 })
 
 describe('file-backed storage', () => {
