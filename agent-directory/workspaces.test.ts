@@ -10,9 +10,11 @@ import {
   projectName,
   sortWorkspaces,
   visibleWorkspaces,
+  workspaceBranchName,
   workspaceDirectoryChoices,
   workspaceDirectory,
   workspaceDisplayName,
+  workspaceLabels,
   workspaceProjectGroups,
   type WorkspaceStore,
 } from './workspaces'
@@ -168,6 +170,23 @@ describe('view-model mapping', () => {
   test('projectName prefers a custom project name', () => {
     expect(projectName(workspace({ projectCustomName: 'My Shop' }))).toBe('My Shop')
     expect(projectName(workspace({ projectCustomName: null }))).toBe('storefront')
+  })
+
+  test('branchName is the git runtime\'s current branch, or nothing', () => {
+    expect(workspaceBranchName(workspace({ gitRuntime: { currentBranch: ' feat/login ' } }))).toBe('feat/login')
+    expect(workspaceBranchName(workspace({ gitRuntime: { currentBranch: '   ' } }))).toBeNull()
+    expect(workspaceBranchName(workspace({ gitRuntime: null }))).toBeNull()
+    expect(workspaceBranchName(workspace({}))).toBeNull()
+  })
+
+  test('workspaceLabels unions and sorts label names across descriptors', () => {
+    const list = [
+      workspace({ id: 'a', labels: ['zeta', 'alpha'] }),
+      workspace({ id: 'b', labels: ['beta', 'alpha'] }),
+      workspace({ id: 'c' }),
+    ]
+    expect(workspaceLabels(list)).toEqual(['alpha', 'beta', 'zeta'])
+    expect(workspaceLabels([])).toEqual([])
   })
 
   test('archiving is one-way and visibility follows the reveal toggle', () => {

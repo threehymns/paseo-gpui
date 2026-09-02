@@ -118,6 +118,25 @@ export function workspaceDisplayName(descriptor: WorkspaceDescriptor): string {
   return descriptor.name
 }
 
+/** The branch a workspace sits on, or null when the daemon reports none. */
+export function workspaceBranchName(descriptor: WorkspaceDescriptor): string | null {
+  const branch = descriptor.gitRuntime?.currentBranch?.trim()
+  return branch || null
+}
+
+/**
+ * The union of label names across every given descriptor, sorted for a stable
+ * menu. The labels submenu lists this union; a descriptor's own applied labels
+ * are the ones rendered checked.
+ */
+export function workspaceLabels(descriptors: readonly WorkspaceDescriptor[]): string[] {
+  const labels = new Set<string>()
+  for (const descriptor of descriptors) {
+    for (const label of descriptor.labels ?? []) labels.add(label)
+  }
+  return [...labels].sort()
+}
+
 // ---- aggregate status pill -----------------------------------------------------
 //
 // A collapsed project reduces to one status pill summarizing its workspaces.
