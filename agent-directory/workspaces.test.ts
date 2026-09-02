@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  WORKSPACE_STATUS_URGENCY,
+  aggregateWorkspaceStatus,
   agentsOfWorkspace,
   applyWorkspaceUpdate,
   initialWorkspaceStore,
@@ -176,6 +178,108 @@ describe('view-model mapping', () => {
     expect(isArchivedWorkspace(list[1]!)).toBe(true)
     expect(visibleWorkspaces(list, false).map((w) => w.id)).toEqual(['live'])
     expect(visibleWorkspaces(list, true).map((w) => w.id)).toEqual(['live', 'gone'])
+  })
+})
+
+describe('aggregateWorkspaceStatus', () => {
+  // The ticket's ordering string names a "working" bucket, but the workspace
+  // descriptor's vocabulary is running | attention | needs_input | failed |
+  // done — the urgency order below is defined over that vocabulary alone.
+  test('the urgency order is the descriptor vocabulary, needs_input first', () => {
+    expect(WORKSPACE_STATUS_URGENCY).toEqual(['needs_input', 'failed', 'running', 'attention', 'done'])
+  })
+
+  test('a single workspace aggregates to its own status', () => {
+    expect(aggregateWorkspaceStatus([workspace({ status: 'attention' })])).toEqual({
+      status: 'attention',
+      count: 1,
+    })
+    expect(aggregateWorkspaceStatus([workspace({ status: 'done' })])).toEqual({ status: 'done', count: 1 })
+  })
+
+  test('an empty project aggregates to nothing', () => {
+    expect(aggregateWorkspaceStatus([])).toBeNull()
+  })
+
+  test('the most urgent bucket wins across mixed statuses', () => {
+    const mixed = [
+      workspace({ id: 'a', status: 'done' }),
+      workspace({ id: 'b', status: 'running' }),
+      workspace({ id: 'c', status: 'needs_input' }),
+      workspace({ id: 'd', status: 'attention' }),
+      workspace({ id: 'e', status: 'failed' }),
+    ]
+    expect(aggregateWorkspaceStatus(mixed)).toEqual({ status: 'needs_input', count: 1 })
+  })
+
+  test('each adjacent pair of the order resolves toward the more urgent', () => {
+    expect(aggregateWorkspaceStatus([
+      workspace({ id: 'a', status: 'failed' }),
+      workspace({ id: 'b', status: 'needs_input' }),
+    ])).toMatchObject({ status: 'needs_input' })
+    expect(aggregateWorkspaceStatus([
+      workspace({ id: 'a', status: 'running' }),
+      workspace({ id: 'b', status: 'failed' }),
+    ])).toMatchObject({ status: 'failed' })
+    expect(aggregateWorkspaceStatus([
+      workspace({ id: 'a', status: 'attention' }),
+      workspace({ id: 'b', status: 'running' }),
+    ])).toMatchObject({ status: 'running' })
+    expect(aggregateWorkspaceStatus([
+      workspace({ id: 'a', status: 'done' }),
+      workspace({ id: 'b', status: 'attention' }),
+    ])).toMatchObject({ status: 'attention' })
+  })
+
+  test('equally urgent workspaces resolve by count, not by picking one', () => {
+    const twoFailed = [
+      workspace({ id: 'a', status: 'failed' }),
+      workspace({ id: 'b', status: 'failed' }),
+      workspace({ id: 'c', status: 'done' }),
+      workspace({ id: 'd', status: 'done' }),
+    ]
+    expect(aggregateWorkspaceStatus(twoFailed)).toEqual({ status: 'failed', count: 2 })
+  })
+
+  test('the count covers only the winning bucket', () => {
+    const mixed = [
+      workspace({ id: 'a', status: 'needs_input' }),
+      workspace({ id: 'b', status: 'needs_input' }),
+      workspace({ id: 'c', status: 'running' }),
+      workspace({ id: 'd', status: 'running' }),
+      workspace({ id: 'e', status: 'running' }),
+    ]
+    expect(aggregateWorkspaceStatus(mixed)).toEqual({ status: 'needs_input', count: 2 })
+  })
+
+  test('a collapsed group aggregates over its visible members', () => {
+    const store: WorkspaceStore = {
+      workspaces: [
+        workspace({ id: 'store-a', projectId: 'p-store', status: 'done', activityAt: '2026-08-24T10:00:00Z' }),
+        workspace({ id: 'store-b', projectId: 'p-store', status: 'needs_input', activityAt: '2026-08-24T09:00:00Z' }),
+        workspace({
+          id: 'api-a',
+          projectId: 'p-api',
+          projectDisplayName: 'api',
+          projectRootPath: '/home/me/dev/api',
+          status: 'failed',
+        }),
+      ],
+      emptyProjects: [],
+    }
+    const groups = workspaceProjectGroups(store, false)
+    const storefront = groups.find((group) => group.projectId === 'p-store')!
+    expect(aggregateWorkspaceStatus(storefront.workspaces)).toEqual({ status: 'needs_input', count: 1 })
+    const api = groups.find((group) => group.projectId === 'p-api')!
+    expect(aggregateWorkspaceStatus(api.workspaces)).toEqual({ status: 'failed', count: 1 })
+  })
+
+  test('an emptied project has no members, so no pill', () => {
+    const groups = workspaceProjectGroups(
+      { workspaces: [], emptyProjects: [emptyProject({ projectId: 'p1' })] },
+      false,
+    )
+    expect(aggregateWorkspaceStatus(groups[0]!.workspaces)).toBeNull()
   })
 })
 
