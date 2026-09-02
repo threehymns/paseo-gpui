@@ -21,11 +21,13 @@ import {
   type WorkspaceDescriptor,
 } from '../daemon/paseo'
 import {
+  aggregateWorkspaceStatus,
   isArchivedWorkspace,
   workspaceActivityAt,
   workspaceDisplayName,
   workspaceDirectory,
   workspaceProjectGroups,
+  type WorkspaceAggregateStatus,
   type WorkspaceStore,
 } from '../agent-directory/workspaces'
 import {
@@ -352,6 +354,36 @@ export function workspaceStatusColor(status: WorkspaceDescriptor['status']): str
   }
 }
 
+/**
+ * A collapsed project's aggregate status pill: one dot in the most urgent
+ * bucket's color plus the count of workspaces sharing that bucket. Display
+ * only — the header row stays the click target for expanding.
+ */
+function AggregateStatusPill({ aggregate }: { aggregate: WorkspaceAggregateStatus }) {
+  return (
+    <div
+      testId="project-status-pill"
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 4,
+        height: 16,
+        paddingLeft: 6,
+        paddingRight: 6,
+        borderRadius: 8,
+        backgroundColor: C.item,
+        flexShrink: 0,
+      }}
+    >
+      <StatusDot color={workspaceStatusColor(aggregate.status)} size={6} />
+      <text style={{ fontSize: 10.5, fontWeight: 500, lineHeight: 14, color: C.tertiary }}>
+        {aggregate.count}
+      </text>
+    </div>
+  )
+}
+
 function WorkspaceRow({
   descriptor,
   active,
@@ -647,15 +679,21 @@ function ArchivedAgentRow({
   )
 }
 
-/** One collapsible project group header: chevron, name, click toggles its rows. */
+/**
+ * One collapsible project group header: chevron, name, and — while collapsed —
+ * the project's aggregate status pill. Clicking anywhere on it toggles.
+ */
 function ProjectGroupHeader({
   name,
   collapsed,
   onToggle,
+  pill,
 }: {
   name: string
   collapsed: boolean
   onToggle: () => void
+  /** Trailing adornment; the collapsed project's aggregate status pill. */
+  pill?: React.ReactNode
 }) {
   return (
     <div
@@ -687,6 +725,7 @@ function ProjectGroupHeader({
       >
         {name}
       </text>
+      {pill}
     </div>
   )
 }
@@ -738,9 +777,11 @@ export function Sidebar({
   // The local state can't share the StateKey's name: the initializer would
   // read the destructured binding itself (TDZ), not the module-level key.
   const [revealArchivedAgents, setRevealArchivedAgents] = useAppState(appStore, showArchivedAgents)
-  // Collapse state is view state; the store itself stays daemon-written. The
-  // Archived reveal section collapses like the project groups under a key no
-  // workspace can own.
+  // Collapse state is view state; the store itself stays daemon-written. It is
+  // component-local on purpose: toggling only re-renders the sidebar, so the
+  // open conversation and the selected row — chat.tsx state this toggle never
+  // touches — stay undisturbed. The Archived reveal section collapses like the
+  // project groups under a key no workspace can own.
   const [collapsedProjects, setCollapsedProjects] = useState<ReadonlySet<string>>(new Set())
   const ARCHIVED_GROUP_ID = '__archived__'
   const groups = useMemo(() => workspaceProjectGroups(workspaces, showArchived), [workspaces, showArchived])
@@ -823,30 +864,37 @@ export function Sidebar({
           paddingRight: 10,
         }}
       >
-        {groups.map((group) => (
-          <div
-            key={group.projectId}
-            style={{ display: 'flex', flexDirection: 'column', paddingBottom: 10 }}
-          >
-            <ProjectGroupHeader
-              name={group.name}
-              collapsed={collapsedProjects.has(group.projectId)}
-              onToggle={() => toggleProject(group.projectId)}
-            />
-            {!collapsedProjects.has(group.projectId) &&
-              group.workspaces.map((descriptor) => (
-                <WorkspaceRow
-                  key={descriptor.id}
-                  descriptor={descriptor}
-                  active={descriptor.id === activeWorkspaceId}
-                  busy={busyRows.some((row) => row.id === descriptor.id)}
-                  onSelect={onSelect}
-                  onRename={onRename}
-                  onArchive={onArchive}
-                />
-              ))}
-          </div>
-        ))}
+        {groups.map((group) => {
+          const collapsed = collapsedProjects.has(group.projectId)
+          // A collapsed project reduces to one aggregate pill over its
+          // members; expanded groups keep their per-workspace rows.
+          const aggregate = collapsed ? aggregateWorkspaceStatus(group.workspaces) : null
+          return (
+            <div
+              key={group.projectId}
+              style={{ display: 'flex', flexDirection: 'column', paddingBottom: 10 }}
+            >
+              <ProjectGroupHeader
+                name={group.name}
+                collapsed={collapsed}
+                onToggle={() => toggleProject(group.projectId)}
+                pill={aggregate && <AggregateStatusPill aggregate={aggregate} />}
+              />
+              {!collapsed &&
+                group.workspaces.map((descriptor) => (
+                  <WorkspaceRow
+                    key={descriptor.id}
+                    descriptor={descriptor}
+                    active={descriptor.id === activeWorkspaceId}
+                    busy={busyRows.some((row) => row.id === descriptor.id)}
+                    onSelect={onSelect}
+                    onRename={onRename}
+                    onArchive={onArchive}
+                  />
+                ))}
+            </div>
+          )
+        })}
         {groups.length === 0 && (
           <div style={{ padding: 14 }}>
             <text style={{ fontSize: 12.5, lineHeight: 17, color: C.tertiary }}>

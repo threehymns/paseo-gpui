@@ -118,6 +118,54 @@ export function workspaceDisplayName(descriptor: WorkspaceDescriptor): string {
   return descriptor.name
 }
 
+// ---- aggregate status pill -----------------------------------------------------
+//
+// A collapsed project reduces to one status pill summarizing its workspaces.
+// The roll-up is most-urgent-wins over the descriptor's own status vocabulary —
+// the protocol's `running | attention | needs_input | failed | done`, not the
+// agent directory's StatusBucket (`working`/`review` in daemon/paseo.ts is a
+// different vocabulary that must not leak in here).
+
+/**
+ * Most-urgent-wins order over the workspace descriptor's status vocabulary:
+ * workspaces demanding the user's hand first (needs_input), then breakage
+ * (failed), then live work (running), then flagged-but-alive (attention), then
+ * finished (done). Earlier entries win a collapsed project's pill. The order is
+ * a strict total order, so no two distinct statuses can tie; workspaces that
+ * share the winning bucket collapse into the pill's count.
+ */
+export const WORKSPACE_STATUS_URGENCY: readonly WorkspaceDescriptor['status'][] = [
+  'needs_input',
+  'failed',
+  'running',
+  'attention',
+  'done',
+]
+
+/** One collapsed project's pill: the most urgent bucket and how many workspaces sit in it. */
+export interface WorkspaceAggregateStatus {
+  status: WorkspaceDescriptor['status']
+  /** Workspaces sharing the winning bucket — the "affected" count the pill shows. */
+  count: number
+}
+
+/**
+ * The most-urgent-wins roll-up for a collapsed project: the earliest entry of
+ * WORKSPACE_STATUS_URGENCY present among the descriptors, with the number of
+ * workspaces in that bucket. Aggregates exactly the descriptors it is given —
+ * visibility filtering stays the caller's job (project groups already filter).
+ * An empty project aggregates to null: nothing to summarize, no pill.
+ */
+export function aggregateWorkspaceStatus(
+  descriptors: WorkspaceDescriptor[],
+): WorkspaceAggregateStatus | null {
+  for (const status of WORKSPACE_STATUS_URGENCY) {
+    const count = descriptors.filter((descriptor) => descriptor.status === status).length
+    if (count > 0) return { status, count }
+  }
+  return null
+}
+
 // ---- sidebar groups ----------------------------------------------------------
 
 /** One collapsible project group: zero or more workspace rows. */
