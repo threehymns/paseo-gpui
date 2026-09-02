@@ -737,6 +737,14 @@ describe('agent directory', () => {
     expect(displayName(entry({ title: '   ' }))).toBe('storefront')
   })
 
+  test('a user-set rename lands as title, so displayName shows it', () => {
+    // The SDK has no separate name field: updateAgent({ name }) is stored as
+    // the agent's title daemon-side, arriving here via the subscription.
+    expect(displayName(entry({ title: 'Hand-set name', cwd: '/home/me/dev/storefront' }))).toBe(
+      'Hand-set name',
+    )
+  })
+
   test('isArchived reads the daemon archive timestamp', () => {
     expect(isArchived(entry({}))).toBe(false)
     expect(isArchived(entry({ archivedAt: '2026-08-24T09:00:00Z' }))).toBe(true)
@@ -833,9 +841,11 @@ describe('activeAgentGone', () => {
     expect(activeAgentGone('live', [entry({ id: 'other' })], { connected: true, wasSeen: true })).toBe(true)
   })
 
-  test('a seen agent that was archived can no longer host the conversation', () => {
+  test('a seen agent that was archived still hosts the conversation', () => {
+    // Archiving hides the agent from the default directory, but the reveal
+    // toggle opens it again — only removal ends a selection.
     const archived = entry({ id: 'live', archivedAt: '2026-08-24T09:00:00Z' })
-    expect(activeAgentGone('live', [archived], { connected: true, wasSeen: true })).toBe(true)
+    expect(activeAgentGone('live', [archived], { connected: true, wasSeen: true })).toBe(false)
   })
 
   test('a seen live agent stays hosted', () => {

@@ -17,6 +17,13 @@ owns one conversation timeline.
 The known agents, kept fresh by subscription updates. The sidebar stops
 listing them directly: it renders collapsible project groups, one row per
 workspace, and opening a workspace shows that workspace's conversation.
+Archived agents leave those groups and surface in a dedicated **Archived**
+section at the sidebar's tail — shown only while the view menu's archived-
+agents reveal is on — where one stays openable and deletable but not
+renameable or re-archivable. Archived is not gone: a seen agent that was
+archived still hosts its conversation, so archiving the selected agent never
+redirects. Only true removal (deletion, vanishing from the directory) ends a
+selection and sends the app back to New Task.
 _Avoid_: session list, conversation list
 
 **Subagent**:

@@ -8,13 +8,14 @@ import {
   fileStateStorage,
   memoryStorage,
   showArchivedAgents,
+  showArchivedWorkspaces,
 } from './app-state'
 
 describe('app-state store', () => {
   test('first run yields defaults when nothing is stored', () => {
     const store = createAppStore(memoryStorage())
     expect(store.get(directoryGrouping)).toBe('status')
-    expect(store.get(showArchivedAgents)).toBe(false)
+    expect(store.get(showArchivedWorkspaces)).toBe(false)
   })
 
   test('a written value reads back until overwritten', () => {
@@ -23,8 +24,8 @@ describe('app-state store', () => {
     expect(store.get(directoryGrouping)).toBe('project')
     store.set(directoryGrouping, 'status')
     expect(store.get(directoryGrouping)).toBe('status')
-    store.set(showArchivedAgents, true)
-    expect(store.get(showArchivedAgents)).toBe(true)
+    store.set(showArchivedWorkspaces, true)
+    expect(store.get(showArchivedWorkspaces)).toBe(true)
   })
 
   test('stale values from older versions fall back to defaults', () => {
@@ -38,7 +39,7 @@ describe('app-state store', () => {
     }
     const store = createAppStore(stale)
     expect(store.get(directoryGrouping)).toBe('status')
-    expect(store.get(showArchivedAgents)).toBe(false)
+    expect(store.get(showArchivedWorkspaces)).toBe(false)
   })
 
   test('choices survive a restart: a fresh store over the same storage reads them', () => {
@@ -59,14 +60,14 @@ describe('file-backed storage', () => {
 
   test('a written file reads back in a fresh store, as a restart would', () => {
     const file = statePath('state.json')
-    createAppStore(fileStateStorage(file)).set(showArchivedAgents, true)
-    expect(createAppStore(fileStateStorage(file)).get(showArchivedAgents)).toBe(true)
+    createAppStore(fileStateStorage(file)).set(showArchivedWorkspaces, true)
+    expect(createAppStore(fileStateStorage(file)).get(showArchivedWorkspaces)).toBe(true)
   })
 
   test('a missing file means first run', () => {
     const store = createAppStore(fileStateStorage(statePath('never-written.json')))
     expect(store.get(directoryGrouping)).toBe('status')
-    expect(store.get(showArchivedAgents)).toBe(false)
+    expect(store.get(showArchivedWorkspaces)).toBe(false)
   })
 
   test('an unreadable or non-object file falls back to defaults', () => {
@@ -75,7 +76,7 @@ describe('file-backed storage', () => {
       writeFileSync(file, contents)
       const store = createAppStore(fileStateStorage(file))
       expect(store.get(directoryGrouping)).toBe('status')
-      expect(store.get(showArchivedAgents)).toBe(false)
+      expect(store.get(showArchivedWorkspaces)).toBe(false)
     }
   })
 
@@ -92,12 +93,12 @@ describe('file-backed storage', () => {
     // A directory sitting where the file belongs makes every write fail.
     mkdirSync(statePath('blocked.json'))
     const blocked = createAppStore(fileStateStorage(statePath('blocked.json')))
-    blocked.set(showArchivedAgents, true)
-    expect(blocked.get(showArchivedAgents)).toBe(true)
+    blocked.set(showArchivedWorkspaces, true)
+    expect(blocked.get(showArchivedWorkspaces)).toBe(true)
 
     const reopened = createAppStore(fileStateStorage(statePath('good.json')))
     expect(reopened.get(directoryGrouping)).toBe('project')
-    expect(reopened.get(showArchivedAgents)).toBe(false)
+    expect(reopened.get(showArchivedWorkspaces)).toBe(false)
   })
 
   afterAll(() => {

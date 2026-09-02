@@ -48,6 +48,16 @@ import {
   type WorkspaceStore,
 } from './agent-directory/workspaces'
 import {
+  canGoBack,
+  canGoForward,
+  emptyVisitHistory,
+  goBack,
+  goForward,
+  truncateForward,
+  visitAgent,
+  type VisitHistory,
+} from './agent-directory/nav-history'
+import {
   planAttachments,
   planPaste,
   removeAttachment,
@@ -101,7 +111,7 @@ import {
   SubagentViewerBar,
   type OpenSubagent,
 } from './tracks/tracks-panel'
-import { createAppStore, defaultStatePath, fileStateStorage } from './app-state'
+import { createAppStore, defaultStatePath, fileStateStorage, showArchivedAgents, useAppState } from './app-state'
 
 // ---- daemon hooks ----------------------------------------------------------
 
@@ -244,6 +254,23 @@ export function ChatApp() {
   const [store] = useState(createStateStore)
 
   const [activeId, setActiveId] = useState<string | null>(null)
+  // Visited-agent history behind the chrome's back/forward arrows: opening an
+  // agent records the visit, back/forward only move the cursor. An explicit
+  // extension of Paseo's own navigation model (no upstream visited-history
+  // stack exists); see ticket #21's parity note.
+  const [visitHistory, setVisitHistory] = useState<VisitHistory>(emptyVisitHistory)
+  /** Opening an agent records the visit and truncates any forward entries. */
+  const visit = (id: string) => {
+    setActiveId(id)
+    setVisitHistory((prev) => visitAgent(prev, id))
+  }
+  const nav = (delta: 1 | -1) => {
+    const next = delta < 0 ? goBack(visitHistory) : goForward(visitHistory)
+    if (next === visitHistory) return
+    setVisitHistory(next)
+    setActiveId(next.stack[next.index])
+  }
+  const navState = { canBack: canGoBack(visitHistory), canForward: canGoForward(visitHistory) }
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState(false)
   const [draft, setDraft] = useState('')
@@ -333,6 +360,14 @@ export function ChatApp() {
   const renameWorkspaceRow = (id: string, name: string) =>
     runRowAction('rename', id, () => daemon.setWorkspaceTitle(id, name))
 
+  // Agent lifecycle (archive, delete, rename): the promises drive the
+  // in-flight disabling; the directory itself is only ever written by the
+  // subscription.
+  const archiveAgentRow = (id: string) => runRowAction('archive', id, () => daemon.archiveAgent(id))
+  const deleteAgentRow = (id: string) => runRowAction('delete', id, () => daemon.deleteAgent(id))
+  const renameAgentRow = (id: string, name: string) =>
+    runRowAction('rename', id, () => daemon.updateAgent(id, { name: name.trim() }))
+
   /**
    * Opening a workspace opens its conversation: its most recently active agent
    * becomes the shown timeline; a workspace with no agents falls back to the
@@ -348,7 +383,7 @@ export function ChatApp() {
     }
     const agent = mostRecentAgent(agentsOfWorkspace(agents, descriptor).filter((a) => !isArchived(a)))
     if (agent) {
-      setActiveId(agent.id)
+      visit(agent.id)
     } else {
       // Seeding means the send lands in the workspace as it is — never a new
       // worktree on top of it.
@@ -410,7 +445,7 @@ export function ChatApp() {
 
   const viewSubagent = (target: OpenSubagent) => {
     if (target.kind === 'managed') {
-      setActiveId(target.id)
+      visit(target.id)
       return
     }
     subagents.openTimeline(target.parentAgentId, target.id)
@@ -586,7 +621,7 @@ const listRef = useRef<{ id: number } | null>(null)
         ...(worktree === 'worktree' ? { git: { createWorktree: true } } : {}),
       })
       setPendingSeed({ agentId: handle.id, text, images: stagedImages })
-      setActiveId(handle.id)
+      visit(handle.id)
     } catch (err) {
       setCreateError(errorMessage(err))
       restoreDraft(text, stagedImages)
@@ -729,6 +764,8 @@ const listRef = useRef<{ id: number } | null>(null)
         keywords: 'compose new agent',
         run: () => {
           setActiveId(null)
+          // Same rule as the sidebar's New Task: no phantom future survives.
+          setVisitHistory(truncateForward)
           setCreateError(null)
           setPaletteOpen(false)
         },
@@ -742,10 +779,13 @@ const listRef = useRef<{ id: number } | null>(null)
     ],
     [],
   )
+  // Persisted view choice: archived agents surface in the palette only when
+  // the sidebar's reveal toggle is on (same key the sidebar writes).
+  const [showArchived] = useAppState(store, showArchivedAgents)
   useContributeActions(
     registry,
     () =>
-      visibleAgents(agents, false).map((entry) => ({
+      visibleAgents(agents, showArchived).map((entry) => ({
         id: `agent.${entry.id}`,
         title: displayName(entry),
         section: 'agents' as const,
@@ -753,12 +793,12 @@ const listRef = useRef<{ id: number } | null>(null)
         keywords: STATUS_BUCKET_LABELS[statusBucket(entry)],
         checked: entry.id === activeId,
         run: () => {
-          setActiveId(entry.id)
+          visit(entry.id)
           setCreateError(null)
           setPaletteOpen(false)
         },
       })),
-    [agents, activeId],
+    [agents, activeId, showArchived],
   )
   useContributeActions(
     registry,
@@ -893,10 +933,20 @@ const listRef = useRef<{ id: number } | null>(null)
       >
         <Sidebar
           workspaces={workspaces}
+          agents={agents}
           activeWorkspaceId={selectedWorkspaceId}
+          activeAgentId={activeId}
           onSelect={openWorkspace}
+          onOpenAgent={(id) => {
+            visit(id)
+            setCreateError(null)
+          }}
+          onDeleteAgent={deleteAgentRow}
           onNewTask={() => {
             setActiveId(null)
+            // Starting a new task is a fresh edge, not a forward jump: drop any
+            // phantom future the visited stack was still holding.
+            setVisitHistory(truncateForward)
             setSelectedWorkspaceId(null)
             setCreateError(null)
           }}
@@ -906,6 +956,9 @@ const listRef = useRef<{ id: number } | null>(null)
           onArchive={archiveWorkspaceRow}
           onRename={renameWorkspaceRow}
           appStore={store}
+          navState={navState}
+          onNavBack={() => nav(-1)}
+          onNavForward={() => nav(1)}
         />
         <div style={{ width: 1, height: '100%', flexShrink: 0, backgroundColor: C.sidebarBorder }} />
       </motion.div>
@@ -924,6 +977,15 @@ const listRef = useRef<{ id: number } | null>(null)
           onExpand={() => setCollapsed(false)}
           title={title}
           entry={activeEntry}
+          stopping={stopping}
+          onStop={() => void stopAgent()}
+          busy={activeId != null && busyRows.some((row) => row.id === activeId)}
+          onRename={renameAgentRow}
+          onArchive={archiveAgentRow}
+          onDelete={deleteAgentRow}
+          navState={navState}
+          onNavBack={() => nav(-1)}
+          onNavForward={() => nav(1)}
         />
         {activeEntry && checkoutOn && (
           <CheckoutPanel
@@ -1061,7 +1123,11 @@ const listRef = useRef<{ id: number } | null>(null)
           cwd={activeEntry?.cwd ?? cwd}
           cwdLocked={Boolean(activeEntry)}
           cwdOptions={[process.cwd(), ...cwdOptions]}
-          onCwdChange={setCwd}
+          onCwdChange={(dir) => {
+            setCwd(dir)
+            // A fresh directory selection mid-stack leaves no phantom future.
+            setVisitHistory(truncateForward)
+          }}
           worktree={worktree}
           onWorktreeChange={setWorktree}
           statusColor={
