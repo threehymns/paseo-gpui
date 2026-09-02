@@ -10,7 +10,6 @@ import React, { useMemo, useState } from 'react'
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@gpuix/react'
 import {
   DAEMON_URL,
-  basename,
   displayName,
   isArchived,
   relativeTime,
@@ -25,11 +24,18 @@ import {
   isArchivedWorkspace,
   workspaceActivityAt,
   workspaceDisplayName,
-  workspaceDirectory,
   workspaceProjectGroups,
   type WorkspaceAggregateStatus,
   type WorkspaceStore,
 } from '../agent-directory/workspaces'
+import {
+  workspaceMetaLine,
+  workspaceRowTitle,
+  type MetaTone,
+  type WorkspaceMetaChecks,
+  type WorkspaceMetaItem,
+  type WorkspaceMetaTrailing,
+} from '../agent-directory/workspace-meta'
 import {
   showArchivedAgents,
   showArchivedWorkspaces,
@@ -56,6 +62,8 @@ import iconArrowRight from '../assets/icons/arrow-right.svg' with { type: 'file'
 import iconFolder from '../assets/icons/folder.svg' with { type: 'file' }
 import iconFile from '../assets/icons/file.svg' with { type: 'file' }
 import iconGitBranch from '../assets/icons/git-branch.svg' with { type: 'file' }
+import iconGitPullRequest from '../assets/icons/git-pull-request.svg' with { type: 'file' }
+import iconTag from '../assets/icons/tag.svg' with { type: 'file' }
 
 import iconLaptop from '../assets/icons/laptop.svg' with { type: 'file' }
 import iconLock from '../assets/icons/lock.svg' with { type: 'file' }
@@ -86,6 +94,8 @@ const ICONS = {
   folder: realAssetPath(iconFolder),
   file: realAssetPath(iconFile),
   gitBranch: realAssetPath(iconGitBranch),
+  gitPullRequest: realAssetPath(iconGitPullRequest),
+  tag: realAssetPath(iconTag),
   laptop: realAssetPath(iconLaptop),
   lock: realAssetPath(iconLock),
   list: realAssetPath(iconList),
@@ -404,12 +414,10 @@ function WorkspaceRow({
   const [renaming, setRenaming] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
   const archived = isArchivedWorkspace(descriptor)
-  const directory = workspaceDirectory(descriptor)
-  const secondaryIcon = descriptor.workspaceKind === 'worktree' ? 'gitBranch' : 'folder'
-  const secondaryLabel =
-    descriptor.workspaceKind === 'worktree'
-      ? (descriptor.worktreeSlug ?? basename(directory))
-      : basename(directory)
+  // The meta line resolves the row's whole second line from the descriptor's
+  // runtime fields; slots without backing data are absent, and a line with
+  // nothing at all renders nothing rather than dead space.
+  const meta = workspaceMetaLine(descriptor)
 
   const startRename = () => {
     setNameDraft(workspaceDisplayName(descriptor))
@@ -494,7 +502,7 @@ function WorkspaceRow({
               flexGrow: 1,
             }}
           >
-            {workspaceDisplayName(descriptor)}
+            {workspaceRowTitle(descriptor)}
           </text>
           {hover ? (
             <OverflowMenu
@@ -518,23 +526,169 @@ function WorkspaceRow({
           ) : null}
         </div>
       )}
-      <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 5, paddingLeft: 13 }}>
-        <Icon name={secondaryIcon} size={12.5} color={C.tertiary} />
-        <text
+      {(meta.items.length > 0 || meta.checks || meta.trailing) && (
+        <div
+          testId="workspace-row-meta"
+          style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 5, paddingLeft: 13 }}
+        >
+          {meta.items.map((item) => (
+            <MetaItemView key={item.kind} item={item} />
+          ))}
+          {meta.checks && <MetaChecksView checks={meta.checks} />}
+          <div style={{ flexGrow: 1 }} />
+          {meta.trailing && <MetaTrailingView trailing={meta.trailing} />}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Tone → palette; the pure meta seam stays theme-free, so the mapping lives here. */
+function metaToneColor(tone: MetaTone): string {
+  switch (tone) {
+    case 'ok':
+      return C.ok
+    case 'warn':
+      return C.warn
+    case 'danger':
+      return C.danger
+    case 'accent':
+      return C.accent
+    default:
+      return C.tertiary
+  }
+}
+
+/**
+ * One meta-line slot. The branch item is the only flexing one: it absorbs a
+ * runaway branch name with its own ellipsis so the rest of the line and the
+ * trailing slot keep their ground.
+ */
+function MetaItemView({ item }: { item: WorkspaceMetaItem }) {
+  switch (item.kind) {
+    case 'branch':
+      return (
+        <div
           style={{
-            fontSize: 13,
-            lineHeight: 15,
-            color: C.tertiary,
-            flexGrow: 1,
+            display: 'flex',
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 4,
+            flexShrink: 1,
             minWidth: 0,
-            whiteSpace: 'nowrap',
-            textOverflow: 'ellipsis',
           }}
         >
-          {secondaryLabel}
+          <Icon name="gitBranch" size={11.5} color={C.tertiary} />
+          <text
+            style={{
+              fontSize: 12,
+              lineHeight: 15,
+              color: C.tertiary,
+              whiteSpace: 'nowrap',
+              textOverflow: 'ellipsis',
+              minWidth: 0,
+            }}
+          >
+            {item.text}
+          </text>
+          {item.dirty && <StatusDot color={C.warn} size={5} />}
+          {item.aheadBehind && (
+            <text style={{ fontSize: 11, lineHeight: 15, color: C.ghost, flexShrink: 0 }}>
+              {item.aheadBehind}
+            </text>
+          )}
+        </div>
+      )
+    case 'pullRequest':
+      return (
+        <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+          <Icon name="gitPullRequest" size={11.5} color={C.tertiary} />
+          <text style={{ fontSize: 12, lineHeight: 15, color: C.tertiary, whiteSpace: 'nowrap' }}>
+            {item.text}
+          </text>
+          {item.detail && (
+            <text style={{ fontSize: 11, lineHeight: 15, color: metaToneColor(item.tone), whiteSpace: 'nowrap' }}>
+              {item.detail}
+            </text>
+          )}
+        </div>
+      )
+    case 'services':
+      return (
+        <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+          <Icon name="zap" size={11.5} color={C.tertiary} />
+          <text style={{ fontSize: 12, lineHeight: 15, color: metaToneColor(item.tone), whiteSpace: 'nowrap' }}>
+            {item.text}
+          </text>
+        </div>
+      )
+    default: {
+      // Project, host, and labels are plain icon+text slots.
+      const icon: IconName = item.kind === 'project' ? 'folder' : item.kind === 'host' ? 'laptop' : 'tag'
+      return (
+        <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+          <Icon name={icon} size={11.5} color={C.tertiary} />
+          <text style={{ fontSize: 12, lineHeight: 15, color: C.tertiary, whiteSpace: 'nowrap' }}>
+            {item.text}
+          </text>
+        </div>
+      )
+    }
+  }
+}
+
+const CHECKS_ICON: Record<WorkspaceMetaChecks['status'], IconName> = {
+  success: 'check',
+  pending: 'rotateCcw',
+  failure: 'x',
+}
+
+const CHECKS_COLOR: Record<WorkspaceMetaChecks['status'], string> = {
+  success: C.ok,
+  pending: C.warn,
+  failure: C.danger,
+}
+
+/** The checks readout: one status-colored icon, plus its passed/total label when one resolved. */
+function MetaChecksView({ checks }: { checks: WorkspaceMetaChecks }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+      <Icon name={CHECKS_ICON[checks.status]} size={11.5} color={CHECKS_COLOR[checks.status]} />
+      {checks.label && (
+        <text style={{ fontSize: 11, lineHeight: 15, color: C.ghost, whiteSpace: 'nowrap' }}>
+          {checks.label}
         </text>
-      </div>
+      )}
     </div>
+  )
+}
+
+/**
+ * The right-aligned trailing slot. Diff stats mirror the TracksRow pill's
+ * `+n / -n` coloring with zero sides hidden; the activity alternative reads
+ * the same relative time the title line shows.
+ */
+function MetaTrailingView({ trailing }: { trailing: WorkspaceMetaTrailing }) {
+  if (trailing.kind === 'diffStat') {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+        {trailing.additions > 0 && (
+          <text style={{ fontSize: 11.5, lineHeight: 15, fontWeight: 500, color: C.ok, whiteSpace: 'nowrap' }}>
+            {`+\u2060${trailing.additions}`}
+          </text>
+        )}
+        {trailing.deletions > 0 && (
+          <text style={{ fontSize: 11.5, lineHeight: 15, fontWeight: 500, color: C.danger, whiteSpace: 'nowrap' }}>
+            {`-\u2060${trailing.deletions}`}
+          </text>
+        )}
+      </div>
+    )
+  }
+  return (
+    <text style={{ fontSize: 11.5, lineHeight: 15, color: C.ghost, flexShrink: 0 }}>
+      {relativeTimeAt(trailing.at)}
+    </text>
   )
 }
 
