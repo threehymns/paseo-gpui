@@ -1,6 +1,9 @@
 name: opencode-review
 
-# Automatic: every pull_request event (except bot actors).
+# Automatic: every pull_request event (except bot actors and draft PRs).
+# Draft PRs are never reviewed; the ready_for_review event runs the review once
+# the draft state is removed. Manual comment requests on a draft are also
+# skipped until it is marked ready.
 # Manual: comment "/review" or "/full-review" on a PR. Extra text after the
 # command goes to the reviewer as focus hints; the methodology stays fixed.
 #
@@ -27,7 +30,7 @@ on:
 jobs:
   review:
     if: |
-      (github.event_name == 'pull_request' && !endsWith(github.actor, '[bot]')) ||
+      (github.event_name == 'pull_request' && github.event.pull_request.draft == false && !endsWith(github.actor, '[bot]')) ||
       (
         github.event_name == 'issue_comment' &&
         github.event.issue.pull_request != null &&
@@ -61,10 +64,13 @@ jobs:
         run: |
           set -euo pipefail
           mode="whole"
+          draft="false"
 
           # Fail open to whole-PR on any transient API or fetch error; the
           # watermark is only an optimization for incremental scoping.
-          if head_sha="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha 2>/dev/null)"; then
+          if pr_data="$(gh api "repos/$REPO/pulls/$PR_NUMBER" 2>/dev/null)"; then
+            head_sha="$(jq -r .head.sha <<<"$pr_data")"
+            draft="$(jq -r .draft <<<"$pr_data")"
             git remote add prrepo "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" || git remote set-url prrepo "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
             if git fetch -q --depth=500 prrepo "$head_sha" 2>/dev/null || git fetch -q prrepo "$head_sha" 2>/dev/null; then
               # Watermark: the commit the last completed bot review examined.
@@ -81,7 +87,14 @@ jobs:
             mode="whole"
           fi
 
-          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          {
+            echo "draft=$draft"
+            echo "mode=$mode"
+          } >> "$GITHUB_OUTPUT"
+
+          if [[ "$draft" == "true" ]]; then
+            echo "PR is still a draft; skipping review until it is marked ready."
+          fi
           {
             echo "block<<SCOPE_EOF"
             if [[ "$mode" == "incremental" ]]; then
@@ -99,6 +112,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Run opencode review
+        if: steps.scope.outputs.draft != 'true'
         uses: anomalyco/opencode/github@latest
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
