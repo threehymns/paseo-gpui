@@ -14,6 +14,7 @@ import {
   type WorkspaceDescriptor,
   type WorkspaceUpdate,
 } from '../daemon/paseo'
+import { EMPTY_FILTERS, type WorkspaceFilters, workspaceHost, workspaceMatchesFilters } from './display-preferences'
 
 // ---- store -----------------------------------------------------------------
 
@@ -118,6 +119,73 @@ export function workspaceDisplayName(descriptor: WorkspaceDescriptor): string {
   return descriptor.name
 }
 
+/** The branch a workspace sits on, or null when the daemon reports none. */
+export function workspaceBranchName(descriptor: WorkspaceDescriptor): string | null {
+  const branch = descriptor.gitRuntime?.currentBranch?.trim()
+  return branch || null
+}
+
+/**
+ * The union of label names across every given descriptor, sorted for a stable
+ * menu. The labels submenu lists this union; a descriptor's own applied labels
+ * are the ones rendered checked.
+ */
+export function workspaceLabels(descriptors: readonly WorkspaceDescriptor[]): string[] {
+  const labels = new Set<string>()
+  for (const descriptor of descriptors) {
+    for (const label of descriptor.labels ?? []) labels.add(label)
+  }
+  return [...labels].sort()
+}
+
+// ---- aggregate status pill -----------------------------------------------------
+//
+// A collapsed project reduces to one status pill summarizing its workspaces.
+// The roll-up is most-urgent-wins over the descriptor's own status vocabulary —
+// the protocol's `running | attention | needs_input | failed | done`, not the
+// agent directory's StatusBucket (`working`/`review` in daemon/paseo.ts is a
+// different vocabulary that must not leak in here).
+
+/**
+ * Most-urgent-wins order over the workspace descriptor's status vocabulary:
+ * workspaces demanding the user's hand first (needs_input), then breakage
+ * (failed), then live work (running), then flagged-but-alive (attention), then
+ * finished (done). Earlier entries win a collapsed project's pill. The order is
+ * a strict total order, so no two distinct statuses can tie; workspaces that
+ * share the winning bucket collapse into the pill's count.
+ */
+export const WORKSPACE_STATUS_URGENCY: readonly WorkspaceDescriptor['status'][] = [
+  'needs_input',
+  'failed',
+  'running',
+  'attention',
+  'done',
+]
+
+/** One collapsed project's pill: the most urgent bucket and how many workspaces sit in it. */
+export interface WorkspaceAggregateStatus {
+  status: WorkspaceDescriptor['status']
+  /** Workspaces sharing the winning bucket — the "affected" count the pill shows. */
+  count: number
+}
+
+/**
+ * The most-urgent-wins roll-up for a collapsed project: the earliest entry of
+ * WORKSPACE_STATUS_URGENCY present among the descriptors, with the number of
+ * workspaces in that bucket. Aggregates exactly the descriptors it is given —
+ * visibility filtering stays the caller's job (project groups already filter).
+ * An empty project aggregates to null: nothing to summarize, no pill.
+ */
+export function aggregateWorkspaceStatus(
+  descriptors: WorkspaceDescriptor[],
+): WorkspaceAggregateStatus | null {
+  for (const status of WORKSPACE_STATUS_URGENCY) {
+    const count = descriptors.filter((descriptor) => descriptor.status === status).length
+    if (count > 0) return { status, count }
+  }
+  return null
+}
+
 // ---- sidebar groups ----------------------------------------------------------
 
 /** One collapsible project group: zero or more workspace rows. */
@@ -137,10 +205,19 @@ function groupActivity(group: WorkspaceProjectGroup): number | null {
  * Folds the store into collapsible project groups: each project with visible
  * workspaces, ordered by its most recent activity, then emptied projects in
  * name order so they still render. Rows inside a group stay recency-sorted.
+ *
+ * An active filter narrows which workspaces group; a project whose workspaces
+ * all fall to the filter simply does not appear (its rows are gone rather than
+ * misleadingly empty). Truly-empty projects from the daemon still render.
  */
-export function workspaceProjectGroups(store: WorkspaceStore, showArchived: boolean): WorkspaceProjectGroup[] {
+export function workspaceProjectGroups(
+  store: WorkspaceStore,
+  showArchived: boolean,
+  filters: WorkspaceFilters = EMPTY_FILTERS,
+): WorkspaceProjectGroup[] {
   const byProject = new Map<string, WorkspaceProjectGroup>()
   for (const descriptor of visibleWorkspaces(store.workspaces, showArchived)) {
+    if (!workspaceMatchesFilters(descriptor, filters)) continue
     let group = byProject.get(descriptor.projectId)
     if (!group) {
       group = {
@@ -172,6 +249,86 @@ export function workspaceProjectGroups(store: WorkspaceStore, showArchived: bool
     if (activityB != null) return 1
     return a.name.localeCompare(b.name)
   })
+  return groups
+}
+
+/** The heading union a filter menu offers: every host, project, and label. */
+export interface WorkspaceCatalog {
+  hosts: string[]
+  projects: { id: string; name: string }[]
+  labels: string[]
+}
+
+/**
+ * The filterable catalog the view menu derives once from the store: the sorted
+ * union of hostnames and labels across every descriptor, plus the projects as
+ * the sidebar actually groups them (archived rows hidden unless revealed).
+ * This is the menu's source of truth, kept here so the sidebar's host/label
+ * union does not duplicate the labels logic that workspaceLabels already owns.
+ */
+export function workspaceCatalog(store: WorkspaceStore, showArchived: boolean): WorkspaceCatalog {
+  const hosts = new Set<string>()
+  const labels = new Set<string>()
+  for (const descriptor of store.workspaces) {
+    const host = workspaceHost(descriptor)
+    if (host) hosts.add(host)
+    for (const label of descriptor.labels ?? []) labels.add(label)
+  }
+  const projects = workspaceProjectGroups(store, showArchived).map((group) => ({
+    id: group.projectId,
+    name: group.name,
+  }))
+  return {
+    hosts: [...hosts].sort(),
+    projects,
+    labels: [...labels].sort(),
+  }
+}
+
+// ---- status grouping ----------------------------------------------------------
+//
+// Status group mode arranges the sidebar the way the agent directory's buckets
+// do — trouble first, then live work, then done — but over the workspace
+// descriptor's own status vocabulary (running | attention | needs_input |
+// failed | done), never the agent dialect (working/review) that must not leak
+// in here. The bucket order reuses WORKSPACE_STATUS_URGENCY.
+
+/** One status bucket group in status group mode. */
+export interface WorkspaceStatusGroup {
+  status: WorkspaceDescriptor['status']
+  label: string
+  workspaces: WorkspaceDescriptor[]
+}
+
+const WORKSPACE_STATUS_LABELS: Record<WorkspaceDescriptor['status'], string> = {
+  needs_input: 'Needs input',
+  failed: 'Failed',
+  running: 'Running',
+  attention: 'Attention',
+  done: 'Done',
+}
+
+/**
+ * Folds the visible, filter-matching workspaces into status groups in
+ * WORKSPACE_STATUS_URGENCY order, each recency-sorted; groups with nothing to
+ * show are omitted. A collapsed status group aggregates like a project's pill.
+ */
+export function workspaceStatusGroups(
+  store: WorkspaceStore,
+  showArchived: boolean,
+  filters: WorkspaceFilters = EMPTY_FILTERS,
+): WorkspaceStatusGroup[] {
+  const visible = visibleWorkspaces(store.workspaces, showArchived).filter((descriptor) =>
+    workspaceMatchesFilters(descriptor, filters),
+  )
+  const sorted = sortWorkspaces(visible)
+  const groups: WorkspaceStatusGroup[] = []
+  for (const status of WORKSPACE_STATUS_URGENCY) {
+    const workspaces = sorted.filter((descriptor) => descriptor.status === status)
+    if (workspaces.length > 0) {
+      groups.push({ status, label: WORKSPACE_STATUS_LABELS[status], workspaces })
+    }
+  }
   return groups
 }
 

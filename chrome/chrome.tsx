@@ -6,11 +6,10 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import React, { useMemo, useState } from 'react'
-import { Select, SelectContent, SelectItem, SelectTrigger } from '@gpuix/react'
+import React, { useEffect, useMemo, useState } from 'react'
+import { Select, SelectContent, SelectItem, SelectLabel, SelectSeparator, SelectTrigger } from '@gpuix/react'
 import {
   DAEMON_URL,
-  basename,
   displayName,
   isArchived,
   relativeTime,
@@ -21,17 +20,45 @@ import {
   type WorkspaceDescriptor,
 } from '../daemon/paseo'
 import {
+  aggregateWorkspaceStatus,
   isArchivedWorkspace,
+  visibleWorkspaces,
   workspaceActivityAt,
-  workspaceDisplayName,
+  workspaceBranchName,
+  workspaceCatalog,
   workspaceDirectory,
+  workspaceDisplayName,
+  workspaceLabels,
   workspaceProjectGroups,
+  workspaceStatusGroups,
+  type WorkspaceAggregateStatus,
+  type WorkspaceStatusGroup,
   type WorkspaceStore,
 } from '../agent-directory/workspaces'
+import { visibleWorkspaceIds } from '../agent-directory/workspace-shortcuts'
 import {
+  workspaceMetaLine,
+  workspaceRowTitle,
+  type MetaTone,
+  type WorkspaceMetaChecks,
+  type WorkspaceMetaConfig,
+  type WorkspaceMetaItem,
+  type WorkspaceMetaTrailing,
+} from '../agent-directory/workspace-meta'
+import {
+  hasActiveFilters,
+  labelColor,
+  UNLABELLED_LABEL,
+  workspaceMatchesFilters,
+  type WorkspaceFilters,
+} from '../agent-directory/display-preferences'
+import {
+  directoryGrouping,
   showArchivedAgents,
   showArchivedWorkspaces,
   useAppState,
+  workspaceFilters,
+  workspaceMetaConfig,
   type AppStore,
 } from '../app-state'
 import { C, SIDEBAR_WIDTH, TITLEBAR_HEIGHT, TRAFFIC_LIGHT_CLEARANCE } from './theme'
@@ -54,6 +81,8 @@ import iconArrowRight from '../assets/icons/arrow-right.svg' with { type: 'file'
 import iconFolder from '../assets/icons/folder.svg' with { type: 'file' }
 import iconFile from '../assets/icons/file.svg' with { type: 'file' }
 import iconGitBranch from '../assets/icons/git-branch.svg' with { type: 'file' }
+import iconGitPullRequest from '../assets/icons/git-pull-request.svg' with { type: 'file' }
+import iconTag from '../assets/icons/tag.svg' with { type: 'file' }
 
 import iconLaptop from '../assets/icons/laptop.svg' with { type: 'file' }
 import iconLock from '../assets/icons/lock.svg' with { type: 'file' }
@@ -84,6 +113,8 @@ const ICONS = {
   folder: realAssetPath(iconFolder),
   file: realAssetPath(iconFile),
   gitBranch: realAssetPath(iconGitBranch),
+  gitPullRequest: realAssetPath(iconGitPullRequest),
+  tag: realAssetPath(iconTag),
   laptop: realAssetPath(iconLaptop),
   lock: realAssetPath(iconLock),
   list: realAssetPath(iconList),
@@ -219,12 +250,34 @@ function SidebarAction({
   )
 }
 
-export type RowActionVerb = 'rename' | 'archive' | 'delete' | 'detach'
+export type RowActionVerb =
+  | 'rename'
+  | 'archive'
+  | 'delete'
+  | 'detach'
+  | 'pin'
+  | 'unpin'
+  | 'labels'
+  | 'mark-read'
 
 /** One row lifecycle call in flight; every action on that row stays disabled until it settles. */
 export interface RowActionRef {
   verb: RowActionVerb
   id: string
+}
+
+/**
+ * The momentary pending copy each in-flight verb shows at the row's tail, so a
+ * busy row says what it is doing rather than going quiet while it disables.
+ * Verbs with no visible progress (rename editing inline, copy, delete/detach on
+ * other surfaces) read nothing here.
+ */
+const ROW_PENDING: Partial<Record<RowActionVerb, string>> = {
+  archive: 'Archiving…',
+  pin: 'Pinning…',
+  unpin: 'Unpinning…',
+  labels: 'Updating labels…',
+  'mark-read': 'Marking read…',
 }
 
 const VIEW_MENU_WIDTH = 232
@@ -284,25 +337,85 @@ function ViewSection({ label }: { label: string }) {
 }
 
 /**
- * The sidebar's display-preferences popover, mirroring Paseo's: one trigger in
- * the section header and visibility toggles under Show. The directory itself
- * always renders as collapsible project groups of workspaces, so there is no
- * grouping choice anymore.
+ * The sidebar's display-preferences popover, mirroring Paseo's: grouping,
+ * the Show page (meta-line slot toggles + checks/trailing/title radios) and
+ * the host / project / label filters. Every choice persists via app-state and
+ * takes effect immediately. @gpuix/react's Select has no nested submenu, so
+ * the checks options render inline as their own section.
  */
 function ViewPreferencesMenu({
+  grouping,
+  onGroupingChange,
   showArchived,
   onShowArchivedChange,
   showArchivedAgents,
   onShowArchivedAgentsChange,
+  meta,
+  onMetaChange,
+  filters,
+  onFiltersChange,
+  catalog,
 }: {
+  grouping: 'status' | 'project'
+  onGroupingChange: (value: 'status' | 'project') => void
   showArchived: boolean
   onShowArchivedChange: (show: boolean) => void
   showArchivedAgents: boolean
   onShowArchivedAgentsChange: (show: boolean) => void
+  meta: WorkspaceMetaConfig
+  onMetaChange: (config: WorkspaceMetaConfig) => void
+  filters: WorkspaceFilters
+  onFiltersChange: (filters: WorkspaceFilters) => void
+  /** Filterable values discovered from the store, for the filter lists. */
+  catalog: { hosts: string[]; projects: { id: string; name: string }[]; labels: string[] }
 }) {
+  const slotToggle = (slot: keyof WorkspaceMetaConfig['slots']) => {
+    onMetaChange({ ...meta, slots: { ...meta.slots, [slot]: !meta.slots[slot] } })
+  }
+  const toggleLabel = (label: string) => {
+    const labels = filters.labels.includes(label)
+      ? filters.labels.filter((item) => item !== label)
+      : [...filters.labels, label]
+    onFiltersChange({ ...filters, labels })
+  }
+  const hasFilter = filters.hosts.length > 0 || filters.projects.length > 0 || filters.labels.length > 0
+
   const runChoice = (choice: string) => {
-    if (choice === 'show:archived') onShowArchivedChange(!showArchived)
-    if (choice === 'show:archived-agents') onShowArchivedAgentsChange(!showArchivedAgents)
+    if (choice === 'group:project') onGroupingChange('project')
+    else if (choice === 'group:status') onGroupingChange('status')
+    else if (choice === 'show:archived') onShowArchivedChange(!showArchived)
+    else if (choice === 'show:archived-agents') onShowArchivedAgentsChange(!showArchivedAgents)
+    else if (choice.startsWith('slot:')) {
+      const slot = choice.slice('slot:'.length) as keyof WorkspaceMetaConfig['slots']
+      slotToggle(slot)
+    } else if (choice.startsWith('checks:')) {
+      const mode = choice.slice('checks:'.length) as WorkspaceMetaConfig['checksMode']
+      onMetaChange({ ...meta, checksMode: mode })
+    } else if (choice.startsWith('trailing:')) {
+      const trailing = choice.slice('trailing:'.length) as WorkspaceMetaConfig['trailing']
+      onMetaChange({ ...meta, trailing })
+    } else if (choice.startsWith('title:')) {
+      const titleSource = choice.slice('title:'.length) as WorkspaceMetaConfig['titleSource']
+      onMetaChange({ ...meta, titleSource })
+    } else if (choice.startsWith('host:')) {
+      const host = choice.slice('host:'.length)
+      onFiltersChange({
+        ...filters,
+        hosts: filters.hosts.includes(host) ? filters.hosts.filter((item) => item !== host) : [...filters.hosts, host],
+      })
+    } else if (choice.startsWith('project:')) {
+      const projectId = choice.slice('project:'.length)
+      onFiltersChange({
+        ...filters,
+        projects: filters.projects.includes(projectId)
+          ? filters.projects.filter((item) => item !== projectId)
+          : [...filters.projects, projectId],
+      })
+    } else if (choice.startsWith('label:')) {
+      toggleLabel(choice.slice('label:'.length))
+    } else if (choice === 'clear-filters') {
+      onFiltersChange({ hosts: [], projects: [], labels: [] })
+    }
   }
 
   return (
@@ -325,6 +438,108 @@ function ViewPreferencesMenu({
         <Icon name="listFilter" size={14} color={C.secondary} />
       </SelectTrigger>
       <SelectContent side="bottom" align="end" sideOffset={4} style={{ width: VIEW_MENU_WIDTH }}>
+        <ViewSection label="Group by" />
+        <SelectItem value="group:project" textValue="Project">
+          <ViewOption icon="folder" label="Project" selected={grouping === 'project'} />
+        </SelectItem>
+        <SelectItem value="group:status" textValue="Status">
+          <ViewOption icon="zap" label="Status" selected={grouping === 'status'} />
+        </SelectItem>
+        <SelectSeparator />
+
+        <ViewSection label="Show" />
+        <SelectItem value="slot:branch" textValue="Branch">
+          <ViewOption icon="gitBranch" label="Branch" selected={meta.slots.branch} />
+        </SelectItem>
+        <SelectItem value="slot:pullRequest" textValue="Pull request">
+          <ViewOption icon="gitPullRequest" label="Pull request" selected={meta.slots.pullRequest} />
+        </SelectItem>
+        <SelectItem value="slot:services" textValue="Services">
+          <ViewOption icon="zap" label="Services" selected={meta.slots.services} />
+        </SelectItem>
+        <SelectItem value="slot:project" textValue="Project name">
+          <ViewOption icon="folder" label="Project name" selected={meta.slots.project} />
+        </SelectItem>
+        <SelectItem value="slot:host" textValue="Host">
+          <ViewOption icon="laptop" label="Host" selected={meta.slots.host} />
+        </SelectItem>
+        <SelectItem value="slot:labels" textValue="Labels">
+          <ViewOption icon="tag" label="Labels" selected={meta.slots.labels} />
+        </SelectItem>
+        <SelectSeparator />
+
+        <ViewSection label="Checks" />
+        <SelectItem value="checks:iconText" textValue="Icon and text">
+          <ViewOption icon="check" label="Icon and text" selected={meta.checksMode === 'iconText'} />
+        </SelectItem>
+        <SelectItem value="checks:iconOnly" textValue="Icon only">
+          <ViewOption icon="check" label="Icon only" selected={meta.checksMode === 'iconOnly'} />
+        </SelectItem>
+        <SelectItem value="checks:hidden" textValue="Hidden">
+          <ViewOption icon="x" label="Hidden" selected={meta.checksMode === 'hidden'} />
+        </SelectItem>
+        <SelectSeparator />
+
+        <ViewSection label="Trailing slot" />
+        <SelectItem value="trailing:diffStat" textValue="Diff stats">
+          <ViewOption icon="file" label="Diff stats" selected={meta.trailing === 'diffStat'} />
+        </SelectItem>
+        <SelectItem value="trailing:activity" textValue="Last activity">
+          <ViewOption icon="rotateCcw" label="Last activity" selected={meta.trailing === 'activity'} />
+        </SelectItem>
+        <SelectSeparator />
+
+        <ViewSection label="Row title" />
+        <SelectItem value="title:title" textValue="Title">
+          <ViewOption icon="pencil" label="Title" selected={meta.titleSource === 'title'} />
+        </SelectItem>
+        <SelectItem value="title:branch" textValue="Branch name">
+          <ViewOption icon="gitBranch" label="Branch name" selected={meta.titleSource === 'branch'} />
+        </SelectItem>
+        <SelectSeparator />
+
+        {catalog.hosts.length > 1 && (
+          <>
+            <ViewSection label="Host" />
+            {catalog.hosts.map((host) => (
+              <SelectItem key={host} value={`host:${host}`} textValue={host}>
+                <ViewOption icon="laptop" label={host} selected={filters.hosts.includes(host)} />
+              </SelectItem>
+            ))}
+            <SelectSeparator />
+          </>
+        )}
+
+        {catalog.projects.length > 1 && (
+          <>
+            <ViewSection label="Project" />
+            {catalog.projects.map((project) => (
+              <SelectItem key={project.id} value={`project:${project.id}`} textValue={project.name}>
+                <ViewOption icon="folder" label={project.name} selected={filters.projects.includes(project.id)} />
+              </SelectItem>
+            ))}
+            <SelectSeparator />
+          </>
+        )}
+
+        {catalog.labels.length > 0 && (
+          <>
+            <ViewSection label="Label" />
+            {catalog.labels.map((label) => (
+              <SelectItem key={label} value={`label:${label}`} textValue={label}>
+                <LabelOption label={label} selected={filters.labels.includes(label)} />
+              </SelectItem>
+            ))}
+            <SelectItem value={`label:${UNLABELLED_LABEL}`} textValue="Unlabelled">
+              <LabelOption label="Unlabelled" unlabelled selected={filters.labels.includes(UNLABELLED_LABEL)} />
+            </SelectItem>
+            <SelectItem value="clear-filters" textValue="Clear filter">
+              <ViewOption icon="x" label="Clear filter" selected={hasFilter} />
+            </SelectItem>
+            <SelectSeparator />
+          </>
+        )}
+
         <ViewSection label="Show" />
         <SelectItem value="show:archived" textValue="Archived workspaces">
           <ViewOption icon="archive" label="Archived workspaces" selected={showArchived} />
@@ -334,6 +549,46 @@ function ViewPreferencesMenu({
         </SelectItem>
       </SelectContent>
     </Select>
+  )
+}
+
+/**
+ * A filter option whose leading dot carries the label's deterministic color.
+ * Unlabelled renders a hollow dot so it reads as "nothing" rather than a color.
+ */
+function LabelOption({ label, selected, unlabelled }: { label: string; selected: boolean; unlabelled?: boolean }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+        width: '100%',
+        paddingTop: 5,
+        paddingBottom: 5,
+        paddingLeft: 8,
+        paddingRight: 8,
+        borderRadius: 7,
+        hover: { backgroundColor: '#404040' },
+      }}
+    >
+      <div
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: 4,
+          flexShrink: 0,
+          backgroundColor: unlabelled ? '#00000000' : labelColor(label),
+          borderWidth: 1,
+          borderColor: C.ghost,
+        }}
+      />
+      <text style={{ fontSize: 12.5, fontWeight: 500, color: C.text, flexGrow: 1, minWidth: 0 }}>
+        {label}
+      </text>
+      {selected && <Icon name="check" size={11} color={C.secondary} />}
+    </div>
   )
 }
 
@@ -352,32 +607,86 @@ export function workspaceStatusColor(status: WorkspaceDescriptor['status']): str
   }
 }
 
+/**
+ * A collapsed project's aggregate status pill: one dot in the most urgent
+ * bucket's color plus the count of workspaces sharing that bucket. Display
+ * only — the header row stays the click target for expanding.
+ */
+function AggregateStatusPill({ aggregate }: { aggregate: WorkspaceAggregateStatus }) {
+  return (
+    <div
+      testId="project-status-pill"
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 4,
+        height: 16,
+        paddingLeft: 6,
+        paddingRight: 6,
+        borderRadius: 8,
+        backgroundColor: C.item,
+        flexShrink: 0,
+      }}
+    >
+      <StatusDot color={workspaceStatusColor(aggregate.status)} size={6} />
+      <text style={{ fontSize: 10.5, fontWeight: 500, lineHeight: 14, color: C.tertiary }}>
+        {aggregate.count}
+      </text>
+    </div>
+  )
+}
+
 function WorkspaceRow({
   descriptor,
+  config,
   active,
   busy,
+  busyVerb,
+  availableLabels,
   onSelect,
   onRename,
   onArchive,
+  onCopy,
+  onMarkRead,
+  onPin,
+  onToggleLabel,
+  onClearLabels,
 }: {
   descriptor: WorkspaceDescriptor
+  /** The persisted meta-line configuration; defaults live in workspace-meta. */
+  config: WorkspaceMetaConfig
   active: boolean
-  /** True while any lifecycle action on this row is in flight. */
+  /** True while any lifecycle action on this row is in flight; disables every action. */
   busy: boolean
+  /** The verb of the in-flight action, to drive per-action pending copy. */
+  busyVerb: RowActionVerb | null
+  /** The union of label names the submenu can toggle, drawn from the visible directory. */
+  availableLabels: string[]
   onSelect: (id: string) => void
   onRename: (id: string, name: string) => void
   onArchive: (id: string) => void
+  onCopy: (value: string) => void
+  onMarkRead: (id: string) => void
+  onPin: (id: string, pinned: boolean) => void
+  onToggleLabel: (id: string, name: string, applied: boolean) => void
+  onClearLabels: (id: string) => void
 }) {
   const [hover, setHover] = useState(false)
   const [renaming, setRenaming] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
   const archived = isArchivedWorkspace(descriptor)
-  const directory = workspaceDirectory(descriptor)
-  const secondaryIcon = descriptor.workspaceKind === 'worktree' ? 'gitBranch' : 'folder'
-  const secondaryLabel =
-    descriptor.workspaceKind === 'worktree'
-      ? (descriptor.worktreeSlug ?? basename(directory))
-      : basename(directory)
+  const pinned = descriptor.pinnedAt != null
+  const branch = workspaceBranchName(descriptor)
+  const appliedLabels = descriptor.labels ?? []
+  const archiving = busyVerb === 'archive'
+  // The in-flight verb, if any, reads out at the row's tail so a busy row says
+  // what it is doing while every action stays disabled.
+  const pending = busy && busyVerb ? ROW_PENDING[busyVerb] ?? null : null
+  // The meta line resolves the row's whole second line from the descriptor's
+  // runtime fields; slots without backing data are absent, and a line with
+  // nothing at all renders nothing rather than dead space.
+  const meta = workspaceMetaLine(descriptor, config)
 
   const startRename = () => {
     setNameDraft(workspaceDisplayName(descriptor))
@@ -396,10 +705,34 @@ function WorkspaceRow({
     onRename(descriptor.id, next)
   }
 
-  const runAction = (action: RowActionVerb) => {
+  /**
+   * Dispatches a menu value. Copy/pin/labels/mark-read are the ticket's new
+   * row actions; labels arrive as `label:<name>`. Busy disables everything
+   * until the in-flight call settles, so a guard up front is all we need.
+   */
+  const runAction = (value: string) => {
     if (busy) return
-    if (action === 'rename') startRename()
-    else onArchive(descriptor.id)
+    if (value === 'rename') {
+      startRename()
+    } else if (value === 'copy-path') {
+      const directory = workspaceDirectory(descriptor)
+      if (directory) onCopy(directory)
+    } else if (value === 'copy-branch') {
+      if (branch) onCopy(branch)
+    } else if (value === 'mark-read') {
+      onMarkRead(descriptor.id)
+    } else if (value === 'pin') {
+      onPin(descriptor.id, true)
+    } else if (value === 'unpin') {
+      onPin(descriptor.id, false)
+    } else if (value === 'labels-clear') {
+      onClearLabels(descriptor.id)
+    } else if (value.startsWith('label:')) {
+      const name = value.slice('label:'.length)
+      onToggleLabel(descriptor.id, name, !appliedLabels.includes(name))
+    } else if (value === 'archive') {
+      onArchive(descriptor.id)
+    }
   }
 
   return (
@@ -462,20 +795,57 @@ function WorkspaceRow({
               flexGrow: 1,
             }}
           >
-            {workspaceDisplayName(descriptor)}
+            {workspaceRowTitle(descriptor, config)}
           </text>
+          {pending && (
+            <text style={{ fontSize: 12, color: C.ghost, flexShrink: 0 }} testId="workspace-pending">
+              {pending}
+            </text>
+          )}
           {hover ? (
-            <OverflowMenu
-              testId="workspace-row-menu"
-              side="right"
-              onAction={(action) => runAction(action as RowActionVerb)}
-            >
+            <OverflowMenu testId="workspace-row-menu" side="right" onAction={runAction}>
+              <SelectItem value="copy-path" textValue="Copy path">
+                <MenuAction label="Copy path" disabled={busy || !workspaceDirectory(descriptor)} />
+              </SelectItem>
+              <SelectItem value="copy-branch" textValue="Copy branch name">
+                <MenuAction label="Copy branch name" disabled={busy || !branch} />
+              </SelectItem>
               <SelectItem value="rename" textValue="Rename">
                 <MenuAction label="Rename" disabled={busy} />
               </SelectItem>
+              <SelectItem value="mark-read" textValue="Mark as read">
+                <MenuAction label="Mark as read" disabled={busy} />
+              </SelectItem>
+              <SelectItem value={pinned ? 'unpin' : 'pin'} textValue={pinned ? 'Unpin' : 'Pin to top'}>
+                <MenuAction label={pinned ? 'Unpin' : 'Pin to top'} disabled={busy} />
+              </SelectItem>
+              {availableLabels.length > 0 && (
+                <>
+                  <SelectSeparator />
+                  <SelectLabel
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      height: 22,
+                      paddingLeft: 8,
+                    }}
+                  >
+                    <text style={{ fontSize: 11.5, fontWeight: 500, color: C.ghost }}>Labels</text>
+                  </SelectLabel>
+                  {availableLabels.map((name) => (
+                    <SelectItem key={name} value={`label:${name}`} textValue={name}>
+                      <MenuAction label={name} checked={appliedLabels.includes(name)} disabled={busy} />
+                    </SelectItem>
+                  ))}
+                  <SelectItem value="labels-clear" textValue="Clear all labels">
+                    <MenuAction label="Clear all labels" disabled={busy || appliedLabels.length === 0} />
+                  </SelectItem>
+                </>
+              )}
               {!archived && (
-                <SelectItem value="archive" textValue="Archive">
-                  <MenuAction label="Archive" disabled={busy} />
+                <SelectItem value="archive" textValue={archiving ? 'Archiving…' : 'Archive'}>
+                  <MenuAction label={archiving ? 'Archiving…' : 'Archive'} tone="danger" disabled={busy} />
                 </SelectItem>
               )}
             </OverflowMenu>
@@ -486,28 +856,184 @@ function WorkspaceRow({
           ) : null}
         </div>
       )}
-      <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 5, paddingLeft: 13 }}>
-        <Icon name={secondaryIcon} size={12.5} color={C.tertiary} />
-        <text
-          style={{
-            fontSize: 13,
-            lineHeight: 15,
-            color: C.tertiary,
-            flexGrow: 1,
-            minWidth: 0,
-            whiteSpace: 'nowrap',
-            textOverflow: 'ellipsis',
-          }}
+      {(meta.items.length > 0 || meta.checks || meta.trailing) && (
+        <div
+          testId="workspace-row-meta"
+          style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 5, paddingLeft: 13 }}
         >
-          {secondaryLabel}
-        </text>
-      </div>
+          {meta.items.map((item) => (
+            <MetaItemView key={item.kind} item={item} />
+          ))}
+          {meta.checks && <MetaChecksView checks={meta.checks} />}
+          <div style={{ flexGrow: 1 }} />
+          {meta.trailing && <MetaTrailingView trailing={meta.trailing} />}
+        </div>
+      )}
     </div>
   )
 }
 
-/** One row-action menu entry; danger rows carry their own tone. */
-function MenuAction({ label, tone, disabled }: { label: string; tone?: 'danger'; disabled?: boolean }) {
+/** Tone → palette; the pure meta seam stays theme-free, so the mapping lives here. */
+function metaToneColor(tone: MetaTone): string {
+  switch (tone) {
+    case 'ok':
+      return C.ok
+    case 'warn':
+      return C.warn
+    case 'danger':
+      return C.danger
+    case 'accent':
+      return C.accent
+    default:
+      return C.tertiary
+  }
+}
+
+/**
+ * One meta-line slot. The branch item is the only flexing one: it absorbs a
+ * runaway branch name with its own ellipsis so the rest of the line and the
+ * trailing slot keep their ground.
+ */
+function MetaItemView({ item }: { item: WorkspaceMetaItem }) {
+  switch (item.kind) {
+    case 'branch':
+      return (
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 4,
+            flexShrink: 1,
+            minWidth: 0,
+          }}
+        >
+          <Icon name="gitBranch" size={11.5} color={C.tertiary} />
+          <text
+            style={{
+              fontSize: 12,
+              lineHeight: 15,
+              color: C.tertiary,
+              whiteSpace: 'nowrap',
+              textOverflow: 'ellipsis',
+              minWidth: 0,
+            }}
+          >
+            {item.text}
+          </text>
+          {item.dirty && <StatusDot color={C.warn} size={5} />}
+          {item.aheadBehind && (
+            <text style={{ fontSize: 11, lineHeight: 15, color: C.ghost, flexShrink: 0 }}>
+              {item.aheadBehind}
+            </text>
+          )}
+        </div>
+      )
+    case 'pullRequest':
+      return (
+        <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+          <Icon name="gitPullRequest" size={11.5} color={C.tertiary} />
+          <text style={{ fontSize: 12, lineHeight: 15, color: C.tertiary, whiteSpace: 'nowrap' }}>
+            {item.text}
+          </text>
+          {item.detail && (
+            <text style={{ fontSize: 11, lineHeight: 15, color: metaToneColor(item.tone), whiteSpace: 'nowrap' }}>
+              {item.detail}
+            </text>
+          )}
+        </div>
+      )
+    case 'services':
+      return (
+        <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+          <Icon name="zap" size={11.5} color={C.tertiary} />
+          <text style={{ fontSize: 12, lineHeight: 15, color: metaToneColor(item.tone), whiteSpace: 'nowrap' }}>
+            {item.text}
+          </text>
+        </div>
+      )
+    default: {
+      // Project, host, and labels are plain icon+text slots.
+      const icon: IconName = item.kind === 'project' ? 'folder' : item.kind === 'host' ? 'laptop' : 'tag'
+      return (
+        <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+          <Icon name={icon} size={11.5} color={C.tertiary} />
+          <text style={{ fontSize: 12, lineHeight: 15, color: C.tertiary, whiteSpace: 'nowrap' }}>
+            {item.text}
+          </text>
+        </div>
+      )
+    }
+  }
+}
+
+const CHECKS_ICON: Record<WorkspaceMetaChecks['status'], IconName> = {
+  success: 'check',
+  pending: 'rotateCcw',
+  failure: 'x',
+}
+
+const CHECKS_COLOR: Record<WorkspaceMetaChecks['status'], string> = {
+  success: C.ok,
+  pending: C.warn,
+  failure: C.danger,
+}
+
+/** The checks readout: one status-colored icon, plus its passed/total label when one resolved. */
+function MetaChecksView({ checks }: { checks: WorkspaceMetaChecks }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+      <Icon name={CHECKS_ICON[checks.status]} size={11.5} color={CHECKS_COLOR[checks.status]} />
+      {checks.label && (
+        <text style={{ fontSize: 11, lineHeight: 15, color: C.ghost, whiteSpace: 'nowrap' }}>
+          {checks.label}
+        </text>
+      )}
+    </div>
+  )
+}
+
+/**
+ * The right-aligned trailing slot. Diff stats mirror the TracksRow pill's
+ * `+n / -n` coloring with zero sides hidden; the activity alternative reads
+ * the same relative time the title line shows.
+ */
+function MetaTrailingView({ trailing }: { trailing: WorkspaceMetaTrailing }) {
+  if (trailing.kind === 'diffStat') {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+        {trailing.additions > 0 && (
+          <text style={{ fontSize: 11.5, lineHeight: 15, fontWeight: 500, color: C.ok, whiteSpace: 'nowrap' }}>
+            {`+\u2060${trailing.additions}`}
+          </text>
+        )}
+        {trailing.deletions > 0 && (
+          <text style={{ fontSize: 11.5, lineHeight: 15, fontWeight: 500, color: C.danger, whiteSpace: 'nowrap' }}>
+            {`-\u2060${trailing.deletions}`}
+          </text>
+        )}
+      </div>
+    )
+  }
+  return (
+    <text style={{ fontSize: 11.5, lineHeight: 15, color: C.ghost, flexShrink: 0 }}>
+      {relativeTimeAt(trailing.at)}
+    </text>
+  )
+}
+
+/** One row-action menu entry; danger rows carry their own tone, checked rows show a check. */
+function MenuAction({
+  label,
+  tone,
+  disabled,
+  checked,
+}: {
+  label: string
+  tone?: 'danger'
+  disabled?: boolean
+  checked?: boolean
+}) {
   return (
     <div
       style={{
@@ -524,9 +1050,10 @@ function MenuAction({ label, tone, disabled }: { label: string; tone?: 'danger';
         hover: disabled ? undefined : { backgroundColor: '#404040' },
       }}
     >
-      <text style={{ fontSize: 12.5, fontWeight: 500, color: tone === 'danger' ? C.danger : C.text }}>
+      <text style={{ fontSize: 12.5, fontWeight: 500, color: tone === 'danger' ? C.danger : C.text, flexGrow: 1 }}>
         {label}
       </text>
+      {checked && <Icon name="check" size={11} color={C.secondary} />}
     </div>
   )
 }
@@ -647,15 +1174,21 @@ function ArchivedAgentRow({
   )
 }
 
-/** One collapsible project group header: chevron, name, click toggles its rows. */
+/**
+ * One collapsible project group header: chevron, name, and — while collapsed —
+ * the project's aggregate status pill. Clicking anywhere on it toggles.
+ */
 function ProjectGroupHeader({
   name,
   collapsed,
   onToggle,
+  pill,
 }: {
   name: string
   collapsed: boolean
   onToggle: () => void
+  /** Trailing adornment; the collapsed project's aggregate status pill. */
+  pill?: React.ReactNode
 }) {
   return (
     <div
@@ -687,8 +1220,18 @@ function ProjectGroupHeader({
       >
         {name}
       </text>
+      {pill}
     </div>
   )
+}
+
+/** One sidebar row-group in the joined project/status shape the render loop walks. */
+interface SidebarGroup {
+  key: string
+  name: string
+  workspaces: WorkspaceDescriptor[]
+  /** Fixed for status groups (every row shares the bucket); null for project groups. */
+  fixedStatus: WorkspaceAggregateStatus | null
 }
 
 export function Sidebar({
@@ -705,10 +1248,16 @@ export function Sidebar({
   busyRows,
   onArchive,
   onRename,
+  onCopy,
+  onMarkRead,
+  onPin,
+  onToggleLabel,
+  onClearLabels,
   appStore,
   navState,
   onNavBack,
   onNavForward,
+  onVisibleRowsChange,
 }: {
   /** The whole workspace directory, written only by the daemon subscription. */
   workspaces: WorkspaceStore
@@ -727,23 +1276,64 @@ export function Sidebar({
   busyRows: RowActionRef[]
   onArchive: (id: string) => void
   onRename: (id: string, name: string) => void
+  onCopy: (value: string) => void
+  onMarkRead: (id: string) => void
+  onPin: (id: string, pinned: boolean) => void
+  onToggleLabel: (id: string, name: string, applied: boolean) => void
+  onClearLabels: (id: string) => void
   /** Persisted app state; the sidebar's view choices survive a restart. */
   appStore: AppStore
   /** The visited-agent history's edges, driving the nav arrows' enablement. */
   navState: { canBack: boolean; canForward: boolean }
   onNavBack: () => void
   onNavForward: () => void
+  /** Reports the current visible-walk-order of rows, for the jump shortcuts' handler. */
+  onVisibleRowsChange: (ids: string[]) => void
 }) {
   const [showArchived, setShowArchived] = useAppState(appStore, showArchivedWorkspaces)
   // The local state can't share the StateKey's name: the initializer would
   // read the destructured binding itself (TDZ), not the module-level key.
   const [revealArchivedAgents, setRevealArchivedAgents] = useAppState(appStore, showArchivedAgents)
-  // Collapse state is view state; the store itself stays daemon-written. The
-  // Archived reveal section collapses like the project groups under a key no
-  // workspace can own.
+  const [grouping, setGrouping] = useAppState(appStore, directoryGrouping)
+  const [meta, setMeta] = useAppState(appStore, workspaceMetaConfig)
+  const [filters, setFilters] = useAppState(appStore, workspaceFilters)
+  // Collapse state is view state; the store itself stays daemon-written. It is
+  // component-local on purpose: toggling only re-renders the sidebar, so the
+  // open conversation and the selected row — chat.tsx state this toggle never
+  // touches — stay undisturbed. The Archived reveal section collapses like the
+  // project groups under a key no workspace can own.
   const [collapsedProjects, setCollapsedProjects] = useState<ReadonlySet<string>>(new Set())
   const ARCHIVED_GROUP_ID = '__archived__'
-  const groups = useMemo(() => workspaceProjectGroups(workspaces, showArchived), [workspaces, showArchived])
+  // The filterable catalog derives from the live store: the sorted union of
+  // hosts and labels plus the projects as grouped. The derivation is pure (see
+  // workspaceCatalog in the seam) so it stays testable alongside the store.
+  const catalog = useMemo(() => workspaceCatalog(workspaces, showArchived), [workspaces, showArchived])
+  // Both group modes collapse to one joined shape the render loop walks: a
+  // key (project id or status), a name, and its rows. Status groups carry a
+  // fixed aggregate status for their pill since every row shares it.
+  const groups = useMemo<SidebarGroup[]>(() => {
+    if (grouping === 'status') {
+      return workspaceStatusGroups(workspaces, showArchived, filters).map((group) => ({
+        key: group.status,
+        name: group.label,
+        fixedStatus: { status: group.status, count: group.workspaces.length },
+        workspaces: group.workspaces,
+      }))
+    }
+    return workspaceProjectGroups(workspaces, showArchived, filters).map((group) => ({
+      key: group.projectId,
+      name: group.name,
+      fixedStatus: null,
+      workspaces: group.workspaces,
+    }))
+  }, [workspaces, showArchived, grouping, filters])
+  const filterEmpty = hasActiveFilters(filters) && groups.length === 0
+  // The labels submenu lists the union of labels on every visible workspace;
+  // the checked states are the selected descriptor's own labels.
+  const availableLabels = useMemo(
+    () => workspaceLabels(visibleWorkspaces(workspaces.workspaces, showArchived)),
+    [workspaces, showArchived],
+  )
   const archived = useMemo(
     () => (revealArchivedAgents ? sortAgents(agents.filter(isArchived)) : []),
     [agents, revealArchivedAgents],
@@ -756,6 +1346,12 @@ export function Sidebar({
       return next
     })
   }
+  // The keyboard handler in chat.tsx reasons over the same rows the sidebar
+  // renders, so the walk order — sections minus collapsed projects — is
+  // reported up whenever the view or its collapse state changes.
+  useEffect(() => {
+    onVisibleRowsChange(visibleWorkspaceIds(groups, collapsedProjects))
+  }, [groups, collapsedProjects, onVisibleRowsChange])
 
   return (
     <div
@@ -805,10 +1401,17 @@ export function Sidebar({
           Workspaces
         </text>
         <ViewPreferencesMenu
+          grouping={grouping}
+          onGroupingChange={setGrouping}
           showArchived={showArchived}
           onShowArchivedChange={setShowArchived}
           showArchivedAgents={revealArchivedAgents}
           onShowArchivedAgentsChange={setRevealArchivedAgents}
+          meta={meta}
+          onMetaChange={setMeta}
+          filters={filters}
+          onFiltersChange={setFilters}
+          catalog={catalog}
         />
       </div>
 
@@ -823,31 +1426,67 @@ export function Sidebar({
           paddingRight: 10,
         }}
       >
-        {groups.map((group) => (
-          <div
-            key={group.projectId}
-            style={{ display: 'flex', flexDirection: 'column', paddingBottom: 10 }}
-          >
-            <ProjectGroupHeader
-              name={group.name}
-              collapsed={collapsedProjects.has(group.projectId)}
-              onToggle={() => toggleProject(group.projectId)}
-            />
-            {!collapsedProjects.has(group.projectId) &&
-              group.workspaces.map((descriptor) => (
-                <WorkspaceRow
-                  key={descriptor.id}
-                  descriptor={descriptor}
-                  active={descriptor.id === activeWorkspaceId}
-                  busy={busyRows.some((row) => row.id === descriptor.id)}
-                  onSelect={onSelect}
-                  onRename={onRename}
-                  onArchive={onArchive}
-                />
-              ))}
+        {groups.map((group) => {
+          const collapsed = collapsedProjects.has(group.key)
+          // A collapsed group reduces to one aggregate status pill over its
+          // members; a status group's rows share a status, so the pill is the
+          // group's own status with its member count. Expanded groups keep
+          // their per-workspace rows.
+          const aggregate = collapsed
+            ? (group.fixedStatus ?? aggregateWorkspaceStatus(group.workspaces))
+            : null
+          return (
+            <div
+              key={group.key}
+              style={{ display: 'flex', flexDirection: 'column', paddingBottom: 10 }}
+            >
+              <ProjectGroupHeader
+                name={group.name}
+                collapsed={collapsed}
+                onToggle={() => toggleProject(group.key)}
+                pill={aggregate && <AggregateStatusPill aggregate={aggregate} />}
+              />
+              {!collapsed &&
+                group.workspaces.map((descriptor) => {
+                  const rowBusy = busyRows.find((row) => row.id === descriptor.id) ?? null
+                  return (
+                    <WorkspaceRow
+                      key={descriptor.id}
+                      descriptor={descriptor}
+                      config={meta}
+                      active={descriptor.id === activeWorkspaceId}
+                      busy={rowBusy != null}
+                      busyVerb={rowBusy?.verb ?? null}
+                      availableLabels={availableLabels}
+                      onSelect={onSelect}
+                      onRename={onRename}
+                      onArchive={onArchive}
+                      onCopy={onCopy}
+                      onMarkRead={onMarkRead}
+                      onPin={onPin}
+                      onToggleLabel={onToggleLabel}
+                      onClearLabels={onClearLabels}
+                    />
+                  )
+                })}
+            </div>
+          )
+        })}
+        {filterEmpty && (
+          <div style={{ padding: 14 }}>
+            <text style={{ fontSize: 12.5, lineHeight: 17, color: C.tertiary }}>
+              No workspaces match these filters.{" "}
+            </text>
+            <text
+              testId="clear-filters-action"
+              style={{ fontSize: 12.5, fontWeight: 500, color: C.accent, cursor: 'pointer' }}
+              onClick={() => setFilters({ hosts: [], projects: [], labels: [] })}
+            >
+              Clear filter
+            </text>
           </div>
-        ))}
-        {groups.length === 0 && (
+        )}
+        {groups.length === 0 && !filterEmpty && (
           <div style={{ padding: 14 }}>
             <text style={{ fontSize: 12.5, lineHeight: 17, color: C.tertiary }}>
               No workspaces yet. Start one from the composer.

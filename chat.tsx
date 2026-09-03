@@ -11,13 +11,14 @@
  * Remote daemon:   PASEO_URL=wss://host/ws PASEO_PASSWORD=... bun --hot chat.tsx
  */
 
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { motion, render, useGpuix } from '@gpuix/react'
 import type { PaseoAgentConfig, PaseoClient } from '@getpaseo/client'
 import type { DaemonClient } from '@getpaseo/client/internal/daemon-client'
 import {
   DAEMON_URL,
   activeAgentGone,
+  activityAt,
   applyAgentPage,
   applyAgentUpdate,
   basename,
@@ -48,6 +49,12 @@ import {
   type WorkspaceStore,
 } from './agent-directory/workspaces'
 import {
+  isJumpShortcut,
+  isNextWorkspace,
+  isPrevWorkspace,
+  prevNextWorkspaceTarget,
+} from './agent-directory/workspace-shortcuts'
+import {
   canGoBack,
   canGoForward,
   emptyVisitHistory,
@@ -68,14 +75,21 @@ import {
   type PastePayload,
 } from './composer/attachments'
 import { C, CONTENT_MAX_WIDTH, SIDEBAR_WIDTH } from './chrome/theme'
-import { Sidebar, Header, CenterMessage, agentStatusColor, daemonHost, type RowActionRef, type RowActionVerb } from './chrome/chrome'
+import { workspaceMutations } from './agent-directory/workspace-mutations'
+import {
+  Sidebar,
+  Header,
+  CenterMessage,
+  agentStatusColor,
+  daemonHost,
+  type RowActionRef,
+  type RowActionVerb,
+} from './chrome/chrome'
 import { Transcript } from './conversation/transcript'
 import { FeatureToggles, ModelPicker, OptionPicker, modeOptions, thinkingOptions } from './composer/pickers'
 import { Composer, ConfigNotice, FooterBar, TracksRow } from './composer/composer'
-import { useAgentConversation } from './conversation/conversation'
 import { toMentionEntries, type MentionSource } from './composer/mentions'
 import { useTranscriptFollow } from './conversation/follow'
-import { useAgentPermissions } from './conversation/permissions'
 import { nativeOpenFileBridge, requestOpenFile } from './chrome/open-file'
 import { useAttention, type NotificationBridge } from './conversation/attention'
 import { useDraftConfig } from './composer/draft-config'
@@ -111,7 +125,30 @@ import {
   SubagentViewerBar,
   type OpenSubagent,
 } from './tracks/tracks-panel'
-import { createAppStore, defaultStatePath, fileStateStorage, showArchivedAgents, useAppState } from './app-state'
+import { createAppStore, defaultStatePath, fileStateStorage, showArchivedAgents, workspacePanes, useAppState } from './app-state'
+import {
+  initialTabs,
+  reduceTabs,
+  selectActiveAgentId,
+  selectActiveDraft,
+  selectActiveSetup,
+  selectActiveTab,
+  selectTabs,
+  type TabsEvent,
+} from './tabs/tabs'
+import { TabStrip } from './tabs/tab-strip'
+import { AgentTabPanel, type TabConversation } from './tabs/agent-tab-panel'
+import { SetupTabPanel } from './tabs/setup-tab-panel'
+import { setupSucceeded, useWorkspaceSetup } from './tabs/setup'
+import { PaneSplit, type PaneStripMeta } from './tabs/pane-view'
+import {
+  activePaneTabId,
+  paneLeaves,
+  paneTabIds,
+  reduceLayout,
+  type PaneEvent,
+  type PaneLayoutState,
+} from './layout/layout'
 
 // ---- daemon hooks ----------------------------------------------------------
 
@@ -249,26 +286,98 @@ async function openImagePicker(): Promise<IncomingImage[] | null> {
 /** One store per app run: read the state file once, persist every write. */
 const createStateStore = () => createAppStore(fileStateStorage(defaultStatePath()))
 
+/**
+ * The slice of an agent conversation the app-level chrome consumes (composer,
+ * tracks row, context meter). Panels own the full conversation and register it
+ * in the ref map; this keeps the app decoupled from the per-tab lifecycle.
+ */
+type ComposerConversation = Pick<
+  TabConversation,
+  'turns' | 'parked' | 'pending' | 'status' | 'usage' | 'send' | 'park' | 'release' | 'unqueue'
+>
+
 export function ChatApp() {
   const { client, daemon, status, error, agents, providers, workspaces } = useDaemon()
   const [store] = useState(createStateStore)
 
-  const [activeId, setActiveId] = useState<string | null>(null)
+  const everShownAgentIds = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    for (const entry of agents) everShownAgentIds.current.add(entry.id)
+  }, [agents])
+
+  // Worktree-created agents awaiting their workspace id. A setup tab is keyed by
+  // workspace, which the daemon only reveals once the worktree exists; these ids
+  // bridge the gap from the create handle to the agent's directory entry.
+  const pendingSetupAgents = useRef<Set<string>>(new Set())
+
+  // Workspace tabs: the strip of open agent + draft tabs with a focused one.
+  // The reducer owns every add/close/select decision; this component only
+  // translates gestures and daemon results into TabsEvents. `activeId` stays
+  // the single "selected agent" the rest of the app reasons about — whichever
+  // agent tab is focused, or null for a draft/no-tab state.
+  const [tabsState, setTabsState] = useState(initialTabs)
+  const dispatchTabs = (event: TabsEvent) => setTabsState((prev) => reduceTabs(prev, event))
+  const tabs = selectTabs(tabsState)
+  // Pane layout: null = the single-pane default (non-persisted); a split tree
+  // otherwise. The tree references the same tabIds the #46 reducer owns.
+  const [layoutState, setLayoutState] = useState<PaneLayoutState>(null)
+  const layoutRef = useRef<PaneLayoutState>(null)
+  // Per host+workspace key for persistence; null at the directory new-task.
+  const layoutKey = selectedWorkspaceId ? `${daemonHost()}::${selectedWorkspaceId}` : null
+  /** Persists a layout change for the current workspace; null removes the entry. */
+  const persistLayout = (next: PaneLayoutState) => {
+    layoutRef.current = next
+    if (!layoutKey) return
+    const all = store.get(workspacePanes)
+    if (next) {
+      store.set(workspacePanes, { ...all, [layoutKey]: next })
+    } else {
+      const rest = { ...all }
+      delete rest[layoutKey]
+      store.set(workspacePanes, rest)
+    }
+  }
+  /** Translates a pane gesture into state and persistence together. */
+  const dispatchPane = (event: PaneEvent) => {
+    const next = reduceLayout(layoutRef.current, event)
+    setLayoutState(next)
+    persistLayout(next)
+  }
+  // The active tab that drives the header/composer: the active pane's focused
+  // tab when split, else the #46 workspace's focused tab.
+  const activeTabId = layoutState ? activePaneTabId(layoutState) : tabsState.activeTabId
+  const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? null
+  const activeAgentId = activeTab && activeTab.target === 'agent' ? activeTab.state.agentId : null
+  const activeDraft = activeTab && activeTab.target === 'draft' ? activeTab.state : null
+  // The focused setup tab (if any) gates the empty new-task/new-draft state.
+  const activeSetup = selectActiveSetup(tabsState)
+  const activeId = activeAgentId
   // Visited-agent history behind the chrome's back/forward arrows: opening an
   // agent records the visit, back/forward only move the cursor. An explicit
   // extension of Paseo's own navigation model (no upstream visited-history
   // stack exists); see ticket #21's parity note.
   const [visitHistory, setVisitHistory] = useState<VisitHistory>(emptyVisitHistory)
+  /** Opens (or focuses) an agent's tab; recency seeds its strip position. */
+  const openAgentTab = (id: string) => {
+    const entry = agents.find((candidate) => candidate.id === id) ?? null
+    const next = reduceTabs(tabsState, { type: 'openAgent', agentId: id, createdAt: entry ? activityAt(entry) : 0 })
+    setTabsState(next)
+    // In a split layout the freshly opened tab lands in the active pane.
+    if (layoutRef.current) {
+      const tab = next.tabs.find((c) => c.target === 'agent' && c.state.agentId === id)
+      if (tab) dispatchPane({ type: 'assignTab', tabId: tab.id, paneId: layoutRef.current.activePaneId })
+    }
+  }
   /** Opening an agent records the visit and truncates any forward entries. */
   const visit = (id: string) => {
-    setActiveId(id)
+    openAgentTab(id)
     setVisitHistory((prev) => visitAgent(prev, id))
   }
   const nav = (delta: 1 | -1) => {
     const next = delta < 0 ? goBack(visitHistory) : goForward(visitHistory)
     if (next === visitHistory) return
     setVisitHistory(next)
-    setActiveId(next.stack[next.index])
+    openAgentTab(next.stack[next.index]!)
   }
   const navState = { canBack: canGoBack(visitHistory), canForward: canGoForward(visitHistory) }
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null)
@@ -289,6 +398,12 @@ export function ChatApp() {
   useWindowEvent((event) => {
     if (event.eventType === 'keyDown' && isPaletteToggle(event)) setPaletteOpen((open) => !open)
   })
+  // The sidebar reports its rendered rows up so the jump/prev/next shortcuts can
+  // target exactly those rows. A ref keeps the handle stable for the listener.
+  const visibleRowsRef = useRef<string[]>([])
+  const onVisibleRowsChange = useCallback((ids: string[]) => {
+    visibleRowsRef.current = ids
+  }, [])
 
   const {
     config: draftConfig,
@@ -302,13 +417,26 @@ export function ChatApp() {
   const [cwd, setCwd] = useState(process.cwd())
   const [worktree, setWorktree] = useState('local')
 
-  const conversation = useAgentConversation(client, activeId, {
-    seedText: seed?.text ?? null,
-    seedImages: seed?.images ?? null,
-    onSeedConsumed: () => setPendingSeed(null),
+  // Each open agent tab owns its timeline subscription inside its own panel —
+  // kept mounted (hide-not-unmount) so background tabs keep merging. The
+  // active tab's conversation powers the composer, tracks row, and meter below;
+  // a stable no-op stands in for draft/no-agent states (send/park are inert).
+  const conversationsRef = useRef<Map<string, ComposerConversation>>(new Map())
+  const emptyConversation = useRef<ComposerConversation>({
+    turns: [],
+    parked: [],
+    pending: [],
+    status: 'loading',
+    usage: null,
+    send: async () => false,
+    park: () => {},
+    release: async () => false,
+    unqueue: () => {},
   })
+  const conversation: ComposerConversation = activeId
+    ? conversationsRef.current.get(activeId) ?? emptyConversation.current
+    : emptyConversation.current
   const turns = conversation.turns
-  const permissions = useAgentPermissions(client, daemon, activeId)
   // No OS notifier exists in @gpuix yet, so delivery silently no-ops; the
   // payloads are ready for a runtime bridge — clicking one deep-links by
   // re-selecting notice.payload.agentId.
@@ -326,22 +454,49 @@ export function ChatApp() {
   const activeRepoKey = activeStatus ? repoKeyOf(activeStatus) : (activeEntry?.cwd ?? null)
   const activeQueue = activeRepoKey ? repoActions.state.repos[activeRepoKey] : undefined
 
-  // Ids the directory has shown, so a just-created agent isn't judged gone
-  // while its upsert is still in flight.
-  const everShownAgentIds = useRef<Set<string>>(new Set())
-  useEffect(() => {
-    for (const entry of agents) everShownAgentIds.current.add(entry.id)
-  }, [agents])
+  // Workspace setup progress spine: a setup tab shows a worktree's bootstrap
+  // commands as they run; `useWorkspaceSetup` owns the per-workspace store.
+  const setup = useWorkspaceSetup(daemon)
+  const setupEntries = setup.state.entries
 
-  // An agent that vanished from the directory (deleted) or was archived can no
-  // longer host a conversation — Paseo's own client redirects away in both cases.
+  // An agent that vanished from the directory (deleted) can no longer host a
+  // conversation — Paseo's own client redirects away in both cases. Its tab is
+  // closed, which lands on the neighbor (or the empty new-task state).
   const activeEntryGone = activeAgentGone(activeId, agents, {
     connected: status === 'connected',
     wasSeen: activeId != null && everShownAgentIds.current.has(activeId),
   })
   useEffect(() => {
-    if (activeEntryGone) setActiveId(null)
-  }, [activeEntryGone])
+    if (activeEntryGone && activeTab) dispatchTabs({ type: 'close', tabId: activeTab.id })
+  }, [activeEntryGone, activeTab])
+
+  // Worktree creation opens a setup tab once the daemon reveals the new
+  // workspace id on the agent's directory entry (the create handle carries no
+  // workspace yet). Non-worktree agents are never added here, so they never get
+  // a setup tab.
+  useEffect(() => {
+    if (pendingSetupAgents.current.size === 0) return
+    for (const agentId of pendingSetupAgents.current) {
+      const entry = agents.find((candidate) => candidate.id === agentId)
+      if (entry?.workspaceId) {
+        pendingSetupAgents.current.delete(agentId)
+        dispatchTabs({ type: 'openSetup', workspaceId: entry.workspaceId, agentId, createdAt: Date.now() })
+      }
+    }
+  }, [agents])
+
+  // A watched setup tab hands off to its agent's conversation the moment the
+  // daemon reports the worktree ready: the conversation takes over and the
+  // setup tab stays behind, collapsed to its summary chip.
+  useEffect(() => {
+    for (const tab of tabs) {
+      if (tab.target !== 'setup' || tab.id !== activeTabId) continue
+      const snapshot = setupEntries[tab.state.workspaceId]
+      if (setupSucceeded(snapshot)) {
+        dispatchTabs({ type: 'openAgent', agentId: tab.state.agentId, createdAt: tab.createdAt })
+      }
+    }
+  }, [tabs, activeTabId, setupEntries])
 
   // Row lifecycle actions disable per row while their daemon call is in flight;
   // directory truth arrives through the subscription, never from these results.
@@ -359,6 +514,29 @@ export function ChatApp() {
   const archiveWorkspaceRow = (id: string) => runRowAction('archive', id, () => daemon.archiveWorkspace(id))
   const renameWorkspaceRow = (id: string, name: string) =>
     runRowAction('rename', id, () => daemon.setWorkspaceTitle(id, name))
+  // The pin/labels/mark-as-read mutations go through the wrapper: labels earn
+  // their keep shaping the label+colour payload, the rest ride along for one
+  // narrow client seam instead of five ad-hoc daemon call sites.
+  const mutations = workspaceMutations(daemon)
+  const pinWorkspaceRow = (id: string, pinned: boolean) =>
+    runRowAction(pinned ? 'pin' : 'unpin', id, () => mutations.setPinned(id, pinned))
+  const markWorkspaceRead = (id: string) =>
+    runRowAction('mark-read', id, () => mutations.clearAttention(id))
+  const toggleWorkspaceLabel = (id: string, name: string, applied: boolean) =>
+    runRowAction('labels', id, () => mutations.toggleLabel(id, name, applied))
+  const clearWorkspaceLabels = (id: string) => {
+    const descriptor = workspaces.workspaces.find((candidate) => candidate.id === id)
+    const applied = descriptor?.labels ?? []
+    if (applied.length === 0) return
+    runRowAction('labels', id, () => mutations.clearLabels(id, applied))
+  }
+  // Copy is a synchronous clipboard write, not a daemon call; it needs no
+  // in-flight row and the menu computes its value from the descriptor it owns.
+  const copyWorkspaceValue = (value: string) => {
+    const clipboard = (navigator as { clipboard?: { writeText?: (text: string) => Promise<void> } }).clipboard
+    if (!clipboard?.writeText) return
+    clipboard.writeText(value).catch(() => {})
+  }
 
   // Agent lifecycle (archive, delete, rename): the promises drive the
   // in-flight disabling; the directory itself is only ever written by the
@@ -369,34 +547,163 @@ export function ChatApp() {
     runRowAction('rename', id, () => daemon.updateAgent(id, { name: name.trim() }))
 
   /**
-   * Opening a workspace opens its conversation: its most recently active agent
-   * becomes the shown timeline; a workspace with no agents falls back to the
-   * composer's new-task state seeded to that workspace's directory.
+   * Opening a workspace replaces the strip with that workspace's tabs: an
+   * agent tab per non-archived agent (most recent first), plus a trailing draft
+   * tab seeded to the workspace directory for starting something new. A
+   * workspace with no agents yields just that draft tab.
    */
   const openWorkspace = (id: string) => {
     setSelectedWorkspaceId(id)
     setCreateError(null)
+    // Restore this host+workspace's persisted pane layout, if any.
+    const persisted = store.get(workspacePanes)[`${daemonHost()}::${id}`] ?? null
+    layoutRef.current = persisted
+    setLayoutState(persisted)
     const descriptor = workspaces.workspaces.find((candidate) => candidate.id === id)
     if (!descriptor) {
-      setActiveId(null)
+      dispatchTabs({ type: 'reset' })
       return
     }
-    const agent = mostRecentAgent(agentsOfWorkspace(agents, descriptor).filter((a) => !isArchived(a)))
-    if (agent) {
-      visit(agent.id)
-    } else {
-      // Seeding means the send lands in the workspace as it is — never a new
-      // worktree on top of it.
-      setActiveId(null)
-      setCwd(workspaceDirectory(descriptor))
-      setWorktree('local')
+    const workspaceAgents = agentsOfWorkspace(agents, descriptor).filter((a) => !isArchived(a))
+    dispatchTabs({
+      type: 'openWorkspace',
+      agents: workspaceAgents.map((a) => ({ id: a.id, createdAt: activityAt(a) })),
+      cwd: workspaceDirectory(descriptor),
+      now: Date.now(),
+    })
+  }
+  // Jump + prev/next shortcuts over the sidebar's visible rows. The walk order
+  // arrives via visibleRowsRef (reported by the Sidebar itself); opening the
+  // target reuses onSelect's own path so a shortcut behaves like a row click.
+  useWindowEvent((event) => {
+    if (event.eventType !== 'keyDown') return
+    const orders = visibleRowsRef.current
+    // ⌘/Ctrl+1–9 jumps to the nth visible row; gaps from filtering and
+    // collapsed groups were already skipped by the walk-order computation.
+    const jump = isJumpShortcut(event)
+    if (jump != null) {
+      const target = orders[jump - 1]
+      if (target) openWorkspace(target)
+      return
     }
+    if (isPrevWorkspace(event) || isNextWorkspace(event)) {
+      const index = prevNextWorkspaceTarget(orders, selectedWorkspaceId, isPrevWorkspace(event) ? -1 : 1)
+      const target = index >= 0 ? orders[index] : null
+      if (target) openWorkspace(target)
+    }
+  })
+
+  // ---- pane layout operations ----------------------------------------------
+  // These translate user gestures into PaneEvents (and #46 tab events where a
+  // tab's existence is being changed), keeping the pane tree and the #46 tab
+  // strip in one id space. When the layout is null they degrade to the single
+  // tab strip exactly as before.
+
+  /** Split the active pane right or down; materializes a split layout on demand. */
+  const splitActivePane = (direction: 'right' | 'down') => {
+    const layout = layoutRef.current
+    if (layout) {
+      const target = layout.activePaneId
+      if (!target) return
+      dispatchPane(direction === 'right' ? { type: 'splitRight', paneId: target } : { type: 'splitDown', paneId: target })
+      return
+    }
+    // No split yet: materialize the default single pane (which hosts the
+    // workspace's tabs) and split it.
+    const single: PaneLayoutState = { root: leafFor(tabs.map((t) => t.id), tabsState.activeTabId), activePaneId: '' }
+    layoutRef.current = single
+    const target = single.root.id
+    const next = reduceLayout(single, direction === 'right' ? { type: 'splitRight', paneId: target } : { type: 'splitDown', paneId: target })
+    setLayoutState(next)
+    persistLayout(next)
   }
 
-  // The composer's stop control: enabled only while the open agent runs. From
-  // click until the cancellation is confirmed — the agent leaving running via
-  // the directory subscription — the control reflects that so double-clicks are
-  // unambiguous.
+  /** Select a tab inside a pane; keeps #46's focus in sync for the non-split path. */
+  const selectTabInPane = (paneId: string, tabId: string) => {
+    if (layoutRef.current) dispatchPane({ type: 'focusTab', paneId, tabId })
+    dispatchTabs({ type: 'select', tabId })
+  }
+
+  /** Close a tab: drop it from #46 and remove its pane references (wherever it lives). */
+  const closeTabInPane = (_paneId: string, tabId: string) => {
+    dispatchTabs({ type: 'close', tabId })
+    if (layoutRef.current) dispatchPane({ type: 'removeTab', tabId })
+  }
+
+  /** Close every other tab in a pane, keeping `tabId` focused there. */
+  const closeOthersInPane = (paneId: string, tabId: string) => {
+    const layout = layoutRef.current
+    if (!layout) return
+    const others = paneTabIds(layout.root, paneId).filter((id) => id !== tabId)
+    for (const other of others) {
+      dispatchTabs({ type: 'close', tabId: other })
+      dispatchPane({ type: 'removeTab', tabId: other })
+    }
+    dispatchPane({ type: 'focusTab', paneId, tabId })
+  }
+
+  /** Append a new draft tab into a specific pane (or the single strip). */
+  const openDraftInPane = (paneId: string) => {
+    const dir = activeDraft?.cwd ?? cwd
+    const next = reduceTabs(tabsState, { type: 'openDraft', cwd: dir, now: Date.now() })
+    setTabsState(next)
+    const newTab = next.tabs.at(-1)
+    if (newTab && layoutRef.current) dispatchPane({ type: 'assignTab', tabId: newTab.id, paneId })
+  }
+
+  /** Cycle pane or tab focus via the keyboard (both directions, wrapping). */
+  const cyclePane = (direction: 'next' | 'prev', kind: 'pane' | 'tab') => {
+    if (!layoutRef.current) return
+    const event: PaneEvent =
+      kind === 'pane'
+        ? direction === 'next'
+          ? { type: 'focusNextPane' }
+          : { type: 'focusPrevPane' }
+        : direction === 'next'
+          ? { type: 'focusNextTab' }
+          : { type: 'focusPrevTab' }
+    dispatchPane(event)
+  }
+
+  /** Move the active tab to the first/next pane in the walk (a simple move op). */
+  const moveActiveTabToNextPane = () => {
+    const layout = layoutRef.current
+    if (!layout) return
+    const leaves = paneLeaves(layout.root)
+    if (leaves.length < 2) return
+    const idx = leaves.findIndex((l) => l.id === layout.activePaneId)
+    const next = leaves[(idx + 1) % leaves.length]!
+    const focusedTab = activePaneTabId(layout)
+    if (!focusedTab) return
+    dispatchPane({ type: 'moveTab', tabId: focusedTab, fromPaneId: layout.activePaneId, toPaneId: next.id })
+  }
+
+  // Pane keyboard control: Cmd/Ctrl+Alt+←/→ cycles panes, Cmd/Ctrl+Alt+↑/↓
+  // cycles tabs, Cmd/Ctrl+Shift+←/→ splits the active pane, Cmd/Ctrl+Shift+↑
+  // moves the active tab to the next pane.
+  useWindowEvent((event) => {
+    if (event.eventType !== 'keyDown') return
+    const mod = event.modifiers
+    if (!mod || !(mod.cmd || mod.ctrl)) return
+    if (mod.alt && !mod.shift) {
+      if (event.key === 'ArrowRight') cyclePane('next', 'pane')
+      else if (event.key === 'ArrowLeft') cyclePane('prev', 'pane')
+      else if (event.key === 'ArrowDown') cyclePane('next', 'tab')
+      else if (event.key === 'ArrowUp') cyclePane('prev', 'tab')
+      return
+    }
+    if (mod.shift && !mod.alt) {
+      if (event.key === 'ArrowRight') splitActivePane('right')
+      else if (event.key === 'ArrowDown') splitActivePane('down')
+      else if (event.key === 'ArrowUp') moveActiveTabToNextPane()
+    }
+  })
+
+  // Seed a materialized single-pane leaf for the first split.
+  function leafFor(tabIds: string[], focused: string | null) {
+    return { kind: 'leaf' as const, id: 'root', tabIds, focusedTabId: focused }
+  }
+
   const agentRunning = activeEntry?.status === 'running'
   const [stopping, setStopping] = useState(false)
   useEffect(() => setStopping(false), [activeId])
@@ -442,6 +749,19 @@ export function ChatApp() {
     viewingSubagent
       ? subagentTurns(subagents.state, viewingSubagent.parentAgentId, viewingSubagent.id)
       : []
+
+  // The provider-subagent viewer sits on top of the tabs and carries its own
+  // list and follow; agent tabs manage theirs inside their panels.
+  const subagentListRef = useRef<{ id: number } | null>(null)
+  const { renderer } = useGpuix()
+  const subagentFollow = useTranscriptFollow({
+    listRef: subagentListRef,
+    turnCount: providerTurns.length,
+    tailSignature: providerTurns.length > 0 ? JSON.stringify(providerTurns.at(-1)) : undefined,
+    agentId: viewingSubagent?.parentAgentId ?? activeId,
+    renderer,
+    slotOffset: 0,
+  })
 
   const viewSubagent = (target: OpenSubagent) => {
     if (target.kind === 'managed') {
@@ -511,39 +831,9 @@ export function ChatApp() {
     [sessionUsage, modelDef],
   )
 
-  // The transcript area shows the parent conversation, or a provider
-  // subagent's read-only timeline while it is open.
-  const visibleTurns = turns
-  const shownTurns = viewingSubagent ? providerTurns : visibleTurns
-
-  // Older-history availability for the transcript's top edge: quiet while more
-  // pages exist unrequested, a spinner while fetching, a marker once exhausted.
-  const olderPages =
-    conversation.status === 'ready' && visibleTurns.length > 0
-      ? conversation.loadingHistory
-        ? ('loading' as const)
-        : conversation.hasOlder
-          ? ('more' as const)
-          : ('end' as const)
-      : undefined
-
-const listRef = useRef<{ id: number } | null>(null)
-  const { renderer } = useGpuix()
-  // Follow tracks the list actually rendered: the parent transcript normally,
-  // the open provider subagent's timeline while the viewer is up.
-  const { following, onScroll, requestJump, jumpToTurn } = useTranscriptFollow({
-    listRef,
-    turnCount: shownTurns.length,
-    // The final turn's identity, so a history page prepended above the viewport
-    // (count grew, tail sat still) doesn't drag a following view back down.
-    tailSignature: shownTurns.length > 0 ? JSON.stringify(shownTurns.at(-1)) : undefined,
-    agentId: viewingSubagent ? viewingSubagent.parentAgentId : activeId,
-    renderer,
-    // HistoryHead occupies virtual-list slot 0 whenever older history does (or
-    // may) exist upstream, so every turn row is shifted down by one. The
-    // subagent viewer pages history with its own head-free list.
-    slotOffset: viewingSubagent ? 0 : olderPages ? 1 : 0,
-  })
+  // The transcript area (parent conversation, provider-subagent viewer, and
+  // its scroll state) lives inside per-tab conversation panels so background
+  // tabs keep streaming; nothing scroll- or history-related lives here any more.
 
   /** Clears the composer after the text (and chips) have found a home. */
   const clearDraft = () => {
@@ -608,6 +898,10 @@ const listRef = useRef<{ id: number } | null>(null)
       restoreDraft(text, stagedImages)
       return
     }
+    // A draft tab creates the agent in its own directory; the directory
+    // new-task state uses the composer's cwd/worktree choices.
+    const createDir = activeDraft?.cwd ?? cwd
+    const createWorktree = activeDraft?.worktree ?? worktree
     try {
       const config: PaseoAgentConfig = { provider: modelValue }
       if (modeId) config.modeId = modeId
@@ -615,13 +909,29 @@ const listRef = useRef<{ id: number } | null>(null)
       if (Object.keys(featureValues).length > 0) config.featureValues = { ...featureValues }
       const handle = await client.agents.create({
         config,
-        cwd,
+        cwd: createDir,
         prompt: text,
         ...(outgoing.length > 0 ? { images: outgoing } : {}),
-        ...(worktree === 'worktree' ? { git: { createWorktree: true } } : {}),
+        ...(createWorktree === 'worktree' ? { git: { createWorktree: true } } : {}),
       })
       setPendingSeed({ agentId: handle.id, text, images: stagedImages })
-      visit(handle.id)
+      setVisitHistory((prev) => visitAgent(prev, handle.id))
+      // A worktree bootstrap needs a setup tab; its workspace id only appears
+      // on the agent's directory entry as the daemon creates the worktree, so
+      // it is resolved by the correlation effect above.
+      if (createWorktree === 'worktree') pendingSetupAgents.current.add(handle.id)
+      if (activeTab && activeDraft) {
+        // The draft tab flips into the new agent's tab and stays focused.
+        dispatchTabs({
+          type: 'draftSent',
+          tabId: activeTab.id,
+          agentId: handle.id,
+          createdAt: Date.now(),
+        })
+      } else {
+        // Directory new-task: open the new agent as its own tab.
+        openAgentTab(handle.id)
+      }
     } catch (err) {
       setCreateError(errorMessage(err))
       restoreDraft(text, stagedImages)
@@ -732,7 +1042,7 @@ const listRef = useRef<{ id: number } | null>(null)
 
   // `@` completion lists the selected agent's workspace, or the chosen one for
   // a new task. Daemon errors degrade to no suggestions inside the hook.
-  const mentionCwd = activeEntry?.cwd ?? cwd
+  const mentionCwd = activeEntry?.cwd ?? activeDraft?.cwd ?? cwd
   const mentionSource = useMemo<MentionSource>(
     () => ({
       cwd: mentionCwd,
@@ -763,7 +1073,10 @@ const listRef = useRef<{ id: number } | null>(null)
         section: 'actions',
         keywords: 'compose new agent',
         run: () => {
-          setActiveId(null)
+          dispatchTabs({ type: 'reset' })
+          setSelectedWorkspaceId(null)
+          setLayoutState(null)
+          layoutRef.current = null
           // Same rule as the sidebar's New Task: no phantom future survives.
           setVisitHistory(truncateForward)
           setCreateError(null)
@@ -803,8 +1116,9 @@ const listRef = useRef<{ id: number } | null>(null)
   useContributeActions(
     registry,
     () => {
-      // The workspace footer locks while an agent owns the conversation.
-      if (activeEntry) return []
+      // The workspace footer locks while a tab owns the conversation (an agent
+      // or a draft tab carries its own directory).
+      if (activeEntry || activeDraft) return []
       return [...new Set([process.cwd(), ...cwdOptions])].map((dir) => ({
         id: `workspace.${dir}`,
         title: basename(dir),
@@ -903,9 +1217,83 @@ const listRef = useRef<{ id: number } | null>(null)
       ? {
           seam: daemon,
           agentId: activeId,
-          draft: activeId ? null : { modelValue, thinkingId, modeId, cwd },
+          draft: activeId ? null : { modelValue, thinkingId, modeId, cwd: activeDraft?.cwd ?? cwd },
         }
       : undefined
+
+  // ---- multi-pane rendering --------------------------------------------------
+  // In a split layout each pane shows its own tab strip (PaneSplit owns it) and
+  // this content area below it: the focused agent panel, a draft center message,
+  // or an empty-pane hint. All of a pane's agent panels stay mounted (streaming
+  // live) with only the focused one visible, matching the single-pane rule.
+  const paneMeta: PaneStripMeta = {
+    labelFor: (tab) => {
+      if (tab.target === 'agent') {
+        const entry = agents.find((candidate) => candidate.id === tab.state.agentId)
+        return entry ? displayName(entry) : 'Agent'
+      }
+      if (tab.target === 'draft') return basename(tab.state.cwd)
+      return 'Workspace setup'
+    },
+    dotColorFor: (tab) => {
+      if (tab.target !== 'agent') return null
+      const entry = agents.find((candidate) => candidate.id === tab.state.agentId)
+      return entry ? agentStatusColor(entry) : null
+    },
+    attentionFor: (tab) => {
+      if (tab.target !== 'agent') return false
+      return Boolean(agents.find((candidate) => candidate.id === tab.state.agentId)?.requiresAttention)
+    },
+  }
+  const renderPaneContent = (paneId: string, tabIds: string[], focusedTabId: string | null): React.ReactNode => {
+    const focusedTab = tabs.find((t) => t.id === focusedTabId) ?? null
+    if (!focusedTabId || tabIds.length === 0 || !focusedTab) {
+      return <CenterMessage title="Empty pane" detail="Open an agent here, or close this pane." />
+    }
+    if (focusedTab.target === 'draft') {
+      return <CenterMessage title="New draft" detail={`Describe what to build in ${basename(focusedTab.state.cwd)}.`} />
+    }
+    if (focusedTab.target === 'setup') {
+      return (
+        <SetupTabPanel
+          key={focusedTab.id}
+          workspaceId={focusedTab.state.workspaceId}
+          snapshot={setupEntries[focusedTab.state.workspaceId] ?? null}
+          refresh={setup.refresh}
+        />
+      )
+    }
+    if (focusedTab.target !== 'agent') {
+      return <CenterMessage title="No agent here" detail="Pick an agent for this pane." />
+    }
+    const isActivePane = paneId === layoutRef.current?.activePaneId
+    return (
+      <>
+        {tabIds.map((id) => {
+          const tab = tabs.find((t) => t.id === id)
+          return tab && tab.target === 'agent' ? (
+            <AgentTabPanel
+              key={tab.id}
+              client={client}
+              daemon={daemon}
+              agentId={tab.state.agentId}
+              seedText={pendingSeed?.agentId === tab.state.agentId ? pendingSeed.text : null}
+              seedImages={pendingSeed?.agentId === tab.state.agentId ? pendingSeed.images : null}
+              onSeedConsumed={() => {
+                if (pendingSeed?.agentId === tab.state.agentId) setPendingSeed(null)
+              }}
+              hidden={tab.id !== focusedTabId}
+              showTranscript={isActivePane && tab.id === focusedTabId ? !viewingSubagent : false}
+              onConversation={(id, conv) => conversationsRef.current.set(id, conv)}
+              onEditQueued={editQueued}
+              onOpenFile={openFile}
+              workspaceRoot={agents.find((a) => a.id === tab.state.agentId)?.cwd ?? null}
+            />
+          ) : null
+        })}
+      </>
+    )
+  }
 
   return (
     <div
@@ -943,11 +1331,13 @@ const listRef = useRef<{ id: number } | null>(null)
           }}
           onDeleteAgent={deleteAgentRow}
           onNewTask={() => {
-            setActiveId(null)
+            dispatchTabs({ type: 'reset' })
             // Starting a new task is a fresh edge, not a forward jump: drop any
             // phantom future the visited stack was still holding.
             setVisitHistory(truncateForward)
             setSelectedWorkspaceId(null)
+            setLayoutState(null)
+            layoutRef.current = null
             setCreateError(null)
           }}
           onCollapse={() => setCollapsed(true)}
@@ -955,10 +1345,16 @@ const listRef = useRef<{ id: number } | null>(null)
           busyRows={busyRows}
           onArchive={archiveWorkspaceRow}
           onRename={renameWorkspaceRow}
+          onCopy={copyWorkspaceValue}
+          onMarkRead={markWorkspaceRead}
+          onPin={pinWorkspaceRow}
+          onToggleLabel={toggleWorkspaceLabel}
+          onClearLabels={clearWorkspaceLabels}
           appStore={store}
           navState={navState}
           onNavBack={() => nav(-1)}
           onNavForward={() => nav(1)}
+          onVisibleRowsChange={onVisibleRowsChange}
         />
         <div style={{ width: 1, height: '100%', flexShrink: 0, backgroundColor: C.sidebarBorder }} />
       </motion.div>
@@ -1015,60 +1411,126 @@ const listRef = useRef<{ id: number } | null>(null)
             onBack={() => setViewing(null)}
           />
         )}
-        {status === 'error' ? (
-          <CenterMessage
-            title={`Cannot reach ${daemonHost()}`}
-            detail={`${error}\n\nStart a daemon with: npm install -g @getpaseo/cli && paseo`}
+        {layoutState ? (
+          <PaneSplit
+            layout={layoutState}
+            tabs={tabs}
+            meta={paneMeta}
+            renderPane={renderPaneContent}
+            onSelectTab={selectTabInPane}
+            onCloseTab={closeTabInPane}
+            onCloseOthers={closeOthersInPane}
+            onNewDraft={openDraftInPane}
           />
-        ) : status === 'connecting' ? (
-          <CenterMessage title={`Connecting to ${daemonHost()}…`} />
-        ) : shownTurns.length === 0 && (viewingSubagent || permissions.cards.length === 0) ? (
-          <CenterMessage
-            title={viewingSubagent ? 'Loading subagent…' : activeId ? 'Starting agent…' : 'New task'}
-            detail={
-              viewingSubagent || activeId
-                ? undefined
-                : `Pick a model, then describe what to build in ${basename(cwd)}.`
-            }
-          />
-        ) : viewingSubagent ? (
-          <>
-            {subagentHasOlder(subagents.state, viewingSubagent.parentAgentId, viewingSubagent.id) && (
-              <SubagentLoadOlder
-                loading={subagents.loadingOlder}
-                onClick={() =>
-                  subagents.loadOlder(viewingSubagent.parentAgentId, viewingSubagent.id)
-                }
-              />
-            )}
-            <Transcript
-              turns={shownTurns}
-              permissions={[]}
-              onRespond={undefined}
-              onEditQueued={undefined}
-              listRef={listRef}
-              detached={!following}
-              onScroll={onScroll}
-              onJumpToBottom={requestJump}
-              onJumpToTurn={jumpToTurn}
-            />
-          </>
         ) : (
-          <Transcript
-            turns={visibleTurns}
-            permissions={permissions.cards}
-            onRespond={permissions.respond}
-            onEditQueued={editQueued}
-            workspaceRoot={activeEntry?.cwd}
-            onOpenFile={openFile}
-            listRef={listRef}
-            olderPages={olderPages}
-            onLoadOlder={conversation.loadHistory}
-            detached={!following}
-            onScroll={onScroll}
-            onJumpToBottom={requestJump}
-            onJumpToTurn={jumpToTurn}
+          <>
+          {tabs.length > 0 && (
+          <TabStrip
+            tabs={tabs}
+            activeTabId={activeTabId}
+            labelFor={(tab) => {
+              if (tab.target === 'agent') {
+                const entry = agents.find((candidate) => candidate.id === tab.state.agentId)
+                return entry ? displayName(entry) : 'Agent'
+              }
+              if (tab.target === 'draft') return basename(tab.state.cwd)
+              if (tab.target === 'setup') {
+                const snap = setupEntries[tab.state.workspaceId]
+                return snap ? `${snap.detail.branchName} setup` : 'Setup'
+              }
+              return 'Workspace setup'
+            }}
+            dotColorFor={(tab) => {
+              if (tab.target === 'agent') {
+                const entry = agents.find((candidate) => candidate.id === tab.state.agentId)
+                return entry ? agentStatusColor(entry) : null
+              }
+              if (tab.target === 'setup') {
+                const snap = setupEntries[tab.state.workspaceId]
+                if (snap?.status === 'running') return C.running
+                if (snap?.status === 'completed') return C.success
+                if (snap?.status === 'failed') return C.danger
+                return C.running
+              }
+              return null
+            }}
+            attentionFor={(tab) => {
+              if (tab.target !== 'agent') return false
+              return Boolean(agents.find((candidate) => candidate.id === tab.state.agentId)?.requiresAttention)
+            }}
+            onSelect={(tabId) => dispatchTabs({ type: 'select', tabId })}
+            onClose={(tabId) => dispatchTabs({ type: 'close', tabId })}
+            onCloseOthers={(tabId) => dispatchTabs({ type: 'closeOthers', tabId })}
+            onNewDraft={() => dispatchTabs({ type: 'openDraft', cwd: activeDraft?.cwd ?? cwd, now: Date.now() })}
           />
+          )}
+          {status === 'error' ? (
+            <CenterMessage
+              title={`Cannot reach ${daemonHost()}`}
+              detail={`${error}\n\nStart a daemon with: npm install -g @getpaseo/cli && paseo`}
+            />
+          ) : status === 'connecting' ? (
+            <CenterMessage title={`Connecting to ${daemonHost()}…`} />
+          ) : viewingSubagent ? (
+            <div style={{ display: 'flex', flex: 1, flexDirection: 'column', minHeight: 0 }}>
+              {subagentHasOlder(subagents.state, viewingSubagent.parentAgentId, viewingSubagent.id) && (
+                <SubagentLoadOlder
+                  loading={subagents.loadingOlder}
+                  onClick={() =>
+                    subagents.loadOlder(viewingSubagent.parentAgentId, viewingSubagent.id)
+                  }
+                />
+              )}
+              <Transcript
+                turns={providerTurns}
+                permissions={[]}
+                onRespond={undefined}
+                onEditQueued={undefined}
+                listRef={subagentListRef}
+                detached={!subagentFollow.following}
+                onScroll={subagentFollow.onScroll}
+                onJumpToBottom={subagentFollow.requestJump}
+                onJumpToTurn={subagentFollow.jumpToTurn}
+              />
+            </div>
+          ) : activeId == null && !activeSetup ? (
+            <CenterMessage
+              title={activeDraft ? 'New draft' : 'New task'}
+              detail={`Pick a model, then describe what to build in ${basename(activeDraft?.cwd ?? cwd)}.`}
+            />
+          ) : null}
+          {/* Every open agent tab stays mounted so its timeline keeps streaming;
+              only the focused one is visible. */}
+          {tabs.map((tab) =>
+            tab.target === 'agent' ? (
+              <AgentTabPanel
+                key={tab.id}
+                client={client}
+                daemon={daemon}
+                agentId={tab.state.agentId}
+                seedText={pendingSeed?.agentId === tab.state.agentId ? pendingSeed.text : null}
+                seedImages={pendingSeed?.agentId === tab.state.agentId ? pendingSeed.images : null}
+                onSeedConsumed={() => {
+                  if (pendingSeed?.agentId === tab.state.agentId) setPendingSeed(null)
+                }}
+                hidden={tab.id !== activeTabId}
+                showTranscript={tab.id === activeTabId ? !viewingSubagent : false}
+                onConversation={(id, conv) => conversationsRef.current.set(id, conv)}
+                onEditQueued={editQueued}
+                onOpenFile={openFile}
+                workspaceRoot={agents.find((a) => a.id === tab.state.agentId)?.cwd ?? null}
+              />
+            ) : tab.target === 'setup' ? (
+              <SetupTabPanel
+                key={tab.id}
+                workspaceId={tab.state.workspaceId}
+                snapshot={setupEntries[tab.state.workspaceId] ?? null}
+                refresh={setup.refresh}
+                hidden={tab.id !== activeTabId}
+              />
+            ) : null,
+          )}
+          </>
         )}
         {createError && (
           <div style={{ display: 'flex', flexDirection: 'row', justifyContent: 'center', paddingBottom: 4 }}>
@@ -1120,16 +1582,22 @@ const listRef = useRef<{ id: number } | null>(null)
           mentionSource={mentionSource}
         />
         <FooterBar
-          cwd={activeEntry?.cwd ?? cwd}
-          cwdLocked={Boolean(activeEntry)}
+          cwd={activeEntry?.cwd ?? activeDraft?.cwd ?? cwd}
+          cwdLocked={Boolean(activeEntry) || Boolean(activeDraft)}
           cwdOptions={[process.cwd(), ...cwdOptions]}
           onCwdChange={(dir) => {
             setCwd(dir)
             // A fresh directory selection mid-stack leaves no phantom future.
             setVisitHistory(truncateForward)
           }}
-          worktree={worktree}
-          onWorktreeChange={setWorktree}
+          worktree={activeDraft?.worktree ?? worktree}
+          onWorktreeChange={(next) => {
+            if (activeTab && activeDraft) {
+              dispatchTabs({ type: 'setDraftWorktree', tabId: activeTab.id, worktree: next as 'local' | 'worktree' })
+            } else {
+              setWorktree(next)
+            }
+          }}
           statusColor={
             activeEntry
               ? agentStatusColor(activeEntry)
