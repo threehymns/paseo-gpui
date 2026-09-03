@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { applyWorkspaceUpdate, initialWorkspaceStore, workspaceProjectGroups, workspaceStatusGroups, type WorkspaceStore } from './workspaces'
 import type { WorkspaceDescriptor } from '../daemon/paseo'
+import { workspace } from './test-support'
 import { EMPTY_FILTERS, type WorkspaceFilters } from './display-preferences'
 import {
   isJumpShortcut,
@@ -11,24 +12,6 @@ import {
   visibleWorkspaceIds,
   type WalkSection,
 } from './workspace-shortcuts'
-
-function workspace(over: Partial<WorkspaceDescriptor>): WorkspaceDescriptor {
-  return {
-    id: over.id ?? 'w1',
-    projectId: over.projectId ?? 'p1',
-    projectDisplayName: over.projectDisplayName ?? 'storefront',
-    projectRootPath: over.projectRootPath ?? '/home/me/dev/storefront',
-    projectKind: 'git',
-    workspaceKind: 'directory',
-    name: over.name ?? 'storefront',
-    archivingAt: null,
-    status: 'running',
-    statusEnteredAt: null,
-    activityAt: over.activityAt ?? '2026-08-24T10:00:00Z',
-    scripts: [],
-    ...over,
-  } as WorkspaceDescriptor
-}
 
 function storeWith(...descriptors: WorkspaceDescriptor[]): WorkspaceStore {
   let store: WorkspaceStore = initialWorkspaceStore

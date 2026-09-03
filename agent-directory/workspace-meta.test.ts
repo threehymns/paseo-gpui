@@ -8,25 +8,7 @@ import {
   type WorkspaceMetaConfig,
 } from './workspace-meta'
 import type { WorkspaceDescriptor } from '../daemon/paseo'
-
-/** Canonical minimal descriptor builder; runtime fields arrive via `over`. */
-function workspace(over: Partial<WorkspaceDescriptor>): WorkspaceDescriptor {
-  return {
-    id: over.id ?? 'w1',
-    projectId: over.projectId ?? 'p1',
-    projectDisplayName: over.projectDisplayName ?? 'storefront',
-    projectRootPath: over.projectRootPath ?? '/home/me/dev/storefront',
-    projectKind: 'git',
-    workspaceKind: 'directory',
-    name: over.name ?? 'storefront',
-    archivingAt: null,
-    status: 'running',
-    statusEnteredAt: null,
-    activityAt: over.activityAt ?? '2026-08-24T10:00:00Z',
-    scripts: [],
-    ...over,
-  } as WorkspaceDescriptor
-}
+import { workspace } from './test-support'
 
 const git = (over: Partial<NonNullable<WorkspaceDescriptor['gitRuntime']>>) =>
   ({ currentBranch: 'fix-auth', ...over }) as NonNullable<WorkspaceDescriptor['gitRuntime']>
