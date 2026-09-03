@@ -6,7 +6,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import React, { useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { Select, SelectContent, SelectItem, SelectLabel, SelectSeparator, SelectTrigger } from '@gpuix/react'
 import {
   DAEMON_URL,
@@ -34,6 +34,7 @@ import {
   type WorkspaceStatusGroup,
   type WorkspaceStore,
 } from '../agent-directory/workspaces'
+import { visibleWorkspaceIds } from '../agent-directory/workspace-shortcuts'
 import {
   workspaceMetaLine,
   workspaceRowTitle,
@@ -1233,6 +1234,7 @@ export function Sidebar({
   navState,
   onNavBack,
   onNavForward,
+  onVisibleRowsChange,
 }: {
   /** The whole workspace directory, written only by the daemon subscription. */
   workspaces: WorkspaceStore
@@ -1262,6 +1264,8 @@ export function Sidebar({
   navState: { canBack: boolean; canForward: boolean }
   onNavBack: () => void
   onNavForward: () => void
+  /** Reports the current visible-walk-order of rows, for the jump shortcuts' handler. */
+  onVisibleRowsChange: (ids: string[]) => void
 }) {
   const [showArchived, setShowArchived] = useAppState(appStore, showArchivedWorkspaces)
   // The local state can't share the StateKey's name: the initializer would
@@ -1335,6 +1339,12 @@ export function Sidebar({
       return next
     })
   }
+  // The keyboard handler in chat.tsx reasons over the same rows the sidebar
+  // renders, so the walk order — sections minus collapsed projects — is
+  // reported up whenever the view or its collapse state changes.
+  useEffect(() => {
+    onVisibleRowsChange(visibleWorkspaceIds(groups, collapsedProjects))
+  }, [groups, collapsedProjects, onVisibleRowsChange])
 
   return (
     <div

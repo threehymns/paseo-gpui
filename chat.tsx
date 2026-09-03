@@ -11,7 +11,7 @@
  * Remote daemon:   PASEO_URL=wss://host/ws PASEO_PASSWORD=... bun --hot chat.tsx
  */
 
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { motion, render, useGpuix } from '@gpuix/react'
 import type { PaseoAgentConfig, PaseoClient } from '@getpaseo/client'
 import type { DaemonClient } from '@getpaseo/client/internal/daemon-client'
@@ -48,6 +48,12 @@ import {
   workspaceDirectory,
   type WorkspaceStore,
 } from './agent-directory/workspaces'
+import {
+  isJumpShortcut,
+  isNextWorkspace,
+  isPrevWorkspace,
+  prevNextWorkspaceTarget,
+} from './agent-directory/workspace-shortcuts'
 import {
   canGoBack,
   canGoForward,
@@ -340,6 +346,12 @@ export function ChatApp() {
   useWindowEvent((event) => {
     if (event.eventType === 'keyDown' && isPaletteToggle(event)) setPaletteOpen((open) => !open)
   })
+  // The sidebar reports its rendered rows up so the jump/prev/next shortcuts can
+  // target exactly those rows. A ref keeps the handle stable for the listener.
+  const visibleRowsRef = useRef<string[]>([])
+  const onVisibleRowsChange = useCallback((ids: string[]) => {
+    visibleRowsRef.current = ids
+  }, [])
 
   const {
     config: draftConfig,
@@ -471,6 +483,26 @@ export function ChatApp() {
       now: Date.now(),
     })
   }
+  // Jump + prev/next shortcuts over the sidebar's visible rows. The walk order
+  // arrives via visibleRowsRef (reported by the Sidebar itself); opening the
+  // target reuses onSelect's own path so a shortcut behaves like a row click.
+  useWindowEvent((event) => {
+    if (event.eventType !== 'keyDown') return
+    const orders = visibleRowsRef.current
+    // ⌘/Ctrl+1–9 jumps to the nth visible row; gaps from filtering and
+    // collapsed groups were already skipped by the walk-order computation.
+    const jump = isJumpShortcut(event)
+    if (jump != null) {
+      const target = orders[jump - 1]
+      if (target) openWorkspace(target)
+      return
+    }
+    if (isPrevWorkspace(event) || isNextWorkspace(event)) {
+      const index = prevNextWorkspaceTarget(orders, selectedWorkspaceId, isPrevWorkspace(event) ? -1 : 1)
+      const target = index >= 0 ? orders[index] : null
+      if (target) openWorkspace(target)
+    }
+  })
 
   // The composer's stop control: enabled only while the open agent runs. From
   // click until the cancellation is confirmed — the agent leaving running via
@@ -1044,6 +1076,7 @@ export function ChatApp() {
           navState={navState}
           onNavBack={() => nav(-1)}
           onNavForward={() => nav(1)}
+          onVisibleRowsChange={onVisibleRowsChange}
         />
         <div style={{ width: 1, height: '100%', flexShrink: 0, backgroundColor: C.sidebarBorder }} />
       </motion.div>
