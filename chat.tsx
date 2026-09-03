@@ -125,12 +125,15 @@ import {
   reduceTabs,
   selectActiveAgentId,
   selectActiveDraft,
+  selectActiveSetup,
   selectActiveTab,
   selectTabs,
   type TabsEvent,
 } from './tabs/tabs'
 import { TabStrip } from './tabs/tab-strip'
 import { AgentTabPanel, type TabConversation } from './tabs/agent-tab-panel'
+import { SetupTabPanel } from './tabs/setup-tab-panel'
+import { setupSucceeded, useWorkspaceSetup } from './tabs/setup'
 
 // ---- daemon hooks ----------------------------------------------------------
 
@@ -287,6 +290,11 @@ export function ChatApp() {
     for (const entry of agents) everShownAgentIds.current.add(entry.id)
   }, [agents])
 
+  // Worktree-created agents awaiting their workspace id. A setup tab is keyed by
+  // workspace, which the daemon only reveals once the worktree exists; these ids
+  // bridge the gap from the create handle to the agent's directory entry.
+  const pendingSetupAgents = useRef<Set<string>>(new Set())
+
   // Workspace tabs: the strip of open agent + draft tabs with a focused one.
   // The reducer owns every add/close/select decision; this component only
   // translates gestures and daemon results into TabsEvents. `activeId` stays
@@ -299,6 +307,7 @@ export function ChatApp() {
   const activeTabId = tabsState.activeTabId
   const activeAgentId = selectActiveAgentId(tabsState)
   const activeDraft = selectActiveDraft(tabsState)
+  const activeSetup = selectActiveSetup(tabsState)
   const activeId = activeAgentId
   // Visited-agent history behind the chrome's back/forward arrows: opening an
   // agent records the visit, back/forward only move the cursor. An explicit
@@ -390,6 +399,11 @@ export function ChatApp() {
   const activeRepoKey = activeStatus ? repoKeyOf(activeStatus) : (activeEntry?.cwd ?? null)
   const activeQueue = activeRepoKey ? repoActions.state.repos[activeRepoKey] : undefined
 
+  // Workspace setup progress spine: a setup tab shows a worktree's bootstrap
+  // commands as they run; `useWorkspaceSetup` owns the per-workspace store.
+  const setup = useWorkspaceSetup(daemon)
+  const setupEntries = setup.state.entries
+
   // An agent that vanished from the directory (deleted) can no longer host a
   // conversation — Paseo's own client redirects away in both cases. Its tab is
   // closed, which lands on the neighbor (or the empty new-task state).
@@ -400,6 +414,34 @@ export function ChatApp() {
   useEffect(() => {
     if (activeEntryGone && activeTab) dispatchTabs({ type: 'close', tabId: activeTab.id })
   }, [activeEntryGone, activeTab])
+
+  // Worktree creation opens a setup tab once the daemon reveals the new
+  // workspace id on the agent's directory entry (the create handle carries no
+  // workspace yet). Non-worktree agents are never added here, so they never get
+  // a setup tab.
+  useEffect(() => {
+    if (pendingSetupAgents.current.size === 0) return
+    for (const agentId of pendingSetupAgents.current) {
+      const entry = agents.find((candidate) => candidate.id === agentId)
+      if (entry?.workspaceId) {
+        pendingSetupAgents.current.delete(agentId)
+        dispatchTabs({ type: 'openSetup', workspaceId: entry.workspaceId, agentId, createdAt: Date.now() })
+      }
+    }
+  }, [agents])
+
+  // A watched setup tab hands off to its agent's conversation the moment the
+  // daemon reports the worktree ready: the conversation takes over and the
+  // setup tab stays behind, collapsed to its summary chip.
+  useEffect(() => {
+    for (const tab of tabs) {
+      if (tab.target !== 'setup' || tab.id !== activeTabId) continue
+      const snapshot = setupEntries[tab.state.workspaceId]
+      if (setupSucceeded(snapshot)) {
+        dispatchTabs({ type: 'openAgent', agentId: tab.state.agentId, createdAt: tab.createdAt })
+      }
+    }
+  }, [tabs, activeTabId, setupEntries])
 
   // Row lifecycle actions disable per row while their daemon call is in flight;
   // directory truth arrives through the subscription, never from these results.
@@ -688,6 +730,10 @@ export function ChatApp() {
       })
       setPendingSeed({ agentId: handle.id, text, images: stagedImages })
       setVisitHistory((prev) => visitAgent(prev, handle.id))
+      // A worktree bootstrap needs a setup tab; its workspace id only appears
+      // on the agent's directory entry as the daemon creates the worktree, so
+      // it is resolved by the correlation effect above.
+      if (createWorktree === 'worktree') pendingSetupAgents.current.add(handle.id)
       if (activeTab && activeDraft) {
         // The draft tab flips into the new agent's tab and stays focused.
         dispatchTabs({
@@ -1110,12 +1156,25 @@ export function ChatApp() {
                 return entry ? displayName(entry) : 'Agent'
               }
               if (tab.target === 'draft') return basename(tab.state.cwd)
+              if (tab.target === 'setup') {
+                const snap = setupEntries[tab.state.workspaceId]
+                return snap ? `${snap.detail.branchName} setup` : 'Setup'
+              }
               return 'Workspace setup'
             }}
             dotColorFor={(tab) => {
-              if (tab.target !== 'agent') return null
-              const entry = agents.find((candidate) => candidate.id === tab.state.agentId)
-              return entry ? agentStatusColor(entry) : null
+              if (tab.target === 'agent') {
+                const entry = agents.find((candidate) => candidate.id === tab.state.agentId)
+                return entry ? agentStatusColor(entry) : null
+              }
+              if (tab.target === 'setup') {
+                const snap = setupEntries[tab.state.workspaceId]
+                if (snap?.status === 'running') return C.running
+                if (snap?.status === 'completed') return C.success
+                if (snap?.status === 'failed') return C.danger
+                return C.running
+              }
+              return null
             }}
             attentionFor={(tab) => {
               if (tab.target !== 'agent') return false
@@ -1156,7 +1215,7 @@ export function ChatApp() {
               onJumpToTurn={subagentFollow.jumpToTurn}
             />
           </div>
-        ) : activeId == null ? (
+        ) : activeId == null && !activeSetup ? (
           <CenterMessage
             title={activeDraft ? 'New draft' : 'New task'}
             detail={`Pick a model, then describe what to build in ${basename(activeDraft?.cwd ?? cwd)}.`}
@@ -1182,6 +1241,14 @@ export function ChatApp() {
               onEditQueued={editQueued}
               onOpenFile={openFile}
               workspaceRoot={agents.find((a) => a.id === tab.state.agentId)?.cwd ?? null}
+            />
+          ) : tab.target === 'setup' ? (
+            <SetupTabPanel
+              key={tab.id}
+              workspaceId={tab.state.workspaceId}
+              snapshot={setupEntries[tab.state.workspaceId] ?? null}
+              refresh={setup.refresh}
+              hidden={tab.id !== activeTabId}
             />
           ) : null,
         )}
