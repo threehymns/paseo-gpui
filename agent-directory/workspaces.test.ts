@@ -14,6 +14,7 @@ import {
   workspaceDirectory,
   workspaceDisplayName,
   workspaceProjectGroups,
+  workspaceStatusGroups,
   type WorkspaceStore,
 } from './workspaces'
 import { relativeTimeAt, sortAgents, type AgentEntry, type EmptyProjectDescriptor, type WorkspaceDescriptor } from '../daemon/paseo'
@@ -345,6 +346,74 @@ describe('workspaceProjectGroups', () => {
       emptyProjects: [],
     }
     expect(workspaceProjectGroups(store, false)[0]!.name).toBe('Checkout Flow')
+  })
+})
+
+describe('workspaceStatusGroups', () => {
+  test('groups by status in urgency order, rows recency-sorted, empties omitted', () => {
+    const store: WorkspaceStore = {
+      workspaces: [
+        workspace({ id: 'a', status: 'done', activityAt: '2026-08-24T09:00:00Z' }),
+        workspace({ id: 'b', status: 'running', activityAt: '2026-08-24T11:00:00Z' }),
+        workspace({ id: 'c', status: 'needs_input', activityAt: '2026-08-24T10:00:00Z' }),
+        workspace({ id: 'd', status: 'running', activityAt: '2026-08-24T12:00:00Z' }),
+      ],
+      emptyProjects: [],
+    }
+    const groups = workspaceStatusGroups(store, false)
+    expect(groups.map((group) => group.status)).toEqual(['needs_input', 'running', 'done'])
+    const running = groups.find((group) => group.status === 'running')!
+    expect(running.label).toBe('Working')
+    expect(running.workspaces.map((w) => w.id)).toEqual(['d', 'b'])
+  })
+
+  test('status mode applies the same AND filters as project mode', () => {
+    const store: WorkspaceStore = {
+      workspaces: [
+        workspace({ id: 'keep', status: 'failed', projectId: 'p1', labels: ['bug'] }),
+        workspace({ id: 'drop', status: 'done', projectId: 'p9', labels: ['bug'] }),
+      ],
+      emptyProjects: [],
+    }
+    const groups = workspaceStatusGroups(store, false, { hosts: [], projects: ['p1'], labels: ['bug'] })
+    expect(groups.map((group) => group.status)).toEqual(['failed'])
+  })
+})
+
+describe('filtered project groups', () => {
+  test('an active project label filter hides non-matching workspaces and their projects', () => {
+    const store: WorkspaceStore = {
+      workspaces: [
+        workspace({ id: 'a', projectId: 'p1', projectDisplayName: 'keep', labels: ['bug'] }),
+        workspace({ id: 'b', projectId: 'p2', projectDisplayName: 'drop', labels: ['docs'] }),
+        workspace({ id: 'c', projectId: 'p1', projectDisplayName: 'keep', labels: ['docs'] }),
+      ],
+      emptyProjects: [],
+    }
+    const groups = workspaceProjectGroups(store, false, { hosts: [], projects: [], labels: ['bug'] })
+    expect(groups.map((group) => group.name)).toEqual(['keep'])
+    expect(groups[0]!.workspaces.map((w) => w.id)).toEqual(['a'])
+  })
+
+  test('daemon-truly-empty projects still render under an active filter', () => {
+    const store: WorkspaceStore = {
+      workspaces: [workspace({ id: 'a', projectId: 'p1', projectDisplayName: 'zeta', labels: ['bug'] })],
+      emptyProjects: [{ projectId: 'p-empty', projectDisplayName: 'alpha', projectRootPath: '/x', projectKind: 'git' }],
+    }
+    const groups = workspaceProjectGroups(store, false, { hosts: [], projects: [], labels: ['bug'] })
+    expect(groups.map((group) => group.name)).toEqual(['zeta', 'alpha'])
+  })
+
+  test('no filter matches everything, preserving the existing order', () => {
+    const store: WorkspaceStore = {
+      workspaces: [
+        workspace({ id: 'a', projectId: 'p1', projectDisplayName: 'zeta' }),
+        workspace({ id: 'b', projectId: 'p0', projectDisplayName: 'api', activityAt: '2026-08-24T11:00:00Z' }),
+      ],
+      emptyProjects: [],
+    }
+    const groups = workspaceProjectGroups(store, false, { hosts: [], projects: [], labels: [] })
+    expect(groups.map((group) => group.name)).toEqual(['api', 'zeta'])
   })
 })
 
