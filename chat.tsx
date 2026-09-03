@@ -18,6 +18,7 @@ import type { DaemonClient } from '@getpaseo/client/internal/daemon-client'
 import {
   DAEMON_URL,
   activeAgentGone,
+  activityAt,
   applyAgentPage,
   applyAgentUpdate,
   basename,
@@ -81,10 +82,8 @@ import {
 import { Transcript } from './conversation/transcript'
 import { FeatureToggles, ModelPicker, OptionPicker, modeOptions, thinkingOptions } from './composer/pickers'
 import { Composer, ConfigNotice, FooterBar, TracksRow } from './composer/composer'
-import { useAgentConversation } from './conversation/conversation'
 import { toMentionEntries, type MentionSource } from './composer/mentions'
 import { useTranscriptFollow } from './conversation/follow'
-import { useAgentPermissions } from './conversation/permissions'
 import { nativeOpenFileBridge, requestOpenFile } from './chrome/open-file'
 import { useAttention, type NotificationBridge } from './conversation/attention'
 import { useDraftConfig } from './composer/draft-config'
@@ -121,6 +120,17 @@ import {
   type OpenSubagent,
 } from './tracks/tracks-panel'
 import { createAppStore, defaultStatePath, fileStateStorage, showArchivedAgents, useAppState } from './app-state'
+import {
+  initialTabs,
+  reduceTabs,
+  selectActiveAgentId,
+  selectActiveDraft,
+  selectActiveTab,
+  selectTabs,
+  type TabsEvent,
+} from './tabs/tabs'
+import { TabStrip } from './tabs/tab-strip'
+import { AgentTabPanel, type TabConversation } from './tabs/agent-tab-panel'
 
 // ---- daemon hooks ----------------------------------------------------------
 
@@ -258,26 +268,58 @@ async function openImagePicker(): Promise<IncomingImage[] | null> {
 /** One store per app run: read the state file once, persist every write. */
 const createStateStore = () => createAppStore(fileStateStorage(defaultStatePath()))
 
+/**
+ * The slice of an agent conversation the app-level chrome consumes (composer,
+ * tracks row, context meter). Panels own the full conversation and register it
+ * in the ref map; this keeps the app decoupled from the per-tab lifecycle.
+ */
+type ComposerConversation = Pick<
+  TabConversation,
+  'turns' | 'parked' | 'pending' | 'status' | 'usage' | 'send' | 'park' | 'release' | 'unqueue'
+>
+
 export function ChatApp() {
   const { client, daemon, status, error, agents, providers, workspaces } = useDaemon()
   const [store] = useState(createStateStore)
 
-  const [activeId, setActiveId] = useState<string | null>(null)
+  const everShownAgentIds = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    for (const entry of agents) everShownAgentIds.current.add(entry.id)
+  }, [agents])
+
+  // Workspace tabs: the strip of open agent + draft tabs with a focused one.
+  // The reducer owns every add/close/select decision; this component only
+  // translates gestures and daemon results into TabsEvents. `activeId` stays
+  // the single "selected agent" the rest of the app reasons about — whichever
+  // agent tab is focused, or null for a draft/no-tab state.
+  const [tabsState, setTabsState] = useState(initialTabs)
+  const dispatchTabs = (event: TabsEvent) => setTabsState((prev) => reduceTabs(prev, event))
+  const tabs = selectTabs(tabsState)
+  const activeTab = selectActiveTab(tabsState)
+  const activeTabId = tabsState.activeTabId
+  const activeAgentId = selectActiveAgentId(tabsState)
+  const activeDraft = selectActiveDraft(tabsState)
+  const activeId = activeAgentId
   // Visited-agent history behind the chrome's back/forward arrows: opening an
   // agent records the visit, back/forward only move the cursor. An explicit
   // extension of Paseo's own navigation model (no upstream visited-history
   // stack exists); see ticket #21's parity note.
   const [visitHistory, setVisitHistory] = useState<VisitHistory>(emptyVisitHistory)
+  /** Opens (or focuses) an agent's tab; recency seeds its strip position. */
+  const openAgentTab = (id: string) => {
+    const entry = agents.find((candidate) => candidate.id === id) ?? null
+    dispatchTabs({ type: 'openAgent', agentId: id, createdAt: entry ? activityAt(entry) : 0 })
+  }
   /** Opening an agent records the visit and truncates any forward entries. */
   const visit = (id: string) => {
-    setActiveId(id)
+    openAgentTab(id)
     setVisitHistory((prev) => visitAgent(prev, id))
   }
   const nav = (delta: 1 | -1) => {
     const next = delta < 0 ? goBack(visitHistory) : goForward(visitHistory)
     if (next === visitHistory) return
     setVisitHistory(next)
-    setActiveId(next.stack[next.index])
+    openAgentTab(next.stack[next.index]!)
   }
   const navState = { canBack: canGoBack(visitHistory), canForward: canGoForward(visitHistory) }
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null)
@@ -311,13 +353,26 @@ export function ChatApp() {
   const [cwd, setCwd] = useState(process.cwd())
   const [worktree, setWorktree] = useState('local')
 
-  const conversation = useAgentConversation(client, activeId, {
-    seedText: seed?.text ?? null,
-    seedImages: seed?.images ?? null,
-    onSeedConsumed: () => setPendingSeed(null),
+  // Each open agent tab owns its timeline subscription inside its own panel —
+  // kept mounted (hide-not-unmount) so background tabs keep merging. The
+  // active tab's conversation powers the composer, tracks row, and meter below;
+  // a stable no-op stands in for draft/no-agent states (send/park are inert).
+  const conversationsRef = useRef<Map<string, ComposerConversation>>(new Map())
+  const emptyConversation = useRef<ComposerConversation>({
+    turns: [],
+    parked: [],
+    pending: [],
+    status: 'loading',
+    usage: null,
+    send: async () => false,
+    park: () => {},
+    release: async () => false,
+    unqueue: () => {},
   })
+  const conversation: ComposerConversation = activeId
+    ? conversationsRef.current.get(activeId) ?? emptyConversation.current
+    : emptyConversation.current
   const turns = conversation.turns
-  const permissions = useAgentPermissions(client, daemon, activeId)
   // No OS notifier exists in @gpuix yet, so delivery silently no-ops; the
   // payloads are ready for a runtime bridge — clicking one deep-links by
   // re-selecting notice.payload.agentId.
@@ -335,22 +390,16 @@ export function ChatApp() {
   const activeRepoKey = activeStatus ? repoKeyOf(activeStatus) : (activeEntry?.cwd ?? null)
   const activeQueue = activeRepoKey ? repoActions.state.repos[activeRepoKey] : undefined
 
-  // Ids the directory has shown, so a just-created agent isn't judged gone
-  // while its upsert is still in flight.
-  const everShownAgentIds = useRef<Set<string>>(new Set())
-  useEffect(() => {
-    for (const entry of agents) everShownAgentIds.current.add(entry.id)
-  }, [agents])
-
-  // An agent that vanished from the directory (deleted) or was archived can no
-  // longer host a conversation — Paseo's own client redirects away in both cases.
+  // An agent that vanished from the directory (deleted) can no longer host a
+  // conversation — Paseo's own client redirects away in both cases. Its tab is
+  // closed, which lands on the neighbor (or the empty new-task state).
   const activeEntryGone = activeAgentGone(activeId, agents, {
     connected: status === 'connected',
     wasSeen: activeId != null && everShownAgentIds.current.has(activeId),
   })
   useEffect(() => {
-    if (activeEntryGone) setActiveId(null)
-  }, [activeEntryGone])
+    if (activeEntryGone && activeTab) dispatchTabs({ type: 'close', tabId: activeTab.id })
+  }, [activeEntryGone, activeTab])
 
   // Row lifecycle actions disable per row while their daemon call is in flight;
   // directory truth arrives through the subscription, never from these results.
@@ -401,28 +450,26 @@ export function ChatApp() {
     runRowAction('rename', id, () => daemon.updateAgent(id, { name: name.trim() }))
 
   /**
-   * Opening a workspace opens its conversation: its most recently active agent
-   * becomes the shown timeline; a workspace with no agents falls back to the
-   * composer's new-task state seeded to that workspace's directory.
+   * Opening a workspace replaces the strip with that workspace's tabs: an
+   * agent tab per non-archived agent (most recent first), plus a trailing draft
+   * tab seeded to the workspace directory for starting something new. A
+   * workspace with no agents yields just that draft tab.
    */
   const openWorkspace = (id: string) => {
     setSelectedWorkspaceId(id)
     setCreateError(null)
     const descriptor = workspaces.workspaces.find((candidate) => candidate.id === id)
     if (!descriptor) {
-      setActiveId(null)
+      dispatchTabs({ type: 'reset' })
       return
     }
-    const agent = mostRecentAgent(agentsOfWorkspace(agents, descriptor).filter((a) => !isArchived(a)))
-    if (agent) {
-      visit(agent.id)
-    } else {
-      // Seeding means the send lands in the workspace as it is — never a new
-      // worktree on top of it.
-      setActiveId(null)
-      setCwd(workspaceDirectory(descriptor))
-      setWorktree('local')
-    }
+    const workspaceAgents = agentsOfWorkspace(agents, descriptor).filter((a) => !isArchived(a))
+    dispatchTabs({
+      type: 'openWorkspace',
+      agents: workspaceAgents.map((a) => ({ id: a.id, createdAt: activityAt(a) })),
+      cwd: workspaceDirectory(descriptor),
+      now: Date.now(),
+    })
   }
 
   // The composer's stop control: enabled only while the open agent runs. From
@@ -474,6 +521,19 @@ export function ChatApp() {
     viewingSubagent
       ? subagentTurns(subagents.state, viewingSubagent.parentAgentId, viewingSubagent.id)
       : []
+
+  // The provider-subagent viewer sits on top of the tabs and carries its own
+  // list and follow; agent tabs manage theirs inside their panels.
+  const subagentListRef = useRef<{ id: number } | null>(null)
+  const { renderer } = useGpuix()
+  const subagentFollow = useTranscriptFollow({
+    listRef: subagentListRef,
+    turnCount: providerTurns.length,
+    tailSignature: providerTurns.length > 0 ? JSON.stringify(providerTurns.at(-1)) : undefined,
+    agentId: viewingSubagent?.parentAgentId ?? activeId,
+    renderer,
+    slotOffset: 0,
+  })
 
   const viewSubagent = (target: OpenSubagent) => {
     if (target.kind === 'managed') {
@@ -543,39 +603,9 @@ export function ChatApp() {
     [sessionUsage, modelDef],
   )
 
-  // The transcript area shows the parent conversation, or a provider
-  // subagent's read-only timeline while it is open.
-  const visibleTurns = turns
-  const shownTurns = viewingSubagent ? providerTurns : visibleTurns
-
-  // Older-history availability for the transcript's top edge: quiet while more
-  // pages exist unrequested, a spinner while fetching, a marker once exhausted.
-  const olderPages =
-    conversation.status === 'ready' && visibleTurns.length > 0
-      ? conversation.loadingHistory
-        ? ('loading' as const)
-        : conversation.hasOlder
-          ? ('more' as const)
-          : ('end' as const)
-      : undefined
-
-const listRef = useRef<{ id: number } | null>(null)
-  const { renderer } = useGpuix()
-  // Follow tracks the list actually rendered: the parent transcript normally,
-  // the open provider subagent's timeline while the viewer is up.
-  const { following, onScroll, requestJump, jumpToTurn } = useTranscriptFollow({
-    listRef,
-    turnCount: shownTurns.length,
-    // The final turn's identity, so a history page prepended above the viewport
-    // (count grew, tail sat still) doesn't drag a following view back down.
-    tailSignature: shownTurns.length > 0 ? JSON.stringify(shownTurns.at(-1)) : undefined,
-    agentId: viewingSubagent ? viewingSubagent.parentAgentId : activeId,
-    renderer,
-    // HistoryHead occupies virtual-list slot 0 whenever older history does (or
-    // may) exist upstream, so every turn row is shifted down by one. The
-    // subagent viewer pages history with its own head-free list.
-    slotOffset: viewingSubagent ? 0 : olderPages ? 1 : 0,
-  })
+  // The transcript area (parent conversation, provider-subagent viewer, and
+  // its scroll state) lives inside per-tab conversation panels so background
+  // tabs keep streaming; nothing scroll- or history-related lives here any more.
 
   /** Clears the composer after the text (and chips) have found a home. */
   const clearDraft = () => {
@@ -640,6 +670,10 @@ const listRef = useRef<{ id: number } | null>(null)
       restoreDraft(text, stagedImages)
       return
     }
+    // A draft tab creates the agent in its own directory; the directory
+    // new-task state uses the composer's cwd/worktree choices.
+    const createDir = activeDraft?.cwd ?? cwd
+    const createWorktree = activeDraft?.worktree ?? worktree
     try {
       const config: PaseoAgentConfig = { provider: modelValue }
       if (modeId) config.modeId = modeId
@@ -647,13 +681,25 @@ const listRef = useRef<{ id: number } | null>(null)
       if (Object.keys(featureValues).length > 0) config.featureValues = { ...featureValues }
       const handle = await client.agents.create({
         config,
-        cwd,
+        cwd: createDir,
         prompt: text,
         ...(outgoing.length > 0 ? { images: outgoing } : {}),
-        ...(worktree === 'worktree' ? { git: { createWorktree: true } } : {}),
+        ...(createWorktree === 'worktree' ? { git: { createWorktree: true } } : {}),
       })
       setPendingSeed({ agentId: handle.id, text, images: stagedImages })
-      visit(handle.id)
+      setVisitHistory((prev) => visitAgent(prev, handle.id))
+      if (activeTab && activeDraft) {
+        // The draft tab flips into the new agent's tab and stays focused.
+        dispatchTabs({
+          type: 'draftSent',
+          tabId: activeTab.id,
+          agentId: handle.id,
+          createdAt: Date.now(),
+        })
+      } else {
+        // Directory new-task: open the new agent as its own tab.
+        openAgentTab(handle.id)
+      }
     } catch (err) {
       setCreateError(errorMessage(err))
       restoreDraft(text, stagedImages)
@@ -764,7 +810,7 @@ const listRef = useRef<{ id: number } | null>(null)
 
   // `@` completion lists the selected agent's workspace, or the chosen one for
   // a new task. Daemon errors degrade to no suggestions inside the hook.
-  const mentionCwd = activeEntry?.cwd ?? cwd
+  const mentionCwd = activeEntry?.cwd ?? activeDraft?.cwd ?? cwd
   const mentionSource = useMemo<MentionSource>(
     () => ({
       cwd: mentionCwd,
@@ -795,7 +841,8 @@ const listRef = useRef<{ id: number } | null>(null)
         section: 'actions',
         keywords: 'compose new agent',
         run: () => {
-          setActiveId(null)
+          dispatchTabs({ type: 'reset' })
+          setSelectedWorkspaceId(null)
           // Same rule as the sidebar's New Task: no phantom future survives.
           setVisitHistory(truncateForward)
           setCreateError(null)
@@ -835,8 +882,9 @@ const listRef = useRef<{ id: number } | null>(null)
   useContributeActions(
     registry,
     () => {
-      // The workspace footer locks while an agent owns the conversation.
-      if (activeEntry) return []
+      // The workspace footer locks while a tab owns the conversation (an agent
+      // or a draft tab carries its own directory).
+      if (activeEntry || activeDraft) return []
       return [...new Set([process.cwd(), ...cwdOptions])].map((dir) => ({
         id: `workspace.${dir}`,
         title: basename(dir),
@@ -935,7 +983,7 @@ const listRef = useRef<{ id: number } | null>(null)
       ? {
           seam: daemon,
           agentId: activeId,
-          draft: activeId ? null : { modelValue, thinkingId, modeId, cwd },
+          draft: activeId ? null : { modelValue, thinkingId, modeId, cwd: activeDraft?.cwd ?? cwd },
         }
       : undefined
 
@@ -975,7 +1023,7 @@ const listRef = useRef<{ id: number } | null>(null)
           }}
           onDeleteAgent={deleteAgentRow}
           onNewTask={() => {
-            setActiveId(null)
+            dispatchTabs({ type: 'reset' })
             // Starting a new task is a fresh edge, not a forward jump: drop any
             // phantom future the visited stack was still holding.
             setVisitHistory(truncateForward)
@@ -1052,6 +1100,33 @@ const listRef = useRef<{ id: number } | null>(null)
             onBack={() => setViewing(null)}
           />
         )}
+        {tabs.length > 0 && (
+          <TabStrip
+            tabs={tabs}
+            activeTabId={activeTabId}
+            labelFor={(tab) => {
+              if (tab.target === 'agent') {
+                const entry = agents.find((candidate) => candidate.id === tab.state.agentId)
+                return entry ? displayName(entry) : 'Agent'
+              }
+              if (tab.target === 'draft') return basename(tab.state.cwd)
+              return 'Workspace setup'
+            }}
+            dotColorFor={(tab) => {
+              if (tab.target !== 'agent') return null
+              const entry = agents.find((candidate) => candidate.id === tab.state.agentId)
+              return entry ? agentStatusColor(entry) : null
+            }}
+            attentionFor={(tab) => {
+              if (tab.target !== 'agent') return false
+              return Boolean(agents.find((candidate) => candidate.id === tab.state.agentId)?.requiresAttention)
+            }}
+            onSelect={(tabId) => dispatchTabs({ type: 'select', tabId })}
+            onClose={(tabId) => dispatchTabs({ type: 'close', tabId })}
+            onCloseOthers={(tabId) => dispatchTabs({ type: 'closeOthers', tabId })}
+            onNewDraft={() => dispatchTabs({ type: 'openDraft', cwd: activeDraft?.cwd ?? cwd, now: Date.now() })}
+          />
+        )}
         {status === 'error' ? (
           <CenterMessage
             title={`Cannot reach ${daemonHost()}`}
@@ -1059,17 +1134,8 @@ const listRef = useRef<{ id: number } | null>(null)
           />
         ) : status === 'connecting' ? (
           <CenterMessage title={`Connecting to ${daemonHost()}…`} />
-        ) : shownTurns.length === 0 && (viewingSubagent || permissions.cards.length === 0) ? (
-          <CenterMessage
-            title={viewingSubagent ? 'Loading subagent…' : activeId ? 'Starting agent…' : 'New task'}
-            detail={
-              viewingSubagent || activeId
-                ? undefined
-                : `Pick a model, then describe what to build in ${basename(cwd)}.`
-            }
-          />
         ) : viewingSubagent ? (
-          <>
+          <div style={{ display: 'flex', flex: 1, flexDirection: 'column', minHeight: 0 }}>
             {subagentHasOlder(subagents.state, viewingSubagent.parentAgentId, viewingSubagent.id) && (
               <SubagentLoadOlder
                 loading={subagents.loadingOlder}
@@ -1079,33 +1145,45 @@ const listRef = useRef<{ id: number } | null>(null)
               />
             )}
             <Transcript
-              turns={shownTurns}
+              turns={providerTurns}
               permissions={[]}
               onRespond={undefined}
               onEditQueued={undefined}
-              listRef={listRef}
-              detached={!following}
-              onScroll={onScroll}
-              onJumpToBottom={requestJump}
-              onJumpToTurn={jumpToTurn}
+              listRef={subagentListRef}
+              detached={!subagentFollow.following}
+              onScroll={subagentFollow.onScroll}
+              onJumpToBottom={subagentFollow.requestJump}
+              onJumpToTurn={subagentFollow.jumpToTurn}
             />
-          </>
-        ) : (
-          <Transcript
-            turns={visibleTurns}
-            permissions={permissions.cards}
-            onRespond={permissions.respond}
-            onEditQueued={editQueued}
-            workspaceRoot={activeEntry?.cwd}
-            onOpenFile={openFile}
-            listRef={listRef}
-            olderPages={olderPages}
-            onLoadOlder={conversation.loadHistory}
-            detached={!following}
-            onScroll={onScroll}
-            onJumpToBottom={requestJump}
-            onJumpToTurn={jumpToTurn}
+          </div>
+        ) : activeId == null ? (
+          <CenterMessage
+            title={activeDraft ? 'New draft' : 'New task'}
+            detail={`Pick a model, then describe what to build in ${basename(activeDraft?.cwd ?? cwd)}.`}
           />
+        ) : null}
+        {/* Every open agent tab stays mounted so its timeline keeps streaming;
+            only the focused one is visible. */}
+        {tabs.map((tab) =>
+          tab.target === 'agent' ? (
+            <AgentTabPanel
+              key={tab.id}
+              client={client}
+              daemon={daemon}
+              agentId={tab.state.agentId}
+              seedText={pendingSeed?.agentId === tab.state.agentId ? pendingSeed.text : null}
+              seedImages={pendingSeed?.agentId === tab.state.agentId ? pendingSeed.images : null}
+              onSeedConsumed={() => {
+                if (pendingSeed?.agentId === tab.state.agentId) setPendingSeed(null)
+              }}
+              hidden={tab.id !== activeTabId}
+              showTranscript={tab.id === activeTabId ? !viewingSubagent : false}
+              onConversation={(id, conv) => conversationsRef.current.set(id, conv)}
+              onEditQueued={editQueued}
+              onOpenFile={openFile}
+              workspaceRoot={agents.find((a) => a.id === tab.state.agentId)?.cwd ?? null}
+            />
+          ) : null,
         )}
         {createError && (
           <div style={{ display: 'flex', flexDirection: 'row', justifyContent: 'center', paddingBottom: 4 }}>
@@ -1157,16 +1235,22 @@ const listRef = useRef<{ id: number } | null>(null)
           mentionSource={mentionSource}
         />
         <FooterBar
-          cwd={activeEntry?.cwd ?? cwd}
-          cwdLocked={Boolean(activeEntry)}
+          cwd={activeEntry?.cwd ?? activeDraft?.cwd ?? cwd}
+          cwdLocked={Boolean(activeEntry) || Boolean(activeDraft)}
           cwdOptions={[process.cwd(), ...cwdOptions]}
           onCwdChange={(dir) => {
             setCwd(dir)
             // A fresh directory selection mid-stack leaves no phantom future.
             setVisitHistory(truncateForward)
           }}
-          worktree={worktree}
-          onWorktreeChange={setWorktree}
+          worktree={activeDraft?.worktree ?? worktree}
+          onWorktreeChange={(next) => {
+            if (activeTab && activeDraft) {
+              dispatchTabs({ type: 'setDraftWorktree', tabId: activeTab.id, worktree: next as 'local' | 'worktree' })
+            } else {
+              setWorktree(next)
+            }
+          }}
           statusColor={
             activeEntry
               ? agentStatusColor(activeEntry)
