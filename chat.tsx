@@ -125,7 +125,7 @@ import {
   SubagentViewerBar,
   type OpenSubagent,
 } from './tracks/tracks-panel'
-import { createAppStore, defaultStatePath, fileStateStorage, showArchivedAgents, useAppState } from './app-state'
+import { createAppStore, defaultStatePath, fileStateStorage, showArchivedAgents, workspacePanes, useAppState } from './app-state'
 import {
   initialTabs,
   reduceTabs,
@@ -140,6 +140,15 @@ import { TabStrip } from './tabs/tab-strip'
 import { AgentTabPanel, type TabConversation } from './tabs/agent-tab-panel'
 import { SetupTabPanel } from './tabs/setup-tab-panel'
 import { setupSucceeded, useWorkspaceSetup } from './tabs/setup'
+import { PaneSplit, type PaneStripMeta } from './tabs/pane-view'
+import {
+  activePaneTabId,
+  paneLeaves,
+  paneTabIds,
+  reduceLayout,
+  type PaneEvent,
+  type PaneLayoutState,
+} from './layout/layout'
 
 // ---- daemon hooks ----------------------------------------------------------
 
@@ -309,10 +318,38 @@ export function ChatApp() {
   const [tabsState, setTabsState] = useState(initialTabs)
   const dispatchTabs = (event: TabsEvent) => setTabsState((prev) => reduceTabs(prev, event))
   const tabs = selectTabs(tabsState)
-  const activeTab = selectActiveTab(tabsState)
-  const activeTabId = tabsState.activeTabId
-  const activeAgentId = selectActiveAgentId(tabsState)
-  const activeDraft = selectActiveDraft(tabsState)
+  // Pane layout: null = the single-pane default (non-persisted); a split tree
+  // otherwise. The tree references the same tabIds the #46 reducer owns.
+  const [layoutState, setLayoutState] = useState<PaneLayoutState>(null)
+  const layoutRef = useRef<PaneLayoutState>(null)
+  // Per host+workspace key for persistence; null at the directory new-task.
+  const layoutKey = selectedWorkspaceId ? `${daemonHost()}::${selectedWorkspaceId}` : null
+  /** Persists a layout change for the current workspace; null removes the entry. */
+  const persistLayout = (next: PaneLayoutState) => {
+    layoutRef.current = next
+    if (!layoutKey) return
+    const all = store.get(workspacePanes)
+    if (next) {
+      store.set(workspacePanes, { ...all, [layoutKey]: next })
+    } else {
+      const rest = { ...all }
+      delete rest[layoutKey]
+      store.set(workspacePanes, rest)
+    }
+  }
+  /** Translates a pane gesture into state and persistence together. */
+  const dispatchPane = (event: PaneEvent) => {
+    const next = reduceLayout(layoutRef.current, event)
+    setLayoutState(next)
+    persistLayout(next)
+  }
+  // The active tab that drives the header/composer: the active pane's focused
+  // tab when split, else the #46 workspace's focused tab.
+  const activeTabId = layoutState ? activePaneTabId(layoutState) : tabsState.activeTabId
+  const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? null
+  const activeAgentId = activeTab && activeTab.target === 'agent' ? activeTab.state.agentId : null
+  const activeDraft = activeTab && activeTab.target === 'draft' ? activeTab.state : null
+  // The focused setup tab (if any) gates the empty new-task/new-draft state.
   const activeSetup = selectActiveSetup(tabsState)
   const activeId = activeAgentId
   // Visited-agent history behind the chrome's back/forward arrows: opening an
@@ -323,7 +360,13 @@ export function ChatApp() {
   /** Opens (or focuses) an agent's tab; recency seeds its strip position. */
   const openAgentTab = (id: string) => {
     const entry = agents.find((candidate) => candidate.id === id) ?? null
-    dispatchTabs({ type: 'openAgent', agentId: id, createdAt: entry ? activityAt(entry) : 0 })
+    const next = reduceTabs(tabsState, { type: 'openAgent', agentId: id, createdAt: entry ? activityAt(entry) : 0 })
+    setTabsState(next)
+    // In a split layout the freshly opened tab lands in the active pane.
+    if (layoutRef.current) {
+      const tab = next.tabs.find((c) => c.target === 'agent' && c.state.agentId === id)
+      if (tab) dispatchPane({ type: 'assignTab', tabId: tab.id, paneId: layoutRef.current.activePaneId })
+    }
   }
   /** Opening an agent records the visit and truncates any forward entries. */
   const visit = (id: string) => {
@@ -512,6 +555,10 @@ export function ChatApp() {
   const openWorkspace = (id: string) => {
     setSelectedWorkspaceId(id)
     setCreateError(null)
+    // Restore this host+workspace's persisted pane layout, if any.
+    const persisted = store.get(workspacePanes)[`${daemonHost()}::${id}`] ?? null
+    layoutRef.current = persisted
+    setLayoutState(persisted)
     const descriptor = workspaces.workspaces.find((candidate) => candidate.id === id)
     if (!descriptor) {
       dispatchTabs({ type: 'reset' })
@@ -546,10 +593,117 @@ export function ChatApp() {
     }
   })
 
-  // The composer's stop control: enabled only while the open agent runs. From
-  // click until the cancellation is confirmed — the agent leaving running via
-  // the directory subscription — the control reflects that so double-clicks are
-  // unambiguous.
+  // ---- pane layout operations ----------------------------------------------
+  // These translate user gestures into PaneEvents (and #46 tab events where a
+  // tab's existence is being changed), keeping the pane tree and the #46 tab
+  // strip in one id space. When the layout is null they degrade to the single
+  // tab strip exactly as before.
+
+  /** Split the active pane right or down; materializes a split layout on demand. */
+  const splitActivePane = (direction: 'right' | 'down') => {
+    const layout = layoutRef.current
+    if (layout) {
+      const target = layout.activePaneId
+      if (!target) return
+      dispatchPane(direction === 'right' ? { type: 'splitRight', paneId: target } : { type: 'splitDown', paneId: target })
+      return
+    }
+    // No split yet: materialize the default single pane (which hosts the
+    // workspace's tabs) and split it.
+    const single: PaneLayoutState = { root: leafFor(tabs.map((t) => t.id), tabsState.activeTabId), activePaneId: '' }
+    layoutRef.current = single
+    const target = single.root.id
+    const next = reduceLayout(single, direction === 'right' ? { type: 'splitRight', paneId: target } : { type: 'splitDown', paneId: target })
+    setLayoutState(next)
+    persistLayout(next)
+  }
+
+  /** Select a tab inside a pane; keeps #46's focus in sync for the non-split path. */
+  const selectTabInPane = (paneId: string, tabId: string) => {
+    if (layoutRef.current) dispatchPane({ type: 'focusTab', paneId, tabId })
+    dispatchTabs({ type: 'select', tabId })
+  }
+
+  /** Close a tab: drop it from #46 and remove its pane references (wherever it lives). */
+  const closeTabInPane = (_paneId: string, tabId: string) => {
+    dispatchTabs({ type: 'close', tabId })
+    if (layoutRef.current) dispatchPane({ type: 'removeTab', tabId })
+  }
+
+  /** Close every other tab in a pane, keeping `tabId` focused there. */
+  const closeOthersInPane = (paneId: string, tabId: string) => {
+    const layout = layoutRef.current
+    if (!layout) return
+    const others = paneTabIds(layout.root, paneId).filter((id) => id !== tabId)
+    for (const other of others) {
+      dispatchTabs({ type: 'close', tabId: other })
+      dispatchPane({ type: 'removeTab', tabId: other })
+    }
+    dispatchPane({ type: 'focusTab', paneId, tabId })
+  }
+
+  /** Append a new draft tab into a specific pane (or the single strip). */
+  const openDraftInPane = (paneId: string) => {
+    const dir = activeDraft?.cwd ?? cwd
+    const next = reduceTabs(tabsState, { type: 'openDraft', cwd: dir, now: Date.now() })
+    setTabsState(next)
+    const newTab = next.tabs.at(-1)
+    if (newTab && layoutRef.current) dispatchPane({ type: 'assignTab', tabId: newTab.id, paneId })
+  }
+
+  /** Cycle pane or tab focus via the keyboard (both directions, wrapping). */
+  const cyclePane = (direction: 'next' | 'prev', kind: 'pane' | 'tab') => {
+    if (!layoutRef.current) return
+    const event: PaneEvent =
+      kind === 'pane'
+        ? direction === 'next'
+          ? { type: 'focusNextPane' }
+          : { type: 'focusPrevPane' }
+        : direction === 'next'
+          ? { type: 'focusNextTab' }
+          : { type: 'focusPrevTab' }
+    dispatchPane(event)
+  }
+
+  /** Move the active tab to the first/next pane in the walk (a simple move op). */
+  const moveActiveTabToNextPane = () => {
+    const layout = layoutRef.current
+    if (!layout) return
+    const leaves = paneLeaves(layout.root)
+    if (leaves.length < 2) return
+    const idx = leaves.findIndex((l) => l.id === layout.activePaneId)
+    const next = leaves[(idx + 1) % leaves.length]!
+    const focusedTab = activePaneTabId(layout)
+    if (!focusedTab) return
+    dispatchPane({ type: 'moveTab', tabId: focusedTab, fromPaneId: layout.activePaneId, toPaneId: next.id })
+  }
+
+  // Pane keyboard control: Cmd/Ctrl+Alt+←/→ cycles panes, Cmd/Ctrl+Alt+↑/↓
+  // cycles tabs, Cmd/Ctrl+Shift+←/→ splits the active pane, Cmd/Ctrl+Shift+↑
+  // moves the active tab to the next pane.
+  useWindowEvent((event) => {
+    if (event.eventType !== 'keyDown') return
+    const mod = event.modifiers
+    if (!mod || !(mod.cmd || mod.ctrl)) return
+    if (mod.alt && !mod.shift) {
+      if (event.key === 'ArrowRight') cyclePane('next', 'pane')
+      else if (event.key === 'ArrowLeft') cyclePane('prev', 'pane')
+      else if (event.key === 'ArrowDown') cyclePane('next', 'tab')
+      else if (event.key === 'ArrowUp') cyclePane('prev', 'tab')
+      return
+    }
+    if (mod.shift && !mod.alt) {
+      if (event.key === 'ArrowRight') splitActivePane('right')
+      else if (event.key === 'ArrowDown') splitActivePane('down')
+      else if (event.key === 'ArrowUp') moveActiveTabToNextPane()
+    }
+  })
+
+  // Seed a materialized single-pane leaf for the first split.
+  function leafFor(tabIds: string[], focused: string | null) {
+    return { kind: 'leaf' as const, id: 'root', tabIds, focusedTabId: focused }
+  }
+
   const agentRunning = activeEntry?.status === 'running'
   const [stopping, setStopping] = useState(false)
   useEffect(() => setStopping(false), [activeId])
@@ -921,6 +1075,8 @@ export function ChatApp() {
         run: () => {
           dispatchTabs({ type: 'reset' })
           setSelectedWorkspaceId(null)
+          setLayoutState(null)
+          layoutRef.current = null
           // Same rule as the sidebar's New Task: no phantom future survives.
           setVisitHistory(truncateForward)
           setCreateError(null)
@@ -1065,6 +1221,80 @@ export function ChatApp() {
         }
       : undefined
 
+  // ---- multi-pane rendering --------------------------------------------------
+  // In a split layout each pane shows its own tab strip (PaneSplit owns it) and
+  // this content area below it: the focused agent panel, a draft center message,
+  // or an empty-pane hint. All of a pane's agent panels stay mounted (streaming
+  // live) with only the focused one visible, matching the single-pane rule.
+  const paneMeta: PaneStripMeta = {
+    labelFor: (tab) => {
+      if (tab.target === 'agent') {
+        const entry = agents.find((candidate) => candidate.id === tab.state.agentId)
+        return entry ? displayName(entry) : 'Agent'
+      }
+      if (tab.target === 'draft') return basename(tab.state.cwd)
+      return 'Workspace setup'
+    },
+    dotColorFor: (tab) => {
+      if (tab.target !== 'agent') return null
+      const entry = agents.find((candidate) => candidate.id === tab.state.agentId)
+      return entry ? agentStatusColor(entry) : null
+    },
+    attentionFor: (tab) => {
+      if (tab.target !== 'agent') return false
+      return Boolean(agents.find((candidate) => candidate.id === tab.state.agentId)?.requiresAttention)
+    },
+  }
+  const renderPaneContent = (paneId: string, tabIds: string[], focusedTabId: string | null): React.ReactNode => {
+    const focusedTab = tabs.find((t) => t.id === focusedTabId) ?? null
+    if (!focusedTabId || tabIds.length === 0 || !focusedTab) {
+      return <CenterMessage title="Empty pane" detail="Open an agent here, or close this pane." />
+    }
+    if (focusedTab.target === 'draft') {
+      return <CenterMessage title="New draft" detail={`Describe what to build in ${basename(focusedTab.state.cwd)}.`} />
+    }
+    if (focusedTab.target === 'setup') {
+      return (
+        <SetupTabPanel
+          key={focusedTab.id}
+          workspaceId={focusedTab.state.workspaceId}
+          snapshot={setupEntries[focusedTab.state.workspaceId] ?? null}
+          refresh={setup.refresh}
+        />
+      )
+    }
+    if (focusedTab.target !== 'agent') {
+      return <CenterMessage title="No agent here" detail="Pick an agent for this pane." />
+    }
+    const isActivePane = paneId === layoutRef.current?.activePaneId
+    return (
+      <>
+        {tabIds.map((id) => {
+          const tab = tabs.find((t) => t.id === id)
+          return tab && tab.target === 'agent' ? (
+            <AgentTabPanel
+              key={tab.id}
+              client={client}
+              daemon={daemon}
+              agentId={tab.state.agentId}
+              seedText={pendingSeed?.agentId === tab.state.agentId ? pendingSeed.text : null}
+              seedImages={pendingSeed?.agentId === tab.state.agentId ? pendingSeed.images : null}
+              onSeedConsumed={() => {
+                if (pendingSeed?.agentId === tab.state.agentId) setPendingSeed(null)
+              }}
+              hidden={tab.id !== focusedTabId}
+              showTranscript={isActivePane && tab.id === focusedTabId ? !viewingSubagent : false}
+              onConversation={(id, conv) => conversationsRef.current.set(id, conv)}
+              onEditQueued={editQueued}
+              onOpenFile={openFile}
+              workspaceRoot={agents.find((a) => a.id === tab.state.agentId)?.cwd ?? null}
+            />
+          ) : null
+        })}
+      </>
+    )
+  }
+
   return (
     <div
       style={{
@@ -1106,6 +1336,8 @@ export function ChatApp() {
             // phantom future the visited stack was still holding.
             setVisitHistory(truncateForward)
             setSelectedWorkspaceId(null)
+            setLayoutState(null)
+            layoutRef.current = null
             setCreateError(null)
           }}
           onCollapse={() => setCollapsed(true)}
@@ -1179,7 +1411,20 @@ export function ChatApp() {
             onBack={() => setViewing(null)}
           />
         )}
-        {tabs.length > 0 && (
+        {layoutState ? (
+          <PaneSplit
+            layout={layoutState}
+            tabs={tabs}
+            meta={paneMeta}
+            renderPane={renderPaneContent}
+            onSelectTab={selectTabInPane}
+            onCloseTab={closeTabInPane}
+            onCloseOthers={closeOthersInPane}
+            onNewDraft={openDraftInPane}
+          />
+        ) : (
+          <>
+          {tabs.length > 0 && (
           <TabStrip
             tabs={tabs}
             activeTabId={activeTabId}
@@ -1218,72 +1463,74 @@ export function ChatApp() {
             onCloseOthers={(tabId) => dispatchTabs({ type: 'closeOthers', tabId })}
             onNewDraft={() => dispatchTabs({ type: 'openDraft', cwd: activeDraft?.cwd ?? cwd, now: Date.now() })}
           />
-        )}
-        {status === 'error' ? (
-          <CenterMessage
-            title={`Cannot reach ${daemonHost()}`}
-            detail={`${error}\n\nStart a daemon with: npm install -g @getpaseo/cli && paseo`}
-          />
-        ) : status === 'connecting' ? (
-          <CenterMessage title={`Connecting to ${daemonHost()}…`} />
-        ) : viewingSubagent ? (
-          <div style={{ display: 'flex', flex: 1, flexDirection: 'column', minHeight: 0 }}>
-            {subagentHasOlder(subagents.state, viewingSubagent.parentAgentId, viewingSubagent.id) && (
-              <SubagentLoadOlder
-                loading={subagents.loadingOlder}
-                onClick={() =>
-                  subagents.loadOlder(viewingSubagent.parentAgentId, viewingSubagent.id)
-                }
+          )}
+          {status === 'error' ? (
+            <CenterMessage
+              title={`Cannot reach ${daemonHost()}`}
+              detail={`${error}\n\nStart a daemon with: npm install -g @getpaseo/cli && paseo`}
+            />
+          ) : status === 'connecting' ? (
+            <CenterMessage title={`Connecting to ${daemonHost()}…`} />
+          ) : viewingSubagent ? (
+            <div style={{ display: 'flex', flex: 1, flexDirection: 'column', minHeight: 0 }}>
+              {subagentHasOlder(subagents.state, viewingSubagent.parentAgentId, viewingSubagent.id) && (
+                <SubagentLoadOlder
+                  loading={subagents.loadingOlder}
+                  onClick={() =>
+                    subagents.loadOlder(viewingSubagent.parentAgentId, viewingSubagent.id)
+                  }
+                />
+              )}
+              <Transcript
+                turns={providerTurns}
+                permissions={[]}
+                onRespond={undefined}
+                onEditQueued={undefined}
+                listRef={subagentListRef}
+                detached={!subagentFollow.following}
+                onScroll={subagentFollow.onScroll}
+                onJumpToBottom={subagentFollow.requestJump}
+                onJumpToTurn={subagentFollow.jumpToTurn}
               />
-            )}
-            <Transcript
-              turns={providerTurns}
-              permissions={[]}
-              onRespond={undefined}
-              onEditQueued={undefined}
-              listRef={subagentListRef}
-              detached={!subagentFollow.following}
-              onScroll={subagentFollow.onScroll}
-              onJumpToBottom={subagentFollow.requestJump}
-              onJumpToTurn={subagentFollow.jumpToTurn}
+            </div>
+          ) : activeId == null && !activeSetup ? (
+            <CenterMessage
+              title={activeDraft ? 'New draft' : 'New task'}
+              detail={`Pick a model, then describe what to build in ${basename(activeDraft?.cwd ?? cwd)}.`}
             />
-          </div>
-        ) : activeId == null && !activeSetup ? (
-          <CenterMessage
-            title={activeDraft ? 'New draft' : 'New task'}
-            detail={`Pick a model, then describe what to build in ${basename(activeDraft?.cwd ?? cwd)}.`}
-          />
-        ) : null}
-        {/* Every open agent tab stays mounted so its timeline keeps streaming;
-            only the focused one is visible. */}
-        {tabs.map((tab) =>
-          tab.target === 'agent' ? (
-            <AgentTabPanel
-              key={tab.id}
-              client={client}
-              daemon={daemon}
-              agentId={tab.state.agentId}
-              seedText={pendingSeed?.agentId === tab.state.agentId ? pendingSeed.text : null}
-              seedImages={pendingSeed?.agentId === tab.state.agentId ? pendingSeed.images : null}
-              onSeedConsumed={() => {
-                if (pendingSeed?.agentId === tab.state.agentId) setPendingSeed(null)
-              }}
-              hidden={tab.id !== activeTabId}
-              showTranscript={tab.id === activeTabId ? !viewingSubagent : false}
-              onConversation={(id, conv) => conversationsRef.current.set(id, conv)}
-              onEditQueued={editQueued}
-              onOpenFile={openFile}
-              workspaceRoot={agents.find((a) => a.id === tab.state.agentId)?.cwd ?? null}
-            />
-          ) : tab.target === 'setup' ? (
-            <SetupTabPanel
-              key={tab.id}
-              workspaceId={tab.state.workspaceId}
-              snapshot={setupEntries[tab.state.workspaceId] ?? null}
-              refresh={setup.refresh}
-              hidden={tab.id !== activeTabId}
-            />
-          ) : null,
+          ) : null}
+          {/* Every open agent tab stays mounted so its timeline keeps streaming;
+              only the focused one is visible. */}
+          {tabs.map((tab) =>
+            tab.target === 'agent' ? (
+              <AgentTabPanel
+                key={tab.id}
+                client={client}
+                daemon={daemon}
+                agentId={tab.state.agentId}
+                seedText={pendingSeed?.agentId === tab.state.agentId ? pendingSeed.text : null}
+                seedImages={pendingSeed?.agentId === tab.state.agentId ? pendingSeed.images : null}
+                onSeedConsumed={() => {
+                  if (pendingSeed?.agentId === tab.state.agentId) setPendingSeed(null)
+                }}
+                hidden={tab.id !== activeTabId}
+                showTranscript={tab.id === activeTabId ? !viewingSubagent : false}
+                onConversation={(id, conv) => conversationsRef.current.set(id, conv)}
+                onEditQueued={editQueued}
+                onOpenFile={openFile}
+                workspaceRoot={agents.find((a) => a.id === tab.state.agentId)?.cwd ?? null}
+              />
+            ) : tab.target === 'setup' ? (
+              <SetupTabPanel
+                key={tab.id}
+                workspaceId={tab.state.workspaceId}
+                snapshot={setupEntries[tab.state.workspaceId] ?? null}
+                refresh={setup.refresh}
+                hidden={tab.id !== activeTabId}
+              />
+            ) : null,
+          )}
+          </>
         )}
         {createError && (
           <div style={{ display: 'flex', flexDirection: 'row', justifyContent: 'center', paddingBottom: 4 }}>
