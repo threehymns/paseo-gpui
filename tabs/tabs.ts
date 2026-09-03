@@ -11,8 +11,8 @@
  * later stages (setup, panes) can extend it without reshaping the reducer.
  */
 
-/** A tab's kind. Read-only review targets and subagent/provider tabs are out
- *  of scope here; `setup` is anticipated by #47/#48 and holds no logic now. */
+/** A tab's kind. Read-only review targets are out of scope here; `setup` is a
+ *  worktree bootstrapping progress tab (#47). */
 export type TabTarget = 'draft' | 'agent' | 'setup'
 
 /** A draft tab's held folder picks: where a new agent would be created. */
@@ -26,10 +26,12 @@ export interface AgentTabState {
   agentId: string
 }
 
-/** A setup tab (anticipated for #47): keyed by workspace, mirrors the daemon's
- *  workspace_setup progress feed. */
+/** A setup tab (#47): a worktree bootstrapping, keyed by workspace, streaming
+ *  the daemon's workspace_setup progress; `agentId` is the agent the worktree
+ *  created, the conversation this tab hands off to on success. */
 export interface SetupTabState {
   workspaceId: string
+  agentId: string
 }
 
 export type TabState = DraftTabState | AgentTabState | SetupTabState
@@ -68,6 +70,8 @@ export type TabsEvent =
   | { type: 'openAgent'; agentId: string; createdAt: number }
   /** Append a fresh draft tab. */
   | { type: 'openDraft'; cwd: string; now: number }
+  /** Open (and focus) a setup tab for a worktree being bootstrapped. */
+  | { type: 'openSetup'; workspaceId: string; agentId: string; createdAt: number }
   /** A draft tab's first send created an agent: flip it to an agent tab. */
   | { type: 'draftSent'; tabId: string; agentId: string; createdAt: number }
   /** Toggle a draft tab's worktree choice (local directory vs new worktree). */
@@ -98,6 +102,11 @@ function appendDraft(state: TabsState, cwd: string, now: number): TabsState {
   const id = `t${state.seq}`
   const tab: TabDescriptor = { id, target: 'draft', createdAt: now, state: { cwd, worktree: 'local' } }
   return { tabs: [...state.tabs, tab], activeTabId: state.activeTabId, seq: state.seq + 1 }
+}
+
+/** True when `state` describes a setup tab for `workspaceId`. */
+function isSetupTab(tab: TabDescriptor, workspaceId: string): boolean {
+  return tab.target === 'setup' && tab.state.workspaceId === workspaceId
 }
 
 /**
@@ -140,6 +149,22 @@ export function reduceTabs(state: TabsState, event: TabsEvent): TabsState {
     case 'openDraft': {
       const next = appendDraft(state, event.cwd, event.now)
       return { ...next, activeTabId: next.tabs.at(-1)!.id }
+    }
+
+    case 'openSetup': {
+      // One setup tab per workspace being bootstrapped: a repeat open just
+      // focuses the existing one. It opens onto the agent the worktree created,
+      // which the setup hands off to on success.
+      const existing = state.tabs.find((candidate) => isSetupTab(candidate, event.workspaceId))
+      if (existing) return { ...state, activeTabId: existing.id }
+      const id = `t${state.seq}`
+      const tab: TabDescriptor = {
+        id,
+        target: 'setup',
+        createdAt: event.createdAt,
+        state: { workspaceId: event.workspaceId, agentId: event.agentId },
+      }
+      return { tabs: [...state.tabs, tab], activeTabId: id, seq: state.seq + 1 }
     }
 
     case 'draftSent': {
@@ -212,6 +237,12 @@ export function selectActiveAgentId(state: TabsState): string | null {
 export function selectActiveDraft(state: TabsState): DraftTabState | null {
   const tab = selectActiveTab(state)
   return tab && tab.target === 'draft' ? tab.state : null
+}
+
+/** The active tab, narrowed to a setup tab's state when it is one. */
+export function selectActiveSetup(state: TabsState): SetupTabState | null {
+  const tab = selectActiveTab(state)
+  return tab && tab.target === 'setup' ? tab.state : null
 }
 
 /** Whether `agentId` already has an open agent tab. */

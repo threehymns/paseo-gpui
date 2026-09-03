@@ -247,6 +247,48 @@ describe('workspace tabs', () => {
     expect(state.tabs.map((tab) => tab.target)).toEqual(['agent', 'draft', 'draft', 'agent'])
   })
 
+  test('openSetup appends a setup tab keyed by workspace and focuses it', () => {
+    const state = run([{ type: 'openSetup', workspaceId: 'ws1', agentId: 'a1', createdAt: 10 }])
+    expect(state.tabs).toHaveLength(1)
+    expect(state.tabs[0]!.target).toBe('setup')
+    expect(state.tabs[0]!.state).toEqual({ workspaceId: 'ws1', agentId: 'a1' })
+    expect(state.activeTabId).toBe(state.tabs[0]!.id)
+  })
+
+  test('openSetup reuses an existing setup tab for the same workspace', () => {
+    const state = run([
+      { type: 'openSetup', workspaceId: 'ws1', agentId: 'a1', createdAt: 10 },
+      { type: 'openSetup', workspaceId: 'ws1', agentId: 'a2', createdAt: 20 },
+    ])
+    expect(state.tabs).toHaveLength(1)
+    expect(state.tabs[0]!.state.agentId).toBe('a1')
+    expect(state.activeTabId).toBe(state.tabs[0]!.id)
+  })
+
+  test('openSetup opens distinct tabs for distinct workspaces', () => {
+    const state = run([
+      { type: 'openSetup', workspaceId: 'ws1', agentId: 'a1', createdAt: 10 },
+      { type: 'openSetup', workspaceId: 'ws2', agentId: 'a2', createdAt: 20 },
+    ])
+    expect(state.tabs).toHaveLength(2)
+    expect(state.tabs.map((tab) => (tab.target === 'setup' && tab.state.workspaceId) || null)).toEqual([
+      'ws1',
+      'ws2',
+    ])
+    expect(state.activeTabId).toBe(state.tabs[1]!.id)
+  })
+
+  test('closing a setup tab follows the neighbor rule and setup tabs select cleanly', () => {
+    const state = run([
+      { type: 'openWorkspace', agents: [at('a1', 10)], cwd: '/ws', now: 20 },
+      { type: 'openSetup', workspaceId: 'ws1', agentId: 'a1', createdAt: 30 },
+    ])
+    expect(state.tabs.map((tab) => tab.target)).toEqual(['agent', 'draft', 'setup'])
+    const afterClose = reduceTabs(state, { type: 'close', tabId: state.tabs[2]!.id })
+    expect(afterClose.tabs.map((tab) => tab.target)).toEqual(['agent', 'draft'])
+    expect(afterClose.activeTabId).toBe(afterClose.tabs[1]!.id)
+  })
+
   test('selectTabs and selectTab project the ordered list and single lookups', () => {
     const state = run([{ type: 'openWorkspace', agents: [at('a1', 10)], cwd: '/ws', now: 20 }])
     expect(selectTabs(state)).toHaveLength(2)
