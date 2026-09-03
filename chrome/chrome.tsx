@@ -25,6 +25,7 @@ import {
   visibleWorkspaces,
   workspaceActivityAt,
   workspaceBranchName,
+  workspaceCatalog,
   workspaceDirectory,
   workspaceDisplayName,
   workspaceLabels,
@@ -48,7 +49,6 @@ import {
   hasActiveFilters,
   labelColor,
   UNLABELLED_LABEL,
-  workspaceHost,
   workspaceMatchesFilters,
   type WorkspaceFilters,
 } from '../agent-directory/display-preferences'
@@ -256,6 +256,7 @@ export type RowActionVerb =
   | 'delete'
   | 'detach'
   | 'pin'
+  | 'unpin'
   | 'labels'
   | 'mark-read'
 
@@ -263,6 +264,20 @@ export type RowActionVerb =
 export interface RowActionRef {
   verb: RowActionVerb
   id: string
+}
+
+/**
+ * The momentary pending copy each in-flight verb shows at the row's tail, so a
+ * busy row says what it is doing rather than going quiet while it disables.
+ * Verbs with no visible progress (rename editing inline, copy, delete/detach on
+ * other surfaces) read nothing here.
+ */
+const ROW_PENDING: Partial<Record<RowActionVerb, string>> = {
+  archive: 'Archiving…',
+  pin: 'Pinning…',
+  unpin: 'Unpinning…',
+  labels: 'Updating labels…',
+  'mark-read': 'Marking read…',
 }
 
 const VIEW_MENU_WIDTH = 232
@@ -665,6 +680,9 @@ function WorkspaceRow({
   const branch = workspaceBranchName(descriptor)
   const appliedLabels = descriptor.labels ?? []
   const archiving = busyVerb === 'archive'
+  // The in-flight verb, if any, reads out at the row's tail so a busy row says
+  // what it is doing while every action stays disabled.
+  const pending = busy && busyVerb ? ROW_PENDING[busyVerb] ?? null : null
   // The meta line resolves the row's whole second line from the descriptor's
   // runtime fields; slots without backing data are absent, and a line with
   // nothing at all renders nothing rather than dead space.
@@ -779,6 +797,11 @@ function WorkspaceRow({
           >
             {workspaceRowTitle(descriptor, config)}
           </text>
+          {pending && (
+            <text style={{ fontSize: 12, color: C.ghost, flexShrink: 0 }} testId="workspace-pending">
+              {pending}
+            </text>
+          )}
           {hover ? (
             <OverflowMenu testId="workspace-row-menu" side="right" onAction={runAction}>
               <SelectItem value="copy-path" textValue="Copy path">
@@ -1281,26 +1304,10 @@ export function Sidebar({
   // project groups under a key no workspace can own.
   const [collapsedProjects, setCollapsedProjects] = useState<ReadonlySet<string>>(new Set())
   const ARCHIVED_GROUP_ID = '__archived__'
-  // The filterable catalog derives from the live store: hosts only when more
-  // than one exists, every project, and every label found across workspaces.
-  const catalog = useMemo(() => {
-    const hosts = new Set<string>()
-    const labels = new Set<string>()
-    for (const descriptor of workspaces.workspaces) {
-      const host = workspaceHost(descriptor)
-      if (host) hosts.add(host)
-      for (const label of descriptor.labels ?? []) labels.add(label)
-    }
-    const projects = workspaceProjectGroups(workspaces, showArchived).map((group) => ({
-      id: group.projectId,
-      name: group.name,
-    }))
-    return {
-      hosts: [...hosts].sort(),
-      projects,
-      labels: [...labels].sort(),
-    }
-  }, [workspaces, showArchived])
+  // The filterable catalog derives from the live store: the sorted union of
+  // hosts and labels plus the projects as grouped. The derivation is pure (see
+  // workspaceCatalog in the seam) so it stays testable alongside the store.
+  const catalog = useMemo(() => workspaceCatalog(workspaces, showArchived), [workspaces, showArchived])
   // Both group modes collapse to one joined shape the render loop walks: a
   // key (project id or status), a name, and its rows. Status groups carry a
   // fixed aggregate status for their pill since every row shares it.

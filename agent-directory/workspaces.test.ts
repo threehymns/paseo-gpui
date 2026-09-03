@@ -11,6 +11,7 @@ import {
   sortWorkspaces,
   visibleWorkspaces,
   workspaceBranchName,
+  workspaceCatalog,
   workspaceDirectoryChoices,
   workspaceDirectory,
   workspaceDisplayName,
@@ -20,24 +21,7 @@ import {
   type WorkspaceStore,
 } from './workspaces'
 import { relativeTimeAt, sortAgents, type AgentEntry, type EmptyProjectDescriptor, type WorkspaceDescriptor } from '../daemon/paseo'
-
-function workspace(over: Partial<WorkspaceDescriptor>): WorkspaceDescriptor {
-  return {
-    id: over.id ?? 'w1',
-    projectId: over.projectId ?? 'p1',
-    projectDisplayName: over.projectDisplayName ?? 'storefront',
-    projectRootPath: over.projectRootPath ?? '/home/me/dev/storefront',
-    projectKind: 'git',
-    workspaceKind: 'directory',
-    name: over.name ?? 'storefront',
-    archivingAt: null,
-    status: 'running',
-    statusEnteredAt: null,
-    activityAt: over.activityAt ?? '2026-08-24T10:00:00Z',
-    scripts: [],
-    ...over,
-  } as WorkspaceDescriptor
-}
+import { workspace } from './test-support'
 
 function emptyProject(over: Partial<EmptyProjectDescriptor>): EmptyProjectDescriptor {
   return {
@@ -48,6 +32,18 @@ function emptyProject(over: Partial<EmptyProjectDescriptor>): EmptyProjectDescri
     ...over,
   } as EmptyProjectDescriptor
 }
+
+const hostScript = (hostname: string) => ({
+  scriptName: 'dev',
+  type: 'script' as const,
+  hostname,
+  port: 3000,
+  proxyUrl: null,
+  lifecycle: 'running' as const,
+  health: 'healthy' as const,
+  exitCode: null,
+  terminalId: null,
+})
 
 const upsert = (descriptor: WorkspaceDescriptor) => ({ kind: 'upsert' as const, workspace: descriptor })
 
@@ -382,7 +378,7 @@ describe('workspaceStatusGroups', () => {
     const groups = workspaceStatusGroups(store, false)
     expect(groups.map((group) => group.status)).toEqual(['needs_input', 'running', 'done'])
     const running = groups.find((group) => group.status === 'running')!
-    expect(running.label).toBe('Working')
+    expect(running.label).toBe('Running')
     expect(running.workspaces.map((w) => w.id)).toEqual(['d', 'b'])
   })
 
@@ -433,6 +429,45 @@ describe('filtered project groups', () => {
     }
     const groups = workspaceProjectGroups(store, false, { hosts: [], projects: [], labels: [] })
     expect(groups.map((group) => group.name)).toEqual(['api', 'zeta'])
+  })
+})
+
+describe('workspaceCatalog', () => {
+  test('unions and sorts hosts and labels, and lists projects as grouped', () => {
+    const store: WorkspaceStore = {
+      workspaces: [
+        workspace({ id: 'a', projectId: 'p1', projectDisplayName: 'keep', labels: ['zeta', 'alpha'], scripts: [hostScript('devbox')] }),
+        workspace({ id: 'b', projectId: 'p2', projectDisplayName: 'api', labels: ['beta', 'alpha'], scripts: [hostScript('devbox')] }),
+        workspace({ id: 'c', projectId: 'p1', projectDisplayName: 'keep' }),
+      ],
+      emptyProjects: [],
+    }
+    const catalog = workspaceCatalog(store, false)
+    expect(catalog.hosts).toEqual(['devbox'])
+    expect(catalog.labels).toEqual(['alpha', 'beta', 'zeta'])
+    expect(catalog.projects.map((project) => project.id)).toEqual(['p1', 'p2'])
+  })
+
+  test('a split-host workspace contributes no host', () => {
+    const store: WorkspaceStore = {
+      workspaces: [workspace({ scripts: [hostScript('a'), hostScript('b')] })],
+      emptyProjects: [],
+    }
+    expect(workspaceCatalog(store, false).hosts).toEqual([])
+  })
+
+  test('archived workspaces stay out of the projects until revealed', () => {
+    const store: WorkspaceStore = {
+      workspaces: [workspace({ id: 'gone', archivingAt: '2026-08-24T09:00:00Z' })],
+      emptyProjects: [],
+    }
+    expect(workspaceCatalog(store, false).projects).toEqual([])
+    expect(workspaceCatalog(store, true).projects.map((project) => project.id)).toEqual(['p1'])
+  })
+
+  test('an empty store yields empty lists', () => {
+    const catalog = workspaceCatalog(initialWorkspaceStore, false)
+    expect(catalog).toEqual({ hosts: [], projects: [], labels: [] })
   })
 })
 

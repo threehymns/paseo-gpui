@@ -519,7 +519,7 @@ export function ChatApp() {
   // narrow client seam instead of five ad-hoc daemon call sites.
   const mutations = workspaceMutations(daemon)
   const pinWorkspaceRow = (id: string, pinned: boolean) =>
-    runRowAction('pin', id, () => mutations.setPinned(id, pinned))
+    runRowAction(pinned ? 'pin' : 'unpin', id, () => mutations.setPinned(id, pinned))
   const markWorkspaceRead = (id: string) =>
     runRowAction('mark-read', id, () => mutations.clearAttention(id))
   const toggleWorkspaceLabel = (id: string, name: string, applied: boolean) =>

@@ -11,24 +11,7 @@ import {
   type WorkspaceFilters,
 } from './display-preferences'
 import type { WorkspaceDescriptor } from '../daemon/paseo'
-
-function workspace(over: Partial<WorkspaceDescriptor>): WorkspaceDescriptor {
-  return {
-    id: over.id ?? 'w1',
-    projectId: over.projectId ?? 'p1',
-    projectDisplayName: over.projectDisplayName ?? 'storefront',
-    projectRootPath: over.projectRootPath ?? '/home/me/dev/storefront',
-    projectKind: 'git',
-    workspaceKind: 'directory',
-    name: over.name ?? 'storefront',
-    archivingAt: null,
-    status: 'running',
-    statusEnteredAt: null,
-    activityAt: '2026-08-24T10:00:00Z',
-    scripts: [],
-    ...over,
-  } as WorkspaceDescriptor
-}
+import { workspace } from './test-support'
 
 const script = (hostname: string) => ({
   scriptName: 'dev',

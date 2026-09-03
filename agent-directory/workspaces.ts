@@ -14,7 +14,7 @@ import {
   type WorkspaceDescriptor,
   type WorkspaceUpdate,
 } from '../daemon/paseo'
-import { EMPTY_FILTERS, type WorkspaceFilters, workspaceMatchesFilters } from './display-preferences'
+import { EMPTY_FILTERS, type WorkspaceFilters, workspaceHost, workspaceMatchesFilters } from './display-preferences'
 
 // ---- store -----------------------------------------------------------------
 
@@ -252,6 +252,39 @@ export function workspaceProjectGroups(
   return groups
 }
 
+/** The heading union a filter menu offers: every host, project, and label. */
+export interface WorkspaceCatalog {
+  hosts: string[]
+  projects: { id: string; name: string }[]
+  labels: string[]
+}
+
+/**
+ * The filterable catalog the view menu derives once from the store: the sorted
+ * union of hostnames and labels across every descriptor, plus the projects as
+ * the sidebar actually groups them (archived rows hidden unless revealed).
+ * This is the menu's source of truth, kept here so the sidebar's host/label
+ * union does not duplicate the labels logic that workspaceLabels already owns.
+ */
+export function workspaceCatalog(store: WorkspaceStore, showArchived: boolean): WorkspaceCatalog {
+  const hosts = new Set<string>()
+  const labels = new Set<string>()
+  for (const descriptor of store.workspaces) {
+    const host = workspaceHost(descriptor)
+    if (host) hosts.add(host)
+    for (const label of descriptor.labels ?? []) labels.add(label)
+  }
+  const projects = workspaceProjectGroups(store, showArchived).map((group) => ({
+    id: group.projectId,
+    name: group.name,
+  }))
+  return {
+    hosts: [...hosts].sort(),
+    projects,
+    labels: [...labels].sort(),
+  }
+}
+
 // ---- status grouping ----------------------------------------------------------
 //
 // Status group mode arranges the sidebar the way the agent directory's buckets
@@ -270,7 +303,7 @@ export interface WorkspaceStatusGroup {
 const WORKSPACE_STATUS_LABELS: Record<WorkspaceDescriptor['status'], string> = {
   needs_input: 'Needs input',
   failed: 'Failed',
-  running: 'Working',
+  running: 'Running',
   attention: 'Attention',
   done: 'Done',
 }
