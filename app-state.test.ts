@@ -9,6 +9,8 @@ import {
   memoryStorage,
   showArchivedAgents,
   showArchivedWorkspaces,
+  workspaceFilters,
+  workspaceMetaConfig,
 } from './app-state'
 
 describe('app-state store', () => {
@@ -47,6 +49,36 @@ describe('app-state store', () => {
     createAppStore(storage).set(directoryGrouping, 'project')
     const reopened = createAppStore(storage)
     expect(reopened.get(directoryGrouping)).toBe('project')
+  })
+
+  test('the meta config and filters persist and read back their full shape', () => {
+    const storage = memoryStorage()
+    const meta = {
+      slots: { branch: false, project: true, host: false, pullRequest: true, services: false, labels: true },
+      checksMode: 'iconOnly' as const,
+      trailing: 'activity' as const,
+      titleSource: 'branch' as const,
+    }
+    const filters = { hosts: ['devbox'], projects: ['p1'], labels: ['bug', '*unlabelled*'] }
+    const store = createAppStore(storage)
+    store.set(workspaceMetaConfig, meta)
+    store.set(workspaceFilters, filters)
+    const reopened = createAppStore(storage)
+    expect(reopened.get(workspaceMetaConfig)).toEqual(meta)
+    expect(reopened.get(workspaceFilters)).toEqual(filters)
+  })
+
+  test('a stale meta config or filter shape falls back to defaults', () => {
+    const stale = {
+      readAll: () => ({
+        'workspace.meta': { slots: { branch: 'yes' }, checksMode: 'weird', trailing: 'diffStat', titleSource: 'title' },
+        'workspace.filters': { hosts: 'devbox', projects: {}, labels: [1] },
+      }),
+      writeAll: () => {},
+    }
+    const store = createAppStore(stale)
+    expect(store.get(workspaceMetaConfig)).toEqual(workspaceMetaConfig.fallback)
+    expect(store.get(workspaceFilters)).toEqual(workspaceFilters.fallback)
   })
 })
 

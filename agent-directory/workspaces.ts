@@ -14,6 +14,7 @@ import {
   type WorkspaceDescriptor,
   type WorkspaceUpdate,
 } from '../daemon/paseo'
+import { EMPTY_FILTERS, type WorkspaceFilters, workspaceMatchesFilters } from './display-preferences'
 
 // ---- store -----------------------------------------------------------------
 
@@ -204,10 +205,19 @@ function groupActivity(group: WorkspaceProjectGroup): number | null {
  * Folds the store into collapsible project groups: each project with visible
  * workspaces, ordered by its most recent activity, then emptied projects in
  * name order so they still render. Rows inside a group stay recency-sorted.
+ *
+ * An active filter narrows which workspaces group; a project whose workspaces
+ * all fall to the filter simply does not appear (its rows are gone rather than
+ * misleadingly empty). Truly-empty projects from the daemon still render.
  */
-export function workspaceProjectGroups(store: WorkspaceStore, showArchived: boolean): WorkspaceProjectGroup[] {
+export function workspaceProjectGroups(
+  store: WorkspaceStore,
+  showArchived: boolean,
+  filters: WorkspaceFilters = EMPTY_FILTERS,
+): WorkspaceProjectGroup[] {
   const byProject = new Map<string, WorkspaceProjectGroup>()
   for (const descriptor of visibleWorkspaces(store.workspaces, showArchived)) {
+    if (!workspaceMatchesFilters(descriptor, filters)) continue
     let group = byProject.get(descriptor.projectId)
     if (!group) {
       group = {
@@ -239,6 +249,53 @@ export function workspaceProjectGroups(store: WorkspaceStore, showArchived: bool
     if (activityB != null) return 1
     return a.name.localeCompare(b.name)
   })
+  return groups
+}
+
+// ---- status grouping ----------------------------------------------------------
+//
+// Status group mode arranges the sidebar the way the agent directory's buckets
+// do — trouble first, then live work, then done — but over the workspace
+// descriptor's own status vocabulary (running | attention | needs_input |
+// failed | done), never the agent dialect (working/review) that must not leak
+// in here. The bucket order reuses WORKSPACE_STATUS_URGENCY.
+
+/** One status bucket group in status group mode. */
+export interface WorkspaceStatusGroup {
+  status: WorkspaceDescriptor['status']
+  label: string
+  workspaces: WorkspaceDescriptor[]
+}
+
+const WORKSPACE_STATUS_LABELS: Record<WorkspaceDescriptor['status'], string> = {
+  needs_input: 'Needs input',
+  failed: 'Failed',
+  running: 'Working',
+  attention: 'Attention',
+  done: 'Done',
+}
+
+/**
+ * Folds the visible, filter-matching workspaces into status groups in
+ * WORKSPACE_STATUS_URGENCY order, each recency-sorted; groups with nothing to
+ * show are omitted. A collapsed status group aggregates like a project's pill.
+ */
+export function workspaceStatusGroups(
+  store: WorkspaceStore,
+  showArchived: boolean,
+  filters: WorkspaceFilters = EMPTY_FILTERS,
+): WorkspaceStatusGroup[] {
+  const visible = visibleWorkspaces(store.workspaces, showArchived).filter((descriptor) =>
+    workspaceMatchesFilters(descriptor, filters),
+  )
+  const sorted = sortWorkspaces(visible)
+  const groups: WorkspaceStatusGroup[] = []
+  for (const status of WORKSPACE_STATUS_URGENCY) {
+    const workspaces = sorted.filter((descriptor) => descriptor.status === status)
+    if (workspaces.length > 0) {
+      groups.push({ status, label: WORKSPACE_STATUS_LABELS[status], workspaces })
+    }
+  }
   return groups
 }
 

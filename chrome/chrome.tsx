@@ -29,7 +29,9 @@ import {
   workspaceDisplayName,
   workspaceLabels,
   workspaceProjectGroups,
+  workspaceStatusGroups,
   type WorkspaceAggregateStatus,
+  type WorkspaceStatusGroup,
   type WorkspaceStore,
 } from '../agent-directory/workspaces'
 import {
@@ -37,13 +39,25 @@ import {
   workspaceRowTitle,
   type MetaTone,
   type WorkspaceMetaChecks,
+  type WorkspaceMetaConfig,
   type WorkspaceMetaItem,
   type WorkspaceMetaTrailing,
 } from '../agent-directory/workspace-meta'
 import {
+  hasActiveFilters,
+  labelColor,
+  UNLABELLED_LABEL,
+  workspaceHost,
+  workspaceMatchesFilters,
+  type WorkspaceFilters,
+} from '../agent-directory/display-preferences'
+import {
+  directoryGrouping,
   showArchivedAgents,
   showArchivedWorkspaces,
   useAppState,
+  workspaceFilters,
+  workspaceMetaConfig,
   type AppStore,
 } from '../app-state'
 import { C, SIDEBAR_WIDTH, TITLEBAR_HEIGHT, TRAFFIC_LIGHT_CLEARANCE } from './theme'
@@ -307,25 +321,85 @@ function ViewSection({ label }: { label: string }) {
 }
 
 /**
- * The sidebar's display-preferences popover, mirroring Paseo's: one trigger in
- * the section header and visibility toggles under Show. The directory itself
- * always renders as collapsible project groups of workspaces, so there is no
- * grouping choice anymore.
+ * The sidebar's display-preferences popover, mirroring Paseo's: grouping,
+ * the Show page (meta-line slot toggles + checks/trailing/title radios) and
+ * the host / project / label filters. Every choice persists via app-state and
+ * takes effect immediately. @gpuix/react's Select has no nested submenu, so
+ * the checks options render inline as their own section.
  */
 function ViewPreferencesMenu({
+  grouping,
+  onGroupingChange,
   showArchived,
   onShowArchivedChange,
   showArchivedAgents,
   onShowArchivedAgentsChange,
+  meta,
+  onMetaChange,
+  filters,
+  onFiltersChange,
+  catalog,
 }: {
+  grouping: 'status' | 'project'
+  onGroupingChange: (value: 'status' | 'project') => void
   showArchived: boolean
   onShowArchivedChange: (show: boolean) => void
   showArchivedAgents: boolean
   onShowArchivedAgentsChange: (show: boolean) => void
+  meta: WorkspaceMetaConfig
+  onMetaChange: (config: WorkspaceMetaConfig) => void
+  filters: WorkspaceFilters
+  onFiltersChange: (filters: WorkspaceFilters) => void
+  /** Filterable values discovered from the store, for the filter lists. */
+  catalog: { hosts: string[]; projects: { id: string; name: string }[]; labels: string[] }
 }) {
+  const slotToggle = (slot: keyof WorkspaceMetaConfig['slots']) => {
+    onMetaChange({ ...meta, slots: { ...meta.slots, [slot]: !meta.slots[slot] } })
+  }
+  const toggleLabel = (label: string) => {
+    const labels = filters.labels.includes(label)
+      ? filters.labels.filter((item) => item !== label)
+      : [...filters.labels, label]
+    onFiltersChange({ ...filters, labels })
+  }
+  const hasFilter = filters.hosts.length > 0 || filters.projects.length > 0 || filters.labels.length > 0
+
   const runChoice = (choice: string) => {
-    if (choice === 'show:archived') onShowArchivedChange(!showArchived)
-    if (choice === 'show:archived-agents') onShowArchivedAgentsChange(!showArchivedAgents)
+    if (choice === 'group:project') onGroupingChange('project')
+    else if (choice === 'group:status') onGroupingChange('status')
+    else if (choice === 'show:archived') onShowArchivedChange(!showArchived)
+    else if (choice === 'show:archived-agents') onShowArchivedAgentsChange(!showArchivedAgents)
+    else if (choice.startsWith('slot:')) {
+      const slot = choice.slice('slot:'.length) as keyof WorkspaceMetaConfig['slots']
+      slotToggle(slot)
+    } else if (choice.startsWith('checks:')) {
+      const mode = choice.slice('checks:'.length) as WorkspaceMetaConfig['checksMode']
+      onMetaChange({ ...meta, checksMode: mode })
+    } else if (choice.startsWith('trailing:')) {
+      const trailing = choice.slice('trailing:'.length) as WorkspaceMetaConfig['trailing']
+      onMetaChange({ ...meta, trailing })
+    } else if (choice.startsWith('title:')) {
+      const titleSource = choice.slice('title:'.length) as WorkspaceMetaConfig['titleSource']
+      onMetaChange({ ...meta, titleSource })
+    } else if (choice.startsWith('host:')) {
+      const host = choice.slice('host:'.length)
+      onFiltersChange({
+        ...filters,
+        hosts: filters.hosts.includes(host) ? filters.hosts.filter((item) => item !== host) : [...filters.hosts, host],
+      })
+    } else if (choice.startsWith('project:')) {
+      const projectId = choice.slice('project:'.length)
+      onFiltersChange({
+        ...filters,
+        projects: filters.projects.includes(projectId)
+          ? filters.projects.filter((item) => item !== projectId)
+          : [...filters.projects, projectId],
+      })
+    } else if (choice.startsWith('label:')) {
+      toggleLabel(choice.slice('label:'.length))
+    } else if (choice === 'clear-filters') {
+      onFiltersChange({ hosts: [], projects: [], labels: [] })
+    }
   }
 
   return (
@@ -348,6 +422,108 @@ function ViewPreferencesMenu({
         <Icon name="listFilter" size={14} color={C.secondary} />
       </SelectTrigger>
       <SelectContent side="bottom" align="end" sideOffset={4} style={{ width: VIEW_MENU_WIDTH }}>
+        <ViewSection label="Group by" />
+        <SelectItem value="group:project" textValue="Project">
+          <ViewOption icon="folder" label="Project" selected={grouping === 'project'} />
+        </SelectItem>
+        <SelectItem value="group:status" textValue="Status">
+          <ViewOption icon="zap" label="Status" selected={grouping === 'status'} />
+        </SelectItem>
+        <SelectSeparator />
+
+        <ViewSection label="Show" />
+        <SelectItem value="slot:branch" textValue="Branch">
+          <ViewOption icon="gitBranch" label="Branch" selected={meta.slots.branch} />
+        </SelectItem>
+        <SelectItem value="slot:pullRequest" textValue="Pull request">
+          <ViewOption icon="gitPullRequest" label="Pull request" selected={meta.slots.pullRequest} />
+        </SelectItem>
+        <SelectItem value="slot:services" textValue="Services">
+          <ViewOption icon="zap" label="Services" selected={meta.slots.services} />
+        </SelectItem>
+        <SelectItem value="slot:project" textValue="Project name">
+          <ViewOption icon="folder" label="Project name" selected={meta.slots.project} />
+        </SelectItem>
+        <SelectItem value="slot:host" textValue="Host">
+          <ViewOption icon="laptop" label="Host" selected={meta.slots.host} />
+        </SelectItem>
+        <SelectItem value="slot:labels" textValue="Labels">
+          <ViewOption icon="tag" label="Labels" selected={meta.slots.labels} />
+        </SelectItem>
+        <SelectSeparator />
+
+        <ViewSection label="Checks" />
+        <SelectItem value="checks:iconText" textValue="Icon and text">
+          <ViewOption icon="check" label="Icon and text" selected={meta.checksMode === 'iconText'} />
+        </SelectItem>
+        <SelectItem value="checks:iconOnly" textValue="Icon only">
+          <ViewOption icon="check" label="Icon only" selected={meta.checksMode === 'iconOnly'} />
+        </SelectItem>
+        <SelectItem value="checks:hidden" textValue="Hidden">
+          <ViewOption icon="x" label="Hidden" selected={meta.checksMode === 'hidden'} />
+        </SelectItem>
+        <SelectSeparator />
+
+        <ViewSection label="Trailing slot" />
+        <SelectItem value="trailing:diffStat" textValue="Diff stats">
+          <ViewOption icon="file" label="Diff stats" selected={meta.trailing === 'diffStat'} />
+        </SelectItem>
+        <SelectItem value="trailing:activity" textValue="Last activity">
+          <ViewOption icon="rotateCcw" label="Last activity" selected={meta.trailing === 'activity'} />
+        </SelectItem>
+        <SelectSeparator />
+
+        <ViewSection label="Row title" />
+        <SelectItem value="title:title" textValue="Title">
+          <ViewOption icon="pencil" label="Title" selected={meta.titleSource === 'title'} />
+        </SelectItem>
+        <SelectItem value="title:branch" textValue="Branch name">
+          <ViewOption icon="gitBranch" label="Branch name" selected={meta.titleSource === 'branch'} />
+        </SelectItem>
+        <SelectSeparator />
+
+        {catalog.hosts.length > 1 && (
+          <>
+            <ViewSection label="Host" />
+            {catalog.hosts.map((host) => (
+              <SelectItem key={host} value={`host:${host}`} textValue={host}>
+                <ViewOption icon="laptop" label={host} selected={filters.hosts.includes(host)} />
+              </SelectItem>
+            ))}
+            <SelectSeparator />
+          </>
+        )}
+
+        {catalog.projects.length > 1 && (
+          <>
+            <ViewSection label="Project" />
+            {catalog.projects.map((project) => (
+              <SelectItem key={project.id} value={`project:${project.id}`} textValue={project.name}>
+                <ViewOption icon="folder" label={project.name} selected={filters.projects.includes(project.id)} />
+              </SelectItem>
+            ))}
+            <SelectSeparator />
+          </>
+        )}
+
+        {catalog.labels.length > 0 && (
+          <>
+            <ViewSection label="Label" />
+            {catalog.labels.map((label) => (
+              <SelectItem key={label} value={`label:${label}`} textValue={label}>
+                <LabelOption label={label} selected={filters.labels.includes(label)} />
+              </SelectItem>
+            ))}
+            <SelectItem value={`label:${UNLABELLED_LABEL}`} textValue="Unlabelled">
+              <LabelOption label="Unlabelled" unlabelled selected={filters.labels.includes(UNLABELLED_LABEL)} />
+            </SelectItem>
+            <SelectItem value="clear-filters" textValue="Clear filter">
+              <ViewOption icon="x" label="Clear filter" selected={hasFilter} />
+            </SelectItem>
+            <SelectSeparator />
+          </>
+        )}
+
         <ViewSection label="Show" />
         <SelectItem value="show:archived" textValue="Archived workspaces">
           <ViewOption icon="archive" label="Archived workspaces" selected={showArchived} />
@@ -357,6 +533,46 @@ function ViewPreferencesMenu({
         </SelectItem>
       </SelectContent>
     </Select>
+  )
+}
+
+/**
+ * A filter option whose leading dot carries the label's deterministic color.
+ * Unlabelled renders a hollow dot so it reads as "nothing" rather than a color.
+ */
+function LabelOption({ label, selected, unlabelled }: { label: string; selected: boolean; unlabelled?: boolean }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+        width: '100%',
+        paddingTop: 5,
+        paddingBottom: 5,
+        paddingLeft: 8,
+        paddingRight: 8,
+        borderRadius: 7,
+        hover: { backgroundColor: '#404040' },
+      }}
+    >
+      <div
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: 4,
+          flexShrink: 0,
+          backgroundColor: unlabelled ? '#00000000' : labelColor(label),
+          borderWidth: 1,
+          borderColor: C.ghost,
+        }}
+      />
+      <text style={{ fontSize: 12.5, fontWeight: 500, color: C.text, flexGrow: 1, minWidth: 0 }}>
+        {label}
+      </text>
+      {selected && <Icon name="check" size={11} color={C.secondary} />}
+    </div>
   )
 }
 
@@ -407,6 +623,7 @@ function AggregateStatusPill({ aggregate }: { aggregate: WorkspaceAggregateStatu
 
 function WorkspaceRow({
   descriptor,
+  config,
   active,
   busy,
   busyVerb,
@@ -421,6 +638,8 @@ function WorkspaceRow({
   onClearLabels,
 }: {
   descriptor: WorkspaceDescriptor
+  /** The persisted meta-line configuration; defaults live in workspace-meta. */
+  config: WorkspaceMetaConfig
   active: boolean
   /** True while any lifecycle action on this row is in flight; disables every action. */
   busy: boolean
@@ -448,7 +667,7 @@ function WorkspaceRow({
   // The meta line resolves the row's whole second line from the descriptor's
   // runtime fields; slots without backing data are absent, and a line with
   // nothing at all renders nothing rather than dead space.
-  const meta = workspaceMetaLine(descriptor)
+  const meta = workspaceMetaLine(descriptor, config)
 
   const startRename = () => {
     setNameDraft(workspaceDisplayName(descriptor))
@@ -557,7 +776,7 @@ function WorkspaceRow({
               flexGrow: 1,
             }}
           >
-            {workspaceRowTitle(descriptor)}
+            {workspaceRowTitle(descriptor, config)}
           </text>
           {hover ? (
             <OverflowMenu testId="workspace-row-menu" side="right" onAction={runAction}>
@@ -982,6 +1201,15 @@ function ProjectGroupHeader({
   )
 }
 
+/** One sidebar row-group in the joined project/status shape the render loop walks. */
+interface SidebarGroup {
+  key: string
+  name: string
+  workspaces: WorkspaceDescriptor[]
+  /** Fixed for status groups (every row shares the bucket); null for project groups. */
+  fixedStatus: WorkspaceAggregateStatus | null
+}
+
 export function Sidebar({
   workspaces,
   agents,
@@ -1039,6 +1267,9 @@ export function Sidebar({
   // The local state can't share the StateKey's name: the initializer would
   // read the destructured binding itself (TDZ), not the module-level key.
   const [revealArchivedAgents, setRevealArchivedAgents] = useAppState(appStore, showArchivedAgents)
+  const [grouping, setGrouping] = useAppState(appStore, directoryGrouping)
+  const [meta, setMeta] = useAppState(appStore, workspaceMetaConfig)
+  const [filters, setFilters] = useAppState(appStore, workspaceFilters)
   // Collapse state is view state; the store itself stays daemon-written. It is
   // component-local on purpose: toggling only re-renders the sidebar, so the
   // open conversation and the selected row — chat.tsx state this toggle never
@@ -1046,7 +1277,46 @@ export function Sidebar({
   // project groups under a key no workspace can own.
   const [collapsedProjects, setCollapsedProjects] = useState<ReadonlySet<string>>(new Set())
   const ARCHIVED_GROUP_ID = '__archived__'
-  const groups = useMemo(() => workspaceProjectGroups(workspaces, showArchived), [workspaces, showArchived])
+  // The filterable catalog derives from the live store: hosts only when more
+  // than one exists, every project, and every label found across workspaces.
+  const catalog = useMemo(() => {
+    const hosts = new Set<string>()
+    const labels = new Set<string>()
+    for (const descriptor of workspaces.workspaces) {
+      const host = workspaceHost(descriptor)
+      if (host) hosts.add(host)
+      for (const label of descriptor.labels ?? []) labels.add(label)
+    }
+    const projects = workspaceProjectGroups(workspaces, showArchived).map((group) => ({
+      id: group.projectId,
+      name: group.name,
+    }))
+    return {
+      hosts: [...hosts].sort(),
+      projects,
+      labels: [...labels].sort(),
+    }
+  }, [workspaces, showArchived])
+  // Both group modes collapse to one joined shape the render loop walks: a
+  // key (project id or status), a name, and its rows. Status groups carry a
+  // fixed aggregate status for their pill since every row shares it.
+  const groups = useMemo<SidebarGroup[]>(() => {
+    if (grouping === 'status') {
+      return workspaceStatusGroups(workspaces, showArchived, filters).map((group) => ({
+        key: group.status,
+        name: group.label,
+        fixedStatus: { status: group.status, count: group.workspaces.length },
+        workspaces: group.workspaces,
+      }))
+    }
+    return workspaceProjectGroups(workspaces, showArchived, filters).map((group) => ({
+      key: group.projectId,
+      name: group.name,
+      fixedStatus: null,
+      workspaces: group.workspaces,
+    }))
+  }, [workspaces, showArchived, grouping, filters])
+  const filterEmpty = hasActiveFilters(filters) && groups.length === 0
   // The labels submenu lists the union of labels on every visible workspace;
   // the checked states are the selected descriptor's own labels.
   const availableLabels = useMemo(
@@ -1114,10 +1384,17 @@ export function Sidebar({
           Workspaces
         </text>
         <ViewPreferencesMenu
+          grouping={grouping}
+          onGroupingChange={setGrouping}
           showArchived={showArchived}
           onShowArchivedChange={setShowArchived}
           showArchivedAgents={revealArchivedAgents}
           onShowArchivedAgentsChange={setRevealArchivedAgents}
+          meta={meta}
+          onMetaChange={setMeta}
+          filters={filters}
+          onFiltersChange={setFilters}
+          catalog={catalog}
         />
       </div>
 
@@ -1133,19 +1410,23 @@ export function Sidebar({
         }}
       >
         {groups.map((group) => {
-          const collapsed = collapsedProjects.has(group.projectId)
-          // A collapsed project reduces to one aggregate pill over its
-          // members; expanded groups keep their per-workspace rows.
-          const aggregate = collapsed ? aggregateWorkspaceStatus(group.workspaces) : null
+          const collapsed = collapsedProjects.has(group.key)
+          // A collapsed group reduces to one aggregate status pill over its
+          // members; a status group's rows share a status, so the pill is the
+          // group's own status with its member count. Expanded groups keep
+          // their per-workspace rows.
+          const aggregate = collapsed
+            ? (group.fixedStatus ?? aggregateWorkspaceStatus(group.workspaces))
+            : null
           return (
             <div
-              key={group.projectId}
+              key={group.key}
               style={{ display: 'flex', flexDirection: 'column', paddingBottom: 10 }}
             >
               <ProjectGroupHeader
                 name={group.name}
                 collapsed={collapsed}
-                onToggle={() => toggleProject(group.projectId)}
+                onToggle={() => toggleProject(group.key)}
                 pill={aggregate && <AggregateStatusPill aggregate={aggregate} />}
               />
               {!collapsed &&
@@ -1155,6 +1436,7 @@ export function Sidebar({
                     <WorkspaceRow
                       key={descriptor.id}
                       descriptor={descriptor}
+                      config={meta}
                       active={descriptor.id === activeWorkspaceId}
                       busy={rowBusy != null}
                       busyVerb={rowBusy?.verb ?? null}
@@ -1173,7 +1455,21 @@ export function Sidebar({
             </div>
           )
         })}
-        {groups.length === 0 && (
+        {filterEmpty && (
+          <div style={{ padding: 14 }}>
+            <text style={{ fontSize: 12.5, lineHeight: 17, color: C.tertiary }}>
+              No workspaces match these filters.{" "}
+            </text>
+            <text
+              testId="clear-filters-action"
+              style={{ fontSize: 12.5, fontWeight: 500, color: C.accent, cursor: 'pointer' }}
+              onClick={() => setFilters({ hosts: [], projects: [], labels: [] })}
+            >
+              Clear filter
+            </text>
+          </div>
+        )}
+        {groups.length === 0 && !filterEmpty && (
           <div style={{ padding: 14 }}>
             <text style={{ fontSize: 12.5, lineHeight: 17, color: C.tertiary }}>
               No workspaces yet. Start one from the composer.
