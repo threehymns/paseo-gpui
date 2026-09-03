@@ -86,6 +86,33 @@ describe('workspace tabs', () => {
     expect(new Set(state.tabs.map((tab) => tab.id)).size).toBe(2)
   })
 
+  test('setDraftWorktree toggles a draft tab worktree choice in place', () => {
+    const state = run([
+      { type: 'openDraft', cwd: '/ws', now: 10 },
+      { type: 'setDraftWorktree', tabId: 't0', worktree: 'worktree' },
+    ])
+    expect(state.tabs[0]!.target).toBe('draft')
+    expect(state.tabs[0]!.state).toEqual({ cwd: '/ws', worktree: 'worktree' })
+    // Focus is untouched, and re-setting the same value is inert.
+    expect(state.activeTabId).toBe('t0')
+    const same = run([
+      { type: 'openDraft', cwd: '/ws', now: 10 },
+      { type: 'setDraftWorktree', tabId: 't0', worktree: 'worktree' },
+      { type: 'setDraftWorktree', tabId: 't0', worktree: 'worktree' },
+    ])
+    expect(same.tabs[0]!.state).toEqual({ cwd: '/ws', worktree: 'worktree' })
+  })
+
+  test('setDraftWorktree is ignored for an unknown or non-draft tab', () => {
+    const state = run([
+      { type: 'openAgent', agentId: 'a1', createdAt: 1 },
+      { type: 'setDraftWorktree', tabId: 't0', worktree: 'worktree' },
+      { type: 'setDraftWorktree', tabId: 'nope', worktree: 'worktree' },
+    ])
+    expect(state.tabs[0]!.target).toBe('agent')
+    expect(state.tabs[0]!.state).toEqual({ agentId: 'a1' })
+  })
+
   test('openAgent focuses an existing agent tab instead of duplicating it', () => {
     const state = run([
       { type: 'openWorkspace', agents: [at('a1', 100), at('a2', 200)], cwd: '/ws', now: 300 },

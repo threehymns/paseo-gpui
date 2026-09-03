@@ -70,6 +70,8 @@ export type TabsEvent =
   | { type: 'openDraft'; cwd: string; now: number }
   /** A draft tab's first send created an agent: flip it to an agent tab. */
   | { type: 'draftSent'; tabId: string; agentId: string; createdAt: number }
+  /** Toggle a draft tab's worktree choice (local directory vs new worktree). */
+  | { type: 'setDraftWorktree'; tabId: string; worktree: 'local' | 'worktree' }
   /** Focus a tab. */
   | { type: 'select'; tabId: string }
   /** Close one tab; the focused-tab neighbor rule applies to avoid dead focus. */
@@ -158,6 +160,16 @@ export function reduceTabs(state: TabsState, event: TabsEvent): TabsState {
     case 'select': {
       const present = state.tabs.some((tab) => tab.id === event.tabId)
       return present && state.activeTabId !== event.tabId ? { ...state, activeTabId: event.tabId } : state
+    }
+
+    case 'setDraftWorktree': {
+      const tab = state.tabs.find((candidate) => candidate.id === event.tabId)
+      if (!tab || tab.target !== 'draft' || tab.state.worktree === event.worktree) return state
+      const tabs = state.tabs.map((candidate) => {
+        if (candidate.id !== event.tabId || candidate.target !== 'draft') return candidate
+        return { ...candidate, state: { ...candidate.state, worktree: event.worktree } }
+      })
+      return { tabs, activeTabId: state.activeTabId, seq: state.seq }
     }
 
     case 'close': {
