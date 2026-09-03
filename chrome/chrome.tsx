@@ -7,7 +7,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import React, { useMemo, useState } from 'react'
-import { Select, SelectContent, SelectItem, SelectTrigger } from '@gpuix/react'
+import { Select, SelectContent, SelectItem, SelectLabel, SelectSeparator, SelectTrigger } from '@gpuix/react'
 import {
   DAEMON_URL,
   displayName,
@@ -22,8 +22,12 @@ import {
 import {
   aggregateWorkspaceStatus,
   isArchivedWorkspace,
+  visibleWorkspaces,
   workspaceActivityAt,
+  workspaceBranchName,
+  workspaceDirectory,
   workspaceDisplayName,
+  workspaceLabels,
   workspaceProjectGroups,
   type WorkspaceAggregateStatus,
   type WorkspaceStore,
@@ -231,7 +235,14 @@ function SidebarAction({
   )
 }
 
-export type RowActionVerb = 'rename' | 'archive' | 'delete' | 'detach'
+export type RowActionVerb =
+  | 'rename'
+  | 'archive'
+  | 'delete'
+  | 'detach'
+  | 'pin'
+  | 'labels'
+  | 'mark-read'
 
 /** One row lifecycle call in flight; every action on that row stays disabled until it settles. */
 export interface RowActionRef {
@@ -398,22 +409,42 @@ function WorkspaceRow({
   descriptor,
   active,
   busy,
+  busyVerb,
+  availableLabels,
   onSelect,
   onRename,
   onArchive,
+  onCopy,
+  onMarkRead,
+  onPin,
+  onToggleLabel,
+  onClearLabels,
 }: {
   descriptor: WorkspaceDescriptor
   active: boolean
-  /** True while any lifecycle action on this row is in flight. */
+  /** True while any lifecycle action on this row is in flight; disables every action. */
   busy: boolean
+  /** The verb of the in-flight action, to drive per-action pending copy. */
+  busyVerb: RowActionVerb | null
+  /** The union of label names the submenu can toggle, drawn from the visible directory. */
+  availableLabels: string[]
   onSelect: (id: string) => void
   onRename: (id: string, name: string) => void
   onArchive: (id: string) => void
+  onCopy: (value: string) => void
+  onMarkRead: (id: string) => void
+  onPin: (id: string, pinned: boolean) => void
+  onToggleLabel: (id: string, name: string, applied: boolean) => void
+  onClearLabels: (id: string) => void
 }) {
   const [hover, setHover] = useState(false)
   const [renaming, setRenaming] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
   const archived = isArchivedWorkspace(descriptor)
+  const pinned = descriptor.pinnedAt != null
+  const branch = workspaceBranchName(descriptor)
+  const appliedLabels = descriptor.labels ?? []
+  const archiving = busyVerb === 'archive'
   // The meta line resolves the row's whole second line from the descriptor's
   // runtime fields; slots without backing data are absent, and a line with
   // nothing at all renders nothing rather than dead space.
@@ -436,10 +467,34 @@ function WorkspaceRow({
     onRename(descriptor.id, next)
   }
 
-  const runAction = (action: RowActionVerb) => {
+  /**
+   * Dispatches a menu value. Copy/pin/labels/mark-read are the ticket's new
+   * row actions; labels arrive as `label:<name>`. Busy disables everything
+   * until the in-flight call settles, so a guard up front is all we need.
+   */
+  const runAction = (value: string) => {
     if (busy) return
-    if (action === 'rename') startRename()
-    else onArchive(descriptor.id)
+    if (value === 'rename') {
+      startRename()
+    } else if (value === 'copy-path') {
+      const directory = workspaceDirectory(descriptor)
+      if (directory) onCopy(directory)
+    } else if (value === 'copy-branch') {
+      if (branch) onCopy(branch)
+    } else if (value === 'mark-read') {
+      onMarkRead(descriptor.id)
+    } else if (value === 'pin') {
+      onPin(descriptor.id, true)
+    } else if (value === 'unpin') {
+      onPin(descriptor.id, false)
+    } else if (value === 'labels-clear') {
+      onClearLabels(descriptor.id)
+    } else if (value.startsWith('label:')) {
+      const name = value.slice('label:'.length)
+      onToggleLabel(descriptor.id, name, !appliedLabels.includes(name))
+    } else if (value === 'archive') {
+      onArchive(descriptor.id)
+    }
   }
 
   return (
@@ -505,17 +560,49 @@ function WorkspaceRow({
             {workspaceRowTitle(descriptor)}
           </text>
           {hover ? (
-            <OverflowMenu
-              testId="workspace-row-menu"
-              side="right"
-              onAction={(action) => runAction(action as RowActionVerb)}
-            >
+            <OverflowMenu testId="workspace-row-menu" side="right" onAction={runAction}>
+              <SelectItem value="copy-path" textValue="Copy path">
+                <MenuAction label="Copy path" disabled={busy || !workspaceDirectory(descriptor)} />
+              </SelectItem>
+              <SelectItem value="copy-branch" textValue="Copy branch name">
+                <MenuAction label="Copy branch name" disabled={busy || !branch} />
+              </SelectItem>
               <SelectItem value="rename" textValue="Rename">
                 <MenuAction label="Rename" disabled={busy} />
               </SelectItem>
+              <SelectItem value="mark-read" textValue="Mark as read">
+                <MenuAction label="Mark as read" disabled={busy} />
+              </SelectItem>
+              <SelectItem value={pinned ? 'unpin' : 'pin'} textValue={pinned ? 'Unpin' : 'Pin to top'}>
+                <MenuAction label={pinned ? 'Unpin' : 'Pin to top'} disabled={busy} />
+              </SelectItem>
+              {availableLabels.length > 0 && (
+                <>
+                  <SelectSeparator />
+                  <SelectLabel
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      height: 22,
+                      paddingLeft: 8,
+                    }}
+                  >
+                    <text style={{ fontSize: 11.5, fontWeight: 500, color: C.ghost }}>Labels</text>
+                  </SelectLabel>
+                  {availableLabels.map((name) => (
+                    <SelectItem key={name} value={`label:${name}`} textValue={name}>
+                      <MenuAction label={name} checked={appliedLabels.includes(name)} disabled={busy} />
+                    </SelectItem>
+                  ))}
+                  <SelectItem value="labels-clear" textValue="Clear all labels">
+                    <MenuAction label="Clear all labels" disabled={busy || appliedLabels.length === 0} />
+                  </SelectItem>
+                </>
+              )}
               {!archived && (
-                <SelectItem value="archive" textValue="Archive">
-                  <MenuAction label="Archive" disabled={busy} />
+                <SelectItem value="archive" textValue={archiving ? 'Archiving…' : 'Archive'}>
+                  <MenuAction label={archiving ? 'Archiving…' : 'Archive'} tone="danger" disabled={busy} />
                 </SelectItem>
               )}
             </OverflowMenu>
@@ -692,8 +779,18 @@ function MetaTrailingView({ trailing }: { trailing: WorkspaceMetaTrailing }) {
   )
 }
 
-/** One row-action menu entry; danger rows carry their own tone. */
-function MenuAction({ label, tone, disabled }: { label: string; tone?: 'danger'; disabled?: boolean }) {
+/** One row-action menu entry; danger rows carry their own tone, checked rows show a check. */
+function MenuAction({
+  label,
+  tone,
+  disabled,
+  checked,
+}: {
+  label: string
+  tone?: 'danger'
+  disabled?: boolean
+  checked?: boolean
+}) {
   return (
     <div
       style={{
@@ -710,9 +807,10 @@ function MenuAction({ label, tone, disabled }: { label: string; tone?: 'danger';
         hover: disabled ? undefined : { backgroundColor: '#404040' },
       }}
     >
-      <text style={{ fontSize: 12.5, fontWeight: 500, color: tone === 'danger' ? C.danger : C.text }}>
+      <text style={{ fontSize: 12.5, fontWeight: 500, color: tone === 'danger' ? C.danger : C.text, flexGrow: 1 }}>
         {label}
       </text>
+      {checked && <Icon name="check" size={11} color={C.secondary} />}
     </div>
   )
 }
@@ -898,6 +996,11 @@ export function Sidebar({
   busyRows,
   onArchive,
   onRename,
+  onCopy,
+  onMarkRead,
+  onPin,
+  onToggleLabel,
+  onClearLabels,
   appStore,
   navState,
   onNavBack,
@@ -920,6 +1023,11 @@ export function Sidebar({
   busyRows: RowActionRef[]
   onArchive: (id: string) => void
   onRename: (id: string, name: string) => void
+  onCopy: (value: string) => void
+  onMarkRead: (id: string) => void
+  onPin: (id: string, pinned: boolean) => void
+  onToggleLabel: (id: string, name: string, applied: boolean) => void
+  onClearLabels: (id: string) => void
   /** Persisted app state; the sidebar's view choices survive a restart. */
   appStore: AppStore
   /** The visited-agent history's edges, driving the nav arrows' enablement. */
@@ -939,6 +1047,12 @@ export function Sidebar({
   const [collapsedProjects, setCollapsedProjects] = useState<ReadonlySet<string>>(new Set())
   const ARCHIVED_GROUP_ID = '__archived__'
   const groups = useMemo(() => workspaceProjectGroups(workspaces, showArchived), [workspaces, showArchived])
+  // The labels submenu lists the union of labels on every visible workspace;
+  // the checked states are the selected descriptor's own labels.
+  const availableLabels = useMemo(
+    () => workspaceLabels(visibleWorkspaces(workspaces.workspaces, showArchived)),
+    [workspaces, showArchived],
+  )
   const archived = useMemo(
     () => (revealArchivedAgents ? sortAgents(agents.filter(isArchived)) : []),
     [agents, revealArchivedAgents],
@@ -1035,17 +1149,27 @@ export function Sidebar({
                 pill={aggregate && <AggregateStatusPill aggregate={aggregate} />}
               />
               {!collapsed &&
-                group.workspaces.map((descriptor) => (
-                  <WorkspaceRow
-                    key={descriptor.id}
-                    descriptor={descriptor}
-                    active={descriptor.id === activeWorkspaceId}
-                    busy={busyRows.some((row) => row.id === descriptor.id)}
-                    onSelect={onSelect}
-                    onRename={onRename}
-                    onArchive={onArchive}
-                  />
-                ))}
+                group.workspaces.map((descriptor) => {
+                  const rowBusy = busyRows.find((row) => row.id === descriptor.id) ?? null
+                  return (
+                    <WorkspaceRow
+                      key={descriptor.id}
+                      descriptor={descriptor}
+                      active={descriptor.id === activeWorkspaceId}
+                      busy={rowBusy != null}
+                      busyVerb={rowBusy?.verb ?? null}
+                      availableLabels={availableLabels}
+                      onSelect={onSelect}
+                      onRename={onRename}
+                      onArchive={onArchive}
+                      onCopy={onCopy}
+                      onMarkRead={onMarkRead}
+                      onPin={onPin}
+                      onToggleLabel={onToggleLabel}
+                      onClearLabels={onClearLabels}
+                    />
+                  )
+                })}
             </div>
           )
         })}

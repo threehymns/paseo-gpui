@@ -68,7 +68,16 @@ import {
   type PastePayload,
 } from './composer/attachments'
 import { C, CONTENT_MAX_WIDTH, SIDEBAR_WIDTH } from './chrome/theme'
-import { Sidebar, Header, CenterMessage, agentStatusColor, daemonHost, type RowActionRef, type RowActionVerb } from './chrome/chrome'
+import { workspaceMutations } from './agent-directory/workspace-mutations'
+import {
+  Sidebar,
+  Header,
+  CenterMessage,
+  agentStatusColor,
+  daemonHost,
+  type RowActionRef,
+  type RowActionVerb,
+} from './chrome/chrome'
 import { Transcript } from './conversation/transcript'
 import { FeatureToggles, ModelPicker, OptionPicker, modeOptions, thinkingOptions } from './composer/pickers'
 import { Composer, ConfigNotice, FooterBar, TracksRow } from './composer/composer'
@@ -359,6 +368,29 @@ export function ChatApp() {
   const archiveWorkspaceRow = (id: string) => runRowAction('archive', id, () => daemon.archiveWorkspace(id))
   const renameWorkspaceRow = (id: string, name: string) =>
     runRowAction('rename', id, () => daemon.setWorkspaceTitle(id, name))
+  // The pin/labels/mark-as-read mutations go through the wrapper: labels earn
+  // their keep shaping the label+colour payload, the rest ride along for one
+  // narrow client seam instead of five ad-hoc daemon call sites.
+  const mutations = workspaceMutations(daemon)
+  const pinWorkspaceRow = (id: string, pinned: boolean) =>
+    runRowAction('pin', id, () => mutations.setPinned(id, pinned))
+  const markWorkspaceRead = (id: string) =>
+    runRowAction('mark-read', id, () => mutations.clearAttention(id))
+  const toggleWorkspaceLabel = (id: string, name: string, applied: boolean) =>
+    runRowAction('labels', id, () => mutations.toggleLabel(id, name, applied))
+  const clearWorkspaceLabels = (id: string) => {
+    const descriptor = workspaces.workspaces.find((candidate) => candidate.id === id)
+    const applied = descriptor?.labels ?? []
+    if (applied.length === 0) return
+    runRowAction('labels', id, () => mutations.clearLabels(id, applied))
+  }
+  // Copy is a synchronous clipboard write, not a daemon call; it needs no
+  // in-flight row and the menu computes its value from the descriptor it owns.
+  const copyWorkspaceValue = (value: string) => {
+    const clipboard = (navigator as { clipboard?: { writeText?: (text: string) => Promise<void> } }).clipboard
+    if (!clipboard?.writeText) return
+    clipboard.writeText(value).catch(() => {})
+  }
 
   // Agent lifecycle (archive, delete, rename): the promises drive the
   // in-flight disabling; the directory itself is only ever written by the
@@ -955,6 +987,11 @@ const listRef = useRef<{ id: number } | null>(null)
           busyRows={busyRows}
           onArchive={archiveWorkspaceRow}
           onRename={renameWorkspaceRow}
+          onCopy={copyWorkspaceValue}
+          onMarkRead={markWorkspaceRead}
+          onPin={pinWorkspaceRow}
+          onToggleLabel={toggleWorkspaceLabel}
+          onClearLabels={clearWorkspaceLabels}
           appStore={store}
           navState={navState}
           onNavBack={() => nav(-1)}
