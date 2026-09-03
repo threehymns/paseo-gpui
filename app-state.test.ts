@@ -11,7 +11,9 @@ import {
   showArchivedWorkspaces,
   workspaceFilters,
   workspaceMetaConfig,
+  workspacePanes,
 } from './app-state'
+import type { PaneLayout } from './layout/layout'
 
 describe('app-state store', () => {
   test('first run yields defaults when nothing is stored', () => {
@@ -79,6 +81,123 @@ describe('app-state store', () => {
     const store = createAppStore(stale)
     expect(store.get(workspaceMetaConfig)).toEqual(workspaceMetaConfig.fallback)
     expect(store.get(workspaceFilters)).toEqual(workspaceFilters.fallback)
+  })
+})
+
+describe('pane layout persistence', () => {
+  const wsKey = (host: string, ws: string) => `${host}::${ws}`
+
+  test('defaults to an empty map on first run', () => {
+    const store = createAppStore(memoryStorage())
+    expect(store.get(workspacePanes)).toEqual({})
+  })
+
+  test('a pane layout persists and reads back its full shape', () => {
+    const storage = memoryStorage()
+    const layout: PaneLayout = {
+      root: {
+        kind: 'group',
+        id: 'g0',
+        direction: 'horizontal',
+        children: [
+          { kind: 'leaf', id: 'p0', tabIds: ['t0', 't1'], focusedTabId: 't1' },
+          { kind: 'leaf', id: 'p1', tabIds: ['t2'], focusedTabId: 't2' },
+        ],
+        sizes: [0.6, 0.4],
+      },
+      activePaneId: 'p1',
+    }
+    const store = createAppStore(storage)
+    store.set(workspacePanes, { [wsKey('devbox', 'ws1')]: layout })
+    const reopened = createAppStore(storage)
+    expect(reopened.get(workspacePanes)).toEqual({ [wsKey('devbox', 'ws1')]: layout })
+  })
+
+  test('layouts keyed by host+workspace are stored independently', () => {
+    const storage = memoryStorage()
+    const store = createAppStore(storage)
+    const a: PaneLayout = { root: { kind: 'leaf', id: 'p0', tabIds: ['t0'], focusedTabId: 't0' }, activePaneId: 'p0' }
+    const b: PaneLayout = {
+      root: {
+        kind: 'group',
+        id: 'g0',
+        direction: 'vertical',
+        children: [
+          { kind: 'leaf', id: 'p0', tabIds: ['t5'], focusedTabId: 't5' },
+          { kind: 'leaf', id: 'p1', tabIds: ['t6'], focusedTabId: 't6' },
+        ],
+        sizes: [0.5, 0.5],
+      },
+      activePaneId: 'p1',
+    }
+    store.set(workspacePanes, {
+      [wsKey('devbox', 'ws1')]: a,
+      [wsKey('devbox', 'ws2')]: b,
+      [wsKey('prod', 'ws1')]: b,
+    })
+    const reopened = createAppStore(storage)
+    const map = reopened.get(workspacePanes)
+    expect(map[wsKey('devbox', 'ws1')]).toEqual(a)
+    expect(map[wsKey('devbox', 'ws2')]).toEqual(b)
+    expect(map[wsKey('prod', 'ws1')]).toEqual(b)
+  })
+
+  test('a stale or malformed layout falls back to the empty map', () => {
+    const stale = {
+      readAll: () => ({
+        'layout.panes': {
+          'devbox::ws1': { root: { kind: 'leaf', id: 'p0', tabIds: [1], focusedTabId: 't0' }, activePaneId: 'nope' },
+        },
+      }),
+      writeAll: () => {},
+    }
+    const store = createAppStore(stale)
+    expect(store.get(workspacePanes)).toEqual({})
+  })
+
+  test('a group is rejected when its sizes do not match its children', () => {
+    const stale = {
+      readAll: () => ({
+        'layout.panes': {
+          'devbox::ws1': {
+            root: {
+              kind: 'group',
+              id: 'g0',
+              direction: 'horizontal',
+              children: [
+                { kind: 'leaf', id: 'p0', tabIds: [], focusedTabId: null },
+                { kind: 'leaf', id: 'p1', tabIds: [], focusedTabId: null },
+              ],
+              sizes: [0.5],
+            },
+            activePaneId: 'p0',
+          },
+        },
+      }),
+      writeAll: () => {},
+    }
+    const store = createAppStore(stale)
+    expect(store.get(workspacePanes)).toEqual({})
+  })
+
+  test('persisted layouts survive a restart over a shared in-memory storage', () => {
+    const storage = memoryStorage()
+    const layout: PaneLayout = {
+      root: {
+        kind: 'group',
+        id: 'g0',
+        direction: 'horizontal',
+        children: [
+          { kind: 'leaf', id: 'p0', tabIds: ['t0'], focusedTabId: 't0' },
+          { kind: 'leaf', id: 'p1', tabIds: ['t1'], focusedTabId: 't1' },
+        ],
+        sizes: [0.5, 0.5],
+      },
+      activePaneId: 'p0',
+    }
+    createAppStore(storage).set(workspacePanes, { [wsKey('devbox', 'ws1')]: layout })
+    const reopened = createAppStore(storage)
+    expect(reopened.get(workspacePanes)[wsKey('devbox', 'ws1')]).toEqual(layout)
   })
 })
 

@@ -15,6 +15,7 @@ import path from 'node:path'
 import { useEffect, useState } from 'react'
 import { DEFAULT_META_CONFIG, type WorkspaceMetaConfig } from './agent-directory/workspace-meta'
 import { EMPTY_FILTERS, type WorkspaceFilters } from './agent-directory/display-preferences'
+import { validatePaneLayout, type PaneLayout } from './layout/layout'
 
 export interface StateKey<T> {
   /** Stable name in storage; change it when the value's shape changes. */
@@ -205,6 +206,31 @@ export const workspaceFilters: StateKey<WorkspaceFilters> = {
     const labels = stringArray(value.labels)
     if (!hosts || !projects || !labels) return undefined
     return { hosts, projects, labels }
+  },
+}
+
+// ---- pane layouts -----------------------------------------------------------
+
+/**
+ * Persisted pane-tree layout per host+workspace. The value is a map keyed by
+ * `${host}::${workspaceId}` to a non-null PaneLayout (the default single-pane
+ * layout is never persisted). Deep-validated and JSON-roundtrip-safe (plain
+ * objects/arrays/strings/numbers — no Maps or Sets). Change the key name if
+ * the layout shape ever changes.
+ */
+export const workspacePanes: StateKey<Record<string, PaneLayout>> = {
+  name: 'layout.panes',
+  fallback: {},
+  validate: (raw) => {
+    if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+    const record = raw as Record<string, unknown>
+    const out: Record<string, PaneLayout> = {}
+    for (const [key, value] of Object.entries(record)) {
+      const parsed = validatePaneLayout(value)
+      if (!parsed) return undefined // any stale entry poisons the whole map
+      out[key] = parsed
+    }
+    return out
   },
 }
 
