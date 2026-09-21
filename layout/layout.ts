@@ -338,6 +338,17 @@ export function reduceLayout(state: PaneLayoutState, event: PaneEvent): PaneLayo
       if (!pane) return current
       const root = cloneNode(current.root)
       const target = event.paneId ? findPane(root, event.paneId)! : findPane(root, pane.id)!
+      // Single-home the tab: pull it out of every other pane first so it can
+      // never render in two pane strips at once.
+      for (const other of paneLeaves(root)) {
+        if (other.id === target.id) continue
+        const idx = other.tabIds.indexOf(event.tabId)
+        if (idx < 0) continue
+        other.tabIds.splice(idx, 1)
+        if (other.focusedTabId === event.tabId) {
+          other.focusedTabId = other.tabIds[Math.min(idx, other.tabIds.length - 1)] ?? null
+        }
+      }
       if (!target.tabIds.includes(event.tabId)) target.tabIds.push(event.tabId)
       target.focusedTabId = event.tabId
       return { root, activePaneId: target.id }

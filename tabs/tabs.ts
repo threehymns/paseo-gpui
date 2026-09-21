@@ -127,17 +127,45 @@ export function reduceTabs(state: TabsState, event: TabsEvent): TabsState {
       return initialTabs
 
     case 'openWorkspace': {
-      // Newest agent tab first, so the workspace opens onto its most recent
-      // work; existing agent tabs are reused in place (no duplication), and a
-      // trailing draft tab always offers a way to start something new.
+      // Replaces the strip with this workspace's tabs: agent tabs for its
+      // agents (newest first), then a trailing draft seeded to its directory.
+      // Tabs for the workspace's agents are reused in place so background
+      // panels stay mounted; everything else from the previous workspace is
+      // dropped. Setup tabs for in-flight bootstraps are preserved.
       const agents = [...event.agents].sort((a, b) => b.createdAt - a.createdAt)
-      let next = state
-      for (const agent of agents) next = upsertAgentTab(next, agent.id, agent.createdAt)
-      if (next.tabs.some((tab) => tab.target === 'draft')) {
-        return { ...next, activeTabId: next.tabs[0]?.id ?? next.activeTabId }
+      const existingByAgent = new Map<string, TabDescriptor>()
+      for (const tab of state.tabs) {
+        if (tab.target === 'agent' && 'agentId' in tab.state && !existingByAgent.has(tab.state.agentId)) {
+          existingByAgent.set(tab.state.agentId, tab)
+        }
       }
-      next = appendDraft(next, event.cwd, event.now)
-      return { ...next, activeTabId: next.tabs[0]?.id ?? next.activeTabId }
+      let seq = state.seq
+      const tabs: TabDescriptor[] = []
+      const seen = new Set<string>()
+      for (const agent of agents) {
+        if (seen.has(agent.id)) continue
+        seen.add(agent.id)
+        const existing = existingByAgent.get(agent.id)
+        if (existing) {
+          tabs.push({ ...existing, createdAt: agent.createdAt })
+        } else {
+          tabs.push({ id: `t${seq++}`, target: 'agent', createdAt: agent.createdAt, state: { agentId: agent.id } })
+        }
+      }
+      const existingDraft = state.tabs.find((tab) => tab.target === 'draft')
+      if (existingDraft && 'cwd' in existingDraft.state) {
+        tabs.push(
+          existingDraft.state.cwd === event.cwd
+            ? existingDraft
+            : { ...existingDraft, createdAt: event.now, state: { ...existingDraft.state, cwd: event.cwd } },
+        )
+      } else {
+        tabs.push({ id: `t${seq++}`, target: 'draft', createdAt: event.now, state: { cwd: event.cwd, worktree: 'local' } })
+      }
+      for (const tab of state.tabs) {
+        if (tab.target === 'setup') tabs.push(tab)
+      }
+      return { tabs, activeTabId: tabs[0]?.id ?? null, seq }
     }
 
     case 'openAgent': {

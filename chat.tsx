@@ -571,6 +571,12 @@ export function ChatApp() {
       cwd: workspaceDirectory(descriptor),
       now: Date.now(),
     })
+    // Opening a workspace records a visit on its most recent agent so the
+    // chrome's back/forward arrows can return to it. History only: the strip
+    // above already focuses that agent, and going through visit() would
+    // re-dispatch tabs from the pre-open strip and clobber it.
+    const mostRecent = mostRecentAgent(workspaceAgents)
+    if (mostRecent) setVisitHistory((prev) => visitAgent(prev, mostRecent.id))
   }
   // Jump + prev/next shortcuts over the sidebar's visible rows. The walk order
   // arrives via visibleRowsRef (reported by the Sidebar itself); opening the
