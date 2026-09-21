@@ -159,6 +159,15 @@ lands — and hidden entirely when no usable usage exists. Its fraction,
 threshold tone, and hover lines come from one pure projection.
 _Avoid_: token counter, usage widget
 
+**Setup tab**:
+A tab showing a new **worktree**'s bootstrap commands as they run — checkout,
+install, env — streamed from the daemon's `workspace_setup_progress` push,
+keyed by workspace. It opens when a worktree agent is created and hands off to
+that agent's conversation once setup succeeds, collapsing behind it to a
+summary chip that still holds the log; on failure the error and failing output
+stay visible inline. Non-worktree agents never get one.
+_Avoid_: bootstrap screen, install log
+
 **Tracks row**:
 A compact row above the composer surfacing live work as pills, each folded
 from the transcript's turns. The **Tasks pill** summarizes the latest todo

@@ -13,6 +13,9 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { useEffect, useState } from 'react'
+import { DEFAULT_META_CONFIG, type WorkspaceMetaConfig } from './agent-directory/workspace-meta'
+import { EMPTY_FILTERS, type WorkspaceFilters } from './agent-directory/display-preferences'
+import { validatePaneLayout, type PaneLayout } from './layout/layout'
 
 export interface StateKey<T> {
   /** Stable name in storage; change it when the value's shape changes. */
@@ -138,6 +141,97 @@ export const showArchivedAgents: StateKey<boolean> = {
   name: 'directory.showArchivedAgents',
   fallback: false,
   validate: (raw) => (typeof raw === 'boolean' ? raw : undefined),
+}
+
+// ---- workspace display preferences ------------------------------------------
+
+const META_SLOT_KINDS = ['branch', 'project', 'host', 'pullRequest', 'services', 'labels'] as const
+const CHECKS_MODES = ['iconText', 'iconOnly', 'hidden'] as const
+const TRAILING_SLOTS = ['diffStat', 'activity'] as const
+const TITLE_SOURCES = ['title', 'branch'] as const
+
+function isBooleanMap(raw: unknown, keys: readonly string[]): raw is Record<string, boolean> {
+  if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) return false
+  const record = raw as Record<string, unknown>
+  return keys.every((key) => typeof record[key] === 'boolean')
+}
+
+function stringArray(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  return raw.every((item) => typeof item === 'string') ? (raw as string[]) : undefined
+}
+
+/**
+ * The whole meta-line configuration — slot toggles, checks mode, trailing
+ * slot, title source — persisted as one value whose shape all live alongside
+ * the module default. Change the shape and the name must change too.
+ */
+export const workspaceMetaConfig: StateKey<WorkspaceMetaConfig> = {
+  name: 'workspace.meta',
+  fallback: DEFAULT_META_CONFIG,
+  validate: (raw) => {
+    if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+    const value = raw as Record<string, unknown>
+    const slots = value.slots
+    if (!isBooleanMap(slots, META_SLOT_KINDS)) return undefined
+    const checks = CHECKS_MODES.find((mode) => mode === value.checksMode)
+    const trailing = TRAILING_SLOTS.find((mode) => mode === value.trailing)
+    const titleSource = TITLE_SOURCES.find((mode) => mode === value.titleSource)
+    if (!checks || !trailing || !titleSource) return undefined
+    return {
+      slots: {
+        branch: slots.branch,
+        project: slots.project,
+        host: slots.host,
+        pullRequest: slots.pullRequest,
+        services: slots.services,
+        labels: slots.labels,
+      },
+      checksMode: checks,
+      trailing,
+      titleSource,
+    }
+  },
+}
+
+/** The sidebar's active filters; an empty-list dimension means no filtering. */
+export const workspaceFilters: StateKey<WorkspaceFilters> = {
+  name: 'workspace.filters',
+  fallback: EMPTY_FILTERS,
+  validate: (raw) => {
+    if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+    const value = raw as Record<string, unknown>
+    const hosts = stringArray(value.hosts)
+    const projects = stringArray(value.projects)
+    const labels = stringArray(value.labels)
+    if (!hosts || !projects || !labels) return undefined
+    return { hosts, projects, labels }
+  },
+}
+
+// ---- pane layouts -----------------------------------------------------------
+
+/**
+ * Persisted pane-tree layout per host+workspace. The value is a map keyed by
+ * `${host}::${workspaceId}` to a non-null PaneLayout (the default single-pane
+ * layout is never persisted). Deep-validated and JSON-roundtrip-safe (plain
+ * objects/arrays/strings/numbers — no Maps or Sets). Change the key name if
+ * the layout shape ever changes.
+ */
+export const workspacePanes: StateKey<Record<string, PaneLayout>> = {
+  name: 'layout.panes',
+  fallback: {},
+  validate: (raw) => {
+    if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+    const record = raw as Record<string, unknown>
+    const out: Record<string, PaneLayout> = {}
+    for (const [key, value] of Object.entries(record)) {
+      const parsed = validatePaneLayout(value)
+      if (!parsed) return undefined // any stale entry poisons the whole map
+      out[key] = parsed
+    }
+    return out
+  },
 }
 
 // ---- React adapter ----------------------------------------------------------
