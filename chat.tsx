@@ -318,6 +318,7 @@ export function ChatApp() {
   const [tabsState, setTabsState] = useState(initialTabs)
   const dispatchTabs = (event: TabsEvent) => setTabsState((prev) => reduceTabs(prev, event))
   const tabs = selectTabs(tabsState)
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null)
   // Pane layout: null = the single-pane default (non-persisted); a split tree
   // otherwise. The tree references the same tabIds the #46 reducer owns.
   const [layoutState, setLayoutState] = useState<PaneLayoutState>(null)
@@ -380,7 +381,6 @@ export function ChatApp() {
     openAgentTab(next.stack[next.index]!)
   }
   const navState = { canBack: canGoBack(visitHistory), canForward: canGoForward(visitHistory) }
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState(false)
   const [draft, setDraft] = useState('')
   const [draftImages, setDraftImages] = useState<ImageAttachment[]>([])

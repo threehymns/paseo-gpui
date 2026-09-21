@@ -112,10 +112,14 @@ export function SetupTabPanel({ workspaceId, snapshot, refresh, hidden }: SetupT
               flexDirection: 'row',
               alignItems: 'center',
               gap: 8,
-              padding: '6px 10px',
+              paddingTop: 6,
+              paddingBottom: 6,
+              paddingLeft: 10,
+              paddingRight: 10,
               borderRadius: 6,
               backgroundColor: C.raised,
-              border: `1px solid ${C.border}`,
+              borderWidth: 1,
+              borderColor: C.border,
               cursor: 'default',
             }}
           >

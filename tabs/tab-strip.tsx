@@ -70,12 +70,20 @@ function StripTab({
         paddingLeft: 12,
         paddingRight: 8,
         maxWidth: 200,
+        minWidth: 0,
+        // Tabs never squeeze: the strip scrolls instead. (Squeezing crushed
+        // labels, since an ellipsizing label needs its own width to shrink
+        // into — see the text style below.)
+        flexShrink: 0,
         cursor: 'default',
         userSelect: 'none',
         backgroundColor: active ? C.raised : 'transparent',
-        boxShadow: active ? `inset 0 1px 0 ${C.borderStrong}` : undefined,
+        // No inset-shadow support in the native BoxShadow struct, so the active
+        // tab's top hairline is a top border instead.
+        ...(active ? { borderTopWidth: 1, borderTopColor: C.borderStrong } : {}),
         color: active ? C.text : C.secondary,
-        borderRight: `1px solid ${C.border}`,
+        borderRightWidth: 1,
+        borderRightColor: C.border,
       }}
     >
       {dotColor && (
@@ -86,13 +94,16 @@ function StripTab({
             flexShrink: 0,
             borderRadius: 3,
             backgroundColor: dotColor,
-            ...(attention ? { boxShadow: `0 0 6px ${dotColor}` } : {}),
+            ...(attention ? { boxShadow: { offsetX: 0, offsetY: 0, blurRadius: 6, spreadRadius: 0, color: dotColor } } : {}),
           }}
         />
       )}
       <text
         style={{
-          flexShrink: 0,
+          // Must shrink for ellipsis to engage: with flexShrink 0 the label
+          // overflowed the 200px tab and crushed sibling tabs instead.
+          flexShrink: 1,
+          minWidth: 0,
           fontSize: 12,
           fontWeight: active ? 600 : 500,
           lineHeight: 16,
@@ -105,12 +116,14 @@ function StripTab({
       </text>
       <div
         testId={`tab-close-${tab.id}`}
-        onClick={(e: React.MouseEvent) => {
-          e.stopPropagation()
-          onClose()
-        }}
+        onClick={() => onClose()}
         style={{
-          display: show ? 'flex' : 'none',
+          // Space is always reserved; only opacity/hits toggle. Mounting the
+          // button on hover shifted the label, the same jump just fixed in
+          // the sidebar's hover menu.
+          opacity: show ? 1 : 0,
+          pointerEvents: show ? 'auto' : 'none',
+          display: 'flex',
           width: 16,
           height: 16,
           alignItems: 'center',
@@ -151,7 +164,8 @@ export function TabStrip({
         overflowX: 'auto',
         overflowY: 'hidden',
         backgroundColor: C.composer,
-        borderBottom: `1px solid ${C.border}`,
+        borderBottomWidth: 1,
+        borderBottomColor: C.border,
         paddingLeft: TRAFFIC_LIGHT_CLEARANCE + 2,
       }}
     >
@@ -188,7 +202,8 @@ export function TabStrip({
           height: '100%',
           flexShrink: 0,
           color: C.secondary,
-          borderRight: `1px solid ${C.border}`,
+          borderRightWidth: 1,
+          borderRightColor: C.border,
         }}
       >
         <Icon name="compose" size={14} color={C.secondary} />
@@ -210,7 +225,7 @@ export function TabStrip({
             height: '100%',
             flexShrink: 0,
             backgroundColor: state.open ? C.overlay : 'transparent',
-            border: 'none',
+            borderWidth: 0,
             cursor: 'default',
           })}
         >

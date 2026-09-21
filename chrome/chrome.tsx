@@ -6,7 +6,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Select, SelectContent, SelectItem, SelectLabel, SelectSeparator, SelectTrigger } from '@gpuix/react'
 import {
   DAEMON_URL,
@@ -675,6 +675,15 @@ function WorkspaceRow({
   const [hover, setHover] = useState(false)
   const [renaming, setRenaming] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
+  // Last trigger-press time on the hover menu. A press there also reaches this
+  // row's onClick (ancestor delivery, no stopPropagation), so a row-select
+  // landing just after a trigger press is that press, not a row press.
+  const menuPressAt = useRef(0)
+  // Hover intent behind the tail menu: the trigger stays mounted while the
+  // row is hovered or its menu is open, so traveling to the menu never
+  // unmounts it mid-gesture.
+  const [menuOpen, setMenuOpen] = useState(false)
+  const showMenu = hover || menuOpen
   const archived = isArchivedWorkspace(descriptor)
   const pinned = descriptor.pinnedAt != null
   const branch = workspaceBranchName(descriptor)
@@ -755,6 +764,7 @@ function WorkspaceRow({
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       onClick={() => {
+        if (Date.now() - menuPressAt.current < 250) return
         if (!renaming) onSelect(descriptor.id)
       }}
     >
@@ -782,7 +792,7 @@ function WorkspaceRow({
           }}
         />
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+        <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 6, position: 'relative' }}>
           <StatusDot color={workspaceStatusColor(descriptor.status)} />
           <text
             style={{
@@ -802,8 +812,27 @@ function WorkspaceRow({
               {pending}
             </text>
           )}
-          {hover ? (
-            <OverflowMenu testId="workspace-row-menu" side="right" onAction={runAction}>
+          {workspaceActivityAt(descriptor) > 0 && (
+            <text style={{ fontSize: 12.5, color: C.ghost, flexShrink: 0 }}>
+              {relativeTimeAt(workspaceActivityAt(descriptor))}
+            </text>
+          )}
+          {showMenu && (
+            // pointerEvents none: an absolutely positioned box otherwise
+            // occludes the row behind it (gpuix maps it to a blocking
+            // hitbox), which unhovers the row and mount/unmount-loops the
+            // trigger. Children keep their own hitboxes, so the trigger
+            // stays clickable.
+            <div style={{ position: 'absolute', right: 0, top: -1, pointerEvents: 'none' }}>
+              <OverflowMenu
+                testId="workspace-row-menu"
+                side="right"
+                onAction={runAction}
+                onTriggerPress={() => {
+                  menuPressAt.current = Date.now()
+                }}
+                onOpenChange={setMenuOpen}
+              >
               <SelectItem value="copy-path" textValue="Copy path">
                 <MenuAction label="Copy path" disabled={busy || !workspaceDirectory(descriptor)} />
               </SelectItem>
@@ -848,12 +877,9 @@ function WorkspaceRow({
                   <MenuAction label={archiving ? 'Archiving…' : 'Archive'} tone="danger" disabled={busy} />
                 </SelectItem>
               )}
-            </OverflowMenu>
-          ) : workspaceActivityAt(descriptor) > 0 ? (
-            <text style={{ fontSize: 12.5, color: C.ghost, flexShrink: 0 }}>
-              {relativeTimeAt(workspaceActivityAt(descriptor))}
-            </text>
-          ) : null}
+              </OverflowMenu>
+            </div>
+          )}
         </div>
       )}
       {(meta.items.length > 0 || meta.checks || meta.trailing) && (
@@ -1068,18 +1094,30 @@ function OverflowMenu({
   side,
   align,
   onAction,
+  onTriggerPress,
+  onOpenChange,
   children,
 }: {
   testId: string
   side: 'top' | 'right' | 'bottom' | 'left'
   align?: 'start' | 'center' | 'end'
   onAction: (value: string) => void
+  /**
+   * Fires on the trigger's mouse-down — strictly before any click in the same
+   * gesture — so an ancestor row can tell a menu press apart from a row press.
+   * GPUI delivers the click to ancestors too, and there is no
+   * stopPropagation on EventPayload.
+   */
+  onTriggerPress?: () => void
+  /** Reports the Select's open state; lets an owner pin the trigger while open. */
+  onOpenChange?: (open: boolean) => void
   children: React.ReactNode
 }) {
   return (
-    <Select value="" onValueChange={onAction}>
+    <Select value="" onValueChange={onAction} onOpenChange={onOpenChange}>
       <SelectTrigger
         testId={testId}
+        onMouseDown={() => onTriggerPress?.()}
         style={(state) => ({
           display: 'flex',
           alignItems: 'center',
@@ -1090,6 +1128,7 @@ function OverflowMenu({
           borderRadius: 5,
           cursor: 'pointer',
           backgroundColor: state.open ? C.overlayStrong : '#00000000',
+          hover: { backgroundColor: state.open ? C.overlayStrong : C.overlay },
         })}
       >
         <Icon name="ellipsis" size={14} color={C.secondary} />
